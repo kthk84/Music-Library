@@ -349,6 +349,11 @@ def _search_queries(artist: str, title: str) -> List[str]:
                 _add(f"{t} {norm_artist}")
         if len(t.split()) >= 3:
             _add(t)
+        # Core title (strip all parens) often matches Soundeo display/slug better
+        core_title = _strip_all_parens(t)
+        if core_title and core_title.lower() != t.lower():
+            _add(f"{a} {core_title}")
+            _add(f"{core_title} {a}")
     elif a:
         _add(a)
     elif t:
@@ -361,6 +366,15 @@ def _strip_parens_suffix(s: str) -> str:
     if not s or not isinstance(s, str):
         return s
     return re.sub(r'\s*\([^)]*\)\s*$', '', s).strip()
+
+
+def _strip_all_parens(s: str) -> str:
+    """Remove every (...) and [...] from the string and collapse spaces. For title normalization."""
+    if not s or not isinstance(s, str):
+        return s
+    s = re.sub(r'\s*\([^)]*\)\s*', ' ', s)
+    s = re.sub(r'\s*\[[^\]]*\]\s*', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
 
 
 def _best_match_score(track: Dict, link_text: str, target_artist: str, target_title: str) -> float:
@@ -395,6 +409,26 @@ def _best_match_score(track: Dict, link_text: str, target_artist: str, target_ti
 
     artist_score = similarity_score(t_artist, r_artist) if t_artist and r_artist else 0.0
     title_score = similarity_score(t_title, r_title) if t_title else 0.0
+    # Also compare normalized titles (strip all parens) so "You Got Worked (feat. X) (Stripped Remix)" matches "You Got Worked (Stripped Remix)"
+    t_core = _strip_all_parens(t_title) if t_title else ""
+    r_core = _strip_all_parens(r_title) if r_title else ""
+    if t_core and r_core:
+        title_score = max(title_score, similarity_score(t_core, r_core))
+    # If target core title's words all appear in result text, treat as strong match (result often has extra "feat. X" etc.)
+    if t_core:
+        def _norm(w: str) -> str:
+            w = (w or "").strip()
+            while w and w[-1] in ".,;:&()[]":
+                w = w[:-1].strip()
+            while w and w[0] in ".,;:&()[]":
+                w = w[1:].strip()
+            return w
+        t_words = set(_norm(w) for w in t_core.split() if _norm(w))
+        if t_words:
+            result_text = (r_core or text_lower)
+            result_words = set(_norm(w) for w in result_text.split() if _norm(w))
+            if t_words <= result_words:
+                title_score = max(title_score, 0.75)
 
     if not t_artist:
         artist_score = title_score * 0.3
@@ -405,6 +439,10 @@ def _best_match_score(track: Dict, link_text: str, target_artist: str, target_ti
 
     whole_artist = similarity_score(t_artist, text_lower) if t_artist else 0.0
     whole_title = similarity_score(t_title, text_lower) if t_title else 0.0
+    if t_title:
+        t_core = _strip_all_parens(t_title)
+        if t_core:
+            whole_title = max(whole_title, similarity_score(t_core, text_lower))
     split_score = artist_score * 0.4 + title_score * 0.6
     whole_score = whole_artist * 0.4 + whole_title * 0.6
 
