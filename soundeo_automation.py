@@ -308,22 +308,59 @@ def _graceful_quit(driver) -> None:
         pass
 
 
+def _artist_tokens_for_search(artist: str) -> List[str]:
+    """Split artist on & , feat. etc, strip parens, return sorted tokens (min 2 chars).
+    Used to build search queries that match Soundeo's indexing (e.g. Khainz, Mariz, KASIA)."""
+    if not artist or not isinstance(artist, str):
+        return []
+    s = re.sub(r'\s*\([^)]*\)\s*', ' ', artist)  # strip (ofc), (feat. X) etc
+    tokens = re.split(r"\s*[&,]\s*|\s+feat\.?\s+", s, flags=re.I)
+    tokens = [t.strip() for t in tokens if t and len(t.strip()) >= 2]
+    return sorted(set(tokens))
+
+
 def _search_queries(artist: str, title: str) -> List[str]:
     """Generate search query variants.
 
     Only combined artist+title queries; partial (artist-only / title-only)
     queries cause too many false matches (e.g. matching a random popular
     track that shares one word).
+
+    Adds artist-order-normalized variants so "KASIA, Khainz & Mariz" can
+    match Soundeo results like "Khainz, Mariz, KASIA (ofc) - Stop Go".
     """
     a, t = (artist or "").strip(), (title or "").strip()
+    seen = set()
     queries = []
+
+    def _add(q: str) -> None:
+        if q and q not in seen:
+            seen.add(q)
+            queries.append(q)
+
     if a and t:
-        queries.extend([f"{a} {t}", f"{t} {a}"])
+        _add(f"{a} {t}")
+        _add(f"{t} {a}")
+        tokens = _artist_tokens_for_search(a)
+        if tokens:
+            norm_artist = " ".join(tokens)
+            if norm_artist.lower() != a.lower():
+                _add(f"{norm_artist} {t}")
+                _add(f"{t} {norm_artist}")
+        if len(t.split()) >= 3:
+            _add(t)
     elif a:
-        queries.append(a)
+        _add(a)
     elif t:
-        queries.append(t)
-    return [q for q in queries if q]
+        _add(t)
+    return queries
+
+
+def _strip_parens_suffix(s: str) -> str:
+    """Remove trailing (Mix), (ofc), (feat. X) etc for cleaner matching."""
+    if not s or not isinstance(s, str):
+        return s
+    return re.sub(r'\s*\([^)]*\)\s*$', '', s).strip()
 
 
 def _best_match_score(track: Dict, link_text: str, target_artist: str, target_title: str) -> float:
@@ -333,6 +370,7 @@ def _best_match_score(track: Dict, link_text: str, target_artist: str, target_ti
     We split the result text on " - " and compare each part against the
     target artist and title separately. Both parts must score above a
     minimum for the match to be accepted (returns 0 otherwise).
+    Parenthetical suffixes like (ofc), (Original Mix) are stripped for matching.
     """
     from app import similarity_score
     text = (link_text or "").strip()
@@ -349,9 +387,11 @@ def _best_match_score(track: Dict, link_text: str, target_artist: str, target_ti
 
     if " - " in text:
         r_artist, r_title = text.split(" - ", 1)
+        r_artist = _strip_parens_suffix(r_artist)
+        r_title = _strip_parens_suffix(r_title)
     else:
         r_artist = ""
-        r_title = text
+        r_title = _strip_parens_suffix(text)
 
     artist_score = similarity_score(t_artist, r_artist) if t_artist and r_artist else 0.0
     title_score = similarity_score(t_title, r_title) if t_title else 0.0

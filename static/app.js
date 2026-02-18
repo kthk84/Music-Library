@@ -1186,6 +1186,8 @@ let shazamDismissed = {};
 let shazamDismissedManualCheck = {};
 /** Per-track Soundeo display title (exact as listed on Soundeo). Key: "Artist - Title". Restored from status on load. */
 let shazamSoundeoTitles = {};
+/** Per-track "searched but not found on Soundeo" state. Restored from status on load; updated when Search completes with no result. */
+let shazamNotFound = {};
 /** Track keys currently being processed by a per-row action (dismiss/sync/skip). */
 let shazamActionPending = {};
 
@@ -1759,6 +1761,13 @@ function releaseShazamProxy() {
     }).catch(function () {});
 }
 
+// Best-effort release on page unload (e.g. tab close)
+window.addEventListener('beforeunload', function () {
+    if (shazamCurrentProxyId) {
+        navigator.sendBeacon('/api/shazam-sync/release-proxy', new Blob([JSON.stringify({ proxy_id: shazamCurrentProxyId })], { type: 'application/json' }));
+    }
+});
+
 function shazamPlayerBarShow(label) {
     const bar = document.getElementById('shazamPlayerBar');
     const labelEl = document.getElementById('shazamBarTrackLabel');
@@ -1875,6 +1884,9 @@ function shazamRenderTrackList(data) {
     if (data.soundeo_titles && typeof data.soundeo_titles === 'object') {
         Object.assign(shazamSoundeoTitles, data.soundeo_titles);
     }
+    if (data.not_found && typeof data.not_found === 'object') {
+        Object.assign(shazamNotFound, data.not_found);
+    }
     const have = (data.have_locally || []).map(t => ({ ...t, status: 'have' }));
     const toDl = (data.to_download || []).map((t, i) => ({ ...t, status: 'todl', _idx: i }));
     const skipped = (data.skipped_tracks || []).map(t => ({ ...t, status: 'skipped' }));
@@ -1928,8 +1940,7 @@ function shazamRenderTrackList(data) {
         const url = _lu(shazamTrackUrls, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.urls || {}, key, keyLower, keyNorm, keyNormLower, keyDeep);
         const soundeoTitle = _lu(shazamSoundeoTitles, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.soundeo_titles || {}, key, keyLower, keyNorm, keyNormLower, keyDeep);
         const starred = !!(_lu(shazamStarred, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.starred || {}, key, keyLower, keyNorm, keyNormLower, keyDeep));
-        const notFoundMap = data.not_found || {};
-        const isSearchedNotFound = !!(_lu(notFoundMap, key, keyLower, keyNorm, keyNormLower, keyDeep));
+        const isSearchedNotFound = !!(_lu(shazamNotFound, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.not_found || {}, key, keyLower, keyNorm, keyNormLower, keyDeep));
         const soundeoScoreMap = data.soundeo_match_scores || {};
         const soundeoMatchScore = _lu(soundeoScoreMap, key, keyLower, keyNorm, keyNormLower, keyDeep) || null;
         const score = row.match_score != null ? row.match_score : null;
@@ -2303,6 +2314,7 @@ async function shazamUndismissTrack(key, trackUrl, artist, title) {
             delete shazamDismissed[key];
             shazamStarred[key] = true;
             if (data.url) shazamTrackUrls[key] = data.url;
+            await shazamLoadStatus();
         } else if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
         }
@@ -2331,6 +2343,7 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
                 shazamTrackUrls[key] = data.url;
                 shazamTrackUrls[key.toLowerCase()] = data.url;
             }
+            await shazamLoadStatus();
         } else {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG || 'Could not star track');
         }
@@ -2402,7 +2415,9 @@ async function shazamSyncSingleTrack(key, artist, title) {
                         if (p.done === 1 && p.url) {
                             shazamTrackUrls[key] = p.url;
                             shazamStarred[key] = true;
+                            shazamStarred[key.toLowerCase()] = true;
                             if (p.soundeo_title) shazamSoundeoTitles[key] = p.soundeo_title;
+                            shazamLoadStatus();
                         } else if (p.error) {
                             alert(p.error);
                         }
@@ -2694,7 +2709,7 @@ function shazamPollProgress() {
         if (p.running && shazamLastData) shazamRenderTrackList(shazamLastData);
         if (p.urls) {
             Object.assign(shazamTrackUrls, p.urls);
-            Object.keys(p.urls).forEach(k => { shazamStarred[k] = true; });
+            Object.keys(p.urls).forEach(k => { shazamStarred[k] = true; shazamStarred[k.toLowerCase()] = true; });
         }
         if (!p.running && shazamProgressInterval) {
             shazamCurrentProgress = {};
@@ -2702,6 +2717,7 @@ function shazamPollProgress() {
             shazamProgressInterval = null;
             if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopped'; }
             shazamHideSyncProgress();
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
             shazamCompare();
         }
     }).catch(() => {});
@@ -2807,9 +2823,17 @@ async function shazamSearchSingleOnSoundeo(key, artist, title) {
                 shazamCurrentProgress = {};
                 clearInterval(poll);
                 shazamHideSyncProgress();
-                if (p.mode === 'search_single' && p.done === 1 && p.url) {
-                    shazamTrackUrls[key] = p.url;
-                    if (p.soundeo_title) shazamSoundeoTitles[key] = p.soundeo_title;
+                if (p.mode === 'search_single') {
+                    if (p.done === 1 && p.url) {
+                        shazamTrackUrls[key] = p.url;
+                        if (p.soundeo_title) shazamSoundeoTitles[key] = p.soundeo_title;
+                        delete shazamNotFound[key];
+                        delete shazamNotFound[key.toLowerCase()];
+                    } else if (p.done === 0 && p.failed === 1) {
+                        shazamNotFound[key] = true;
+                        shazamNotFound[key.toLowerCase()] = true;
+                    }
+                    shazamLoadStatus();
                 }
                 delete shazamActionPending[key];
                 if (shazamLastData) shazamRenderTrackList(shazamLastData);
@@ -2844,6 +2868,14 @@ async function shazamSearchAllOnSoundeo() {
                 }
             }
             shazamSetProgressClickable(p.running && !!p.current_key);
+            if (p.mode === 'search_global') {
+                if (p.urls) {
+                    Object.assign(shazamTrackUrls, p.urls);
+                    Object.keys(p.urls).forEach(k => { shazamStarred[k] = true; shazamStarred[k.toLowerCase()] = true; });
+                }
+                if (p.not_found) Object.assign(shazamNotFound, p.not_found);
+                if (p.soundeo_titles) Object.assign(shazamSoundeoTitles, p.soundeo_titles);
+            }
             if (p.running && shazamLastData) shazamRenderTrackList(shazamLastData);
             if (!p.running) {
                 shazamCurrentProgress = {};

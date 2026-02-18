@@ -424,11 +424,21 @@ def is_single_release(album_name: str) -> bool:
     album_lower = album_name.lower()
     return any(keyword in album_lower for keyword in single_keywords)
 
+def _normalize_word(w: str) -> str:
+    """Strip leading/trailing punctuation so 'dox,' matches 'dox' and '(original' / 'mix)' normalize."""
+    w = (w or "").strip()
+    while w and w[-1] in ".,;:&()":
+        w = w[:-1].strip()
+    while w and w[0] in ".,;:&()":
+        w = w[1:].strip()
+    return w
+
+
 def similarity_score(str1: str, str2: str) -> float:
     """Calculate similarity between two strings (0-1).
 
-    Uses word-overlap (Jaccard) plus a length-ratio penalty so that
-    matching a short word inside a long string doesn't score too high.
+    Uses word-overlap (Jaccard) with normalized words (strip punctuation)
+    so "Dox, DvirNuns" and "DvirNuns & Dox" share words dox, dvirnuns.
     """
     if not str1 or not str2:
         return 0.0
@@ -439,8 +449,8 @@ def similarity_score(str1: str, str2: str) -> float:
     if s1 == s2:
         return 1.0
 
-    words1 = set(s1.split())
-    words2 = set(s2.split())
+    words1 = set(_normalize_word(w) for w in s1.split() if _normalize_word(w))
+    words2 = set(_normalize_word(w) for w in s2.split() if _normalize_word(w))
     if not words1 or not words2:
         return 0.0
 
@@ -2373,16 +2383,30 @@ def _run_search_soundeo_global():
         return
 
     def on_progress(current: int, total: int, msg: str, url: Optional[str], current_key: Optional[str] = None):
+        existing = getattr(app, '_shazam_sync_progress', None) or {}
         prog = {
             'running': True, 'current': current, 'total': total, 'message': msg,
             'last_url': url, 'mode': 'search_global',
+            'urls': dict(existing.get('urls', {})),
+            'not_found': dict(existing.get('not_found', {})),
+            'soundeo_titles': dict(existing.get('soundeo_titles', {})),
         }
         if current_key is not None:
             prog['current_key'] = current_key
+        if current_key and ('Found:' in msg or 'Not found' in msg or 'not found' in msg.lower()):
+            if url:
+                prog['urls'][current_key] = url
+                prog['urls'][current_key.lower()] = url
+            else:
+                prog['not_found'][current_key] = True
+                prog['not_found'][current_key.lower()] = True
         app._shazam_sync_progress = prog
 
     try:
-        app._shazam_sync_progress = {'running': True, 'message': 'Starting search...', 'current': 0, 'total': len(tracks), 'mode': 'search_global'}
+        app._shazam_sync_progress = {
+            'running': True, 'message': 'Starting search...', 'current': 0, 'total': len(tracks), 'mode': 'search_global',
+            'urls': {}, 'not_found': {}, 'soundeo_titles': {},
+        }
         if use_http:
             result = run_search_tracks_http(tracks, cookies_path, on_progress=on_progress, skip_keys=skip_keys)
         else:
@@ -2648,14 +2672,24 @@ def shazam_sync_dismiss_track():
     })
 
 
+def _status_url_for_key(status: Dict, key: str) -> str:
+    """Resolve track URL from status urls using key and common variants (e.g. lowercase)."""
+    urls = status.get('urls') or {}
+    for k in (key, key.lower(), key.replace(' - ', ' – ')):
+        if k in urls and urls[k]:
+            return (urls[k] or '').strip()
+    return ''
+
+
 @app.route('/api/shazam-sync/undismiss-track', methods=['POST'])
 def shazam_sync_undismiss_track():
-    """Undo dismiss: re-star on Soundeo via API + remove dismissed state.
+    """Undo dismiss: re-star on Soundeo via API (then browser fallback if needed) + remove dismissed state.
     Body: { key, track_url?, artist?, title? }"""
-    from config_shazam import get_soundeo_cookies_path
+    from config_shazam import get_soundeo_cookies_path, load_config
     from soundeo_automation import (
         extract_track_id, soundeo_api_toggle_favorite,
         soundeo_api_search_and_favorite,
+        _get_driver, load_cookies, verify_logged_in, favorite_track_by_url, _graceful_quit,
     )
     from shazam_cache import save_status_cache
 
@@ -2672,21 +2706,23 @@ def shazam_sync_undismiss_track():
 
     status = dict(getattr(app, '_shazam_sync_status', None) or {})
     if not track_url:
-        track_url = (status.get('urls') or {}).get(key, '')
+        track_url = _status_url_for_key(status, key)
 
     cookies_path = get_soundeo_cookies_path()
     soundeo_ok = False
     new_url = track_url
 
+    # 1) Try HTTP API when we have a track ID
     track_id = extract_track_id(track_url) if track_url else None
     if track_id:
         result = soundeo_api_toggle_favorite(track_id, cookies_path)
         if result.get('ok') and result.get('result') == 'favored':
             soundeo_ok = True
         elif result.get('ok') and result.get('result') != 'favored':
-            soundeo_api_toggle_favorite(track_id, cookies_path)
-            soundeo_ok = True
-    elif artist and title:
+            result2 = soundeo_api_toggle_favorite(track_id, cookies_path)
+            if result2.get('ok') and result2.get('result') == 'favored':
+                soundeo_ok = True
+    if not soundeo_ok and artist and title and not track_url:
         result = soundeo_api_search_and_favorite(artist, title, cookies_path)
         if result.get('ok'):
             soundeo_ok = True
@@ -2694,6 +2730,41 @@ def shazam_sync_undismiss_track():
             status.setdefault('urls', {})[key] = new_url
             if result.get('display_text'):
                 status.setdefault('soundeo_titles', {})[key] = result['display_text']
+
+    # 2) Browser fallback when we have URL but API didn't star (e.g. session/cookies issue)
+    if not soundeo_ok and track_url:
+        config = load_config()
+        headed = config.get('headed_mode', True)
+        driver = None
+        try:
+            driver = _get_driver(headless=not headed, use_persistent_profile=True)
+            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
+                soundeo_ok = favorite_track_by_url(driver, track_url)
+        except Exception:
+            pass
+        finally:
+            _graceful_quit(driver)
+
+    # 3) Browser find-and-favorite when we have artist/title but no URL or API failed
+    if not soundeo_ok and artist and title:
+        config = load_config()
+        headed = config.get('headed_mode', True)
+        driver = None
+        try:
+            from soundeo_automation import find_and_favorite_track
+            driver = _get_driver(headless=not headed, use_persistent_profile=True)
+            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
+                out = find_and_favorite_track(driver, artist, title, already_starred=set())
+                if out:
+                    soundeo_ok = True
+                    new_url = out[0] if isinstance(out, tuple) else out
+                    status.setdefault('urls', {})[key] = new_url
+                    if isinstance(out, tuple) and len(out) > 1 and out[1]:
+                        status.setdefault('soundeo_titles', {})[key] = out[1]
+        except Exception:
+            pass
+        finally:
+            _graceful_quit(driver)
 
     dismissed = status.get('dismissed') or {}
     dismissed.pop(key, None)
