@@ -205,6 +205,16 @@ def add_to_skip_list(tracks: List[Dict]) -> int:
     return len(skip) - before
 
 
+def remove_from_skip_list(tracks: List[Dict]) -> int:
+    """Remove tracks from skip list. Returns count removed."""
+    skip = load_skip_list()
+    before = len(skip)
+    for t in tracks:
+        skip.discard(_track_key(t))
+    save_skip_list(skip)
+    return before - len(skip)
+
+
 # --- App state (MP3 Cleaner: last folder, etc. – restore on load/refresh) ---
 
 APP_STATE_PATH = os.path.join(_PROJECT_ROOT, "app_state.json")
@@ -237,3 +247,39 @@ def load_status_cache() -> Optional[Dict]:
 def save_status_cache(status: Dict) -> None:
     """Persist compare result. Uses atomic write to prevent corrupt reads on refresh."""
     _save_json_atomic(STATUS_CACHE_PATH, status)
+
+
+# --- Mutation log ---
+MUTATION_LOG_PATH = os.path.join(_PROJECT_ROOT, "shazam_mutation_log.json")
+_MAX_MUTATION_LOG_ENTRIES = 2000
+
+
+def load_mutation_log() -> List[Dict]:
+    return _load_json(MUTATION_LOG_PATH, [])
+
+
+def append_mutations(entries: List[Dict]) -> None:
+    """Append mutation entries and trim to keep the log bounded."""
+    if not entries:
+        return
+    log = load_mutation_log()
+    log.extend(entries)
+    if len(log) > _MAX_MUTATION_LOG_ENTRIES:
+        log = log[-_MAX_MUTATION_LOG_ENTRIES:]
+    _save_json_atomic(MUTATION_LOG_PATH, log)
+
+
+def log_starred_mutations(
+    newly_starred: List[str],
+    newly_unstarred: List[str],
+    source: str = "crawl",
+) -> List[Dict]:
+    """Build mutation entries for starred/unstarred changes, persist, and return them."""
+    ts = datetime.utcnow().isoformat() + "Z"
+    entries = []
+    for key in newly_starred:
+        entries.append({"timestamp": ts, "action": "starred", "key": key, "source": source})
+    for key in newly_unstarred:
+        entries.append({"timestamp": ts, "action": "unstarred", "key": key, "source": source})
+    append_mutations(entries)
+    return entries

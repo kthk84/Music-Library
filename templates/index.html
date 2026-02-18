@@ -3,211 +3,206 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MP3 Tag Cleaner</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <title>MP3 Cleaner</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=4">
 </head>
 <body>
+    <!-- Icon definitions (hidden) -->
+    <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;">
+        <symbol id="icon-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
+        <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></symbol>
+        <symbol id="icon-save" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></symbol>
+        <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></symbol>
+        <symbol id="icon-play" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></symbol>
+        <symbol id="icon-warning" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></symbol>
+        <symbol id="icon-clean" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><line x1="8" y1="6" x2="8" y2="4"/><line x1="16" y1="6" x2="16" y2="4"/></symbol>
+        <symbol id="icon-edit" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></symbol>
+        <symbol id="icon-info" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></symbol>
+        <symbol id="icon-pause" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></symbol>
+    </svg>
+
     <div class="container">
         <header>
-            <h1>🎵 MP3 Tag Cleaner</h1>
-            <p>Clean and organize your MP3 metadata using online databases</p>
+            <h1>MP3 Cleaner</h1>
+            <nav class="tab-nav" role="tablist" aria-label="Main sections">
+                <button type="button" id="tab-btn-mp3" class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-panel-mp3" data-tab="mp3">Tags</button>
+                <button type="button" id="tab-btn-shazam" class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-panel-shazam" data-tab="shazam">Sync</button>
+            </nav>
         </header>
 
-        <!-- Step 1: Folder Selection -->
+        <!-- Tab: MP3 Tags (clean & organize) -->
+        <div id="tab-panel-mp3" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-mp3">
+        <!-- Step 1: Folder selection -->
         <section id="step1" class="step active">
-            <h2>Step 1: Select Folder</h2>
+            <h2>Select folder</h2>
             <div class="folder-input">
-                <input type="text" id="folderPath" placeholder="Folder path will appear here..." />
-                <button onclick="browseFolder()" class="btn btn-primary">
-                    <span>📁 Browse...</span>
-                </button>
-                <button onclick="scanFolder()" class="btn btn-success">
-                    <span>🔍 Scan Folder</span>
-                </button>
+                <input type="text" id="folderPath" placeholder="Path will appear here or paste manually" />
+                <div class="btn-group">
+                    <button type="button" onclick="browseFolder()" class="btn btn-primary">
+                        <svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-folder"/></svg>
+                        Browse
+                    </button>
+                    <button type="button" onclick="scanFolder()" class="btn btn-primary">
+                        <svg class="icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-search"/></svg>
+                        Scan
+                    </button>
+                </div>
             </div>
             <div class="path-examples">
-                <p class="example-hint">Or paste a folder path manually:</p>
-                <div class="examples">
-                    <code>Mac: /Users/yourname/Music/Downloads</code>
-                    <code>Windows: C:\Users\YourName\Music\Downloads</code>
-                </div>
+                <p class="example-hint">Examples: Mac <code>/Users/you/Music</code> · Windows <code>C:\Users\You\Music</code></p>
             </div>
         </section>
 
-        <!-- Step 2: File List and Cleanup -->
+        <!-- Step 2: File list and cleanup -->
         <section id="step2" class="step">
-            <h2>Step 2: Review and Clean Tags</h2>
+            <h2>Review &amp; clean tags</h2>
             <div class="stats">
-                <div class="stat-item">
-                    <span class="stat-label">Total Files:</span>
-                    <span id="totalFiles" class="stat-value">0</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Processed:</span>
-                    <span id="processedFiles" class="stat-value">0</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Success:</span>
-                    <span id="successFiles" class="stat-value">0</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Avg Confidence:</span>
-                    <span id="avgConfidence" class="stat-value">—</span>
-                </div>
+                <div class="stat-item"><span class="stat-label">Total</span><span id="totalFiles" class="stat-value">0</span></div>
+                <div class="stat-item"><span class="stat-label">Processed</span><span id="processedFiles" class="stat-value">0</span></div>
+                <div class="stat-item"><span class="stat-label">Success</span><span id="successFiles" class="stat-value">0</span></div>
+                <div class="stat-item"><span class="stat-label">Avg match</span><span id="avgConfidence" class="stat-value">—</span></div>
             </div>
 
             <div id="filenameAlert" class="filename-alert" style="display: none;">
-                <span class="alert-icon">⚠️</span>
+                <span class="alert-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-warning"/></svg></span>
                 <div class="alert-content">
-                    <strong>Track numbers detected!</strong>
-                    <p>Some files have track numbers (like "80. Song.mp3"). Click below to remove them.</p>
+                    <strong>Track numbers in filenames</strong>
+                    <p>Remove number prefixes (e.g. "01. Song.mp3" → "Song.mp3").</p>
                 </div>
-                <button onclick="cleanAllFilenames()" class="btn btn-warning btn-small">
-                    <span>🧹 Clean Filenames</span>
-                </button>
+                <button type="button" onclick="cleanAllFilenames()" class="btn btn-warning btn-small">Clean filenames</button>
             </div>
 
             <div id="spamAlert" class="filename-alert" style="display: none;">
-                <span class="alert-icon">🗑️</span>
+                <span class="alert-icon"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-clean"/></svg></span>
                 <div class="alert-content">
-                    <strong>Spam metadata detected!</strong>
-                    <p>Some files have commercial junk in comments, publishers, or URLs. Click below to remove it.</p>
+                    <strong>Spam in metadata</strong>
+                    <p>Comments, URLs or publisher junk can be removed.</p>
                 </div>
-                <button onclick="cleanSpamMetadata()" class="btn btn-warning btn-small">
-                    <span>🧹 Clean Spam</span>
-                </button>
+                <button type="button" onclick="cleanSpamMetadata()" class="btn btn-warning btn-small">Clean spam</button>
             </div>
 
             <div class="actions">
-                <button onclick="lookupAll()" class="btn btn-primary">
-                    <span>🔍 Lookup All Metadata</span>
-                </button>
-                <button onclick="saveAll()" class="btn btn-success">
-                    <span>💾 Save All Changes</span>
-                </button>
-                <button onclick="reset()" class="btn btn-secondary">
-                    <span>🔄 Start Over</span>
-                </button>
+                <div class="btn-group">
+                    <button type="button" onclick="lookupAll()" class="btn btn-primary">Lookup all</button>
+                    <button type="button" onclick="saveAll()" class="btn btn-success">Save all</button>
+                    <button type="button" onclick="reset()" class="btn btn-secondary">Reset</button>
+                </div>
             </div>
 
             <div id="fileList" class="file-list"></div>
         </section>
-
-        <!-- Loading Overlay -->
-        <div id="loadingOverlay" class="loading-overlay">
-            <div class="spinner"></div>
-            <p id="loadingText">Processing...</p>
         </div>
 
-        <!-- Shazam to Soundeo Sync -->
+        <!-- Loading overlay -->
+        <div id="loadingOverlay" class="loading-overlay">
+            <div class="spinner"></div>
+            <p id="loadingText">Processing…</p>
+        </div>
+
+        <!-- Tab: Sync -->
+        <div id="tab-panel-shazam" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-shazam">
         <section id="shazamSync" class="step active shazam-sync-section">
-            <h2 onclick="toggleShazamSection()" class="shazam-toggle">
-                Shazam to Soundeo Sync
-                <span id="shazamToggleIcon" class="toggle-icon">▼</span>
-            </h2>
-            <div id="shazamSyncContent" class="shazam-sync-content">
-                <div class="shazam-settings">
-                    <h3>Settings</h3>
+
+            <details class="settings-panel" open>
+                <summary>Settings <span id="soundeoSessionStatus" class="session-status">not connected</span></summary>
+                <div class="settings-body">
                     <div class="folder-list-row">
-                        <label>Destination folders (to scan for local tracks):</label>
-                        <p class="folder-hint">Add multiple folders – click &quot;Add Folder&quot; for each, or paste paths into the fields.</p>
+                        <label>Destination folders</label>
                         <div id="shazamFolderList" class="folder-list"></div>
-                        <button onclick="shazamAddFolder()" class="btn btn-secondary btn-small">Add Folder</button>
+                        <button type="button" onclick="shazamAddFolder()" class="btn btn-secondary btn-small">Add folder</button>
                     </div>
                     <div class="soundeo-session-row">
-                        <span id="soundeoSessionStatus">Soundeo session: Not saved</span>
-                        <button onclick="shazamSaveSession()" class="btn btn-secondary btn-small">Save Soundeo Session</button>
-                        <button id="shazamLoggedInBtn" onclick="shazamSessionSaved()" class="btn btn-success btn-small" style="display:none;">I have logged in</button>
+                        <button type="button" id="shazamSaveSessionBtn" onclick="shazamSaveSession()" class="btn btn-secondary btn-small">Connect Soundeo</button>
+                        <button type="button" id="shazamLoggedInBtn" onclick="shazamSessionSaved()" class="btn btn-small" style="display:none;background:var(--accent);color:white;">I have logged in</button>
                     </div>
-                    <p id="soundeoSessionPath" class="folder-hint" style="margin-top:4px; font-size:0.85em; display:none;"></p>
-                    <div class="soundeo-headed-row" style="margin-top:8px;">
-                        <label><input type="checkbox" id="shazamHeadedMode" /> Use visible browser for sync (recommended – login is remembered)</label>
-                    </div>
-                    <button onclick="shazamSaveSettings()" class="btn btn-primary btn-small">Save Settings</button>
-                    <p class="folder-hint" style="margin-top:8px;">Important: Click <strong>Save Settings</strong> after adding folders, then Compare.</p>
+                    <p id="soundeoSessionPath" class="folder-hint" style="display:none;"></p>
                 </div>
-                <div id="shazamCompareProgress" class="shazam-compare-progress" style="display:none;">
-                    <div class="shazam-compare-progress-bar"><div id="shazamCompareProgressFill" class="shazam-compare-progress-fill"></div></div>
-                    <span id="shazamCompareProgressText" class="shazam-compare-progress-text">Scanning...</span>
-                    <button type="button" onclick="shazamCancelCompare()" class="btn btn-small btn-danger">Stop</button>
+            </details>
+
+            <div id="shazamCompareProgress" class="shazam-compare-progress" style="display:none;">
+                <div class="shazam-compare-progress-bar"><div id="shazamCompareProgressFill" class="shazam-compare-progress-fill"></div></div>
+                <span id="shazamCompareProgressText" class="shazam-compare-progress-text">Scanning…</span>
+                <button type="button" onclick="shazamCancelCompare()" class="btn btn-small btn-danger">Stop</button>
+            </div>
+
+            <div class="toolbar">
+                <div class="toolbar-group">
+                    <button type="button" onclick="shazamFetchShazam()" class="btn btn-secondary" id="shazamFetchBtn">Fetch</button>
+                    <button type="button" id="shazamCompareBtn" onclick="shazamCompare()" class="btn btn-secondary">Compare</button>
+                    <button type="button" id="shazamSyncBtn" onclick="shazamRunSync()" class="btn btn-primary" disabled>Sync</button>
                 </div>
-                <div class="shazam-actions">
-                    <button type="button" onclick="shazamFetchShazam()" class="btn btn-primary" id="shazamFetchBtn">
-                        <span>Fetch Shazam</span>
-                    </button>
-                    <button type="button" id="shazamCompareBtn" onclick="shazamCompare()" class="btn btn-primary">
-                        <span>Compare</span>
-                    </button>
-                    <button type="button" id="shazamRescanBtn" onclick="shazamRescan()" class="btn btn-secondary btn-small" title="Rescan all folders (use when you add new files)">
-                        <span>Rescan all</span>
-                    </button>
-                    <button id="shazamSyncBtn" onclick="shazamRunSync()" class="btn btn-success" disabled>
-                        <span>Sync to Soundeo</span>
-                    </button>
+                <div class="toolbar-divider"></div>
+                <div class="toolbar-group scan-favorites-group">
+                    <span class="toolbar-label">Favorites:</span>
+                    <button type="button" class="btn btn-small shazam-scan-range-btn active" data-scan-range="all">All</button>
+                    <button type="button" class="btn btn-small shazam-scan-range-btn" data-scan-range="1_month">1m</button>
+                    <button type="button" class="btn btn-small shazam-scan-range-btn" data-scan-range="2_months">2m</button>
+                    <button type="button" class="btn btn-small shazam-scan-range-btn" data-scan-range="3_months">3m</button>
                 </div>
-                <div id="shazamLiveView" class="shazam-live-view" style="display:none;">
-                    <div class="shazam-preview-container">
-                        <img id="shazamVideoFeed" src="" alt="Live browser view" />
-                        <div class="shazam-preview-controls">
-                            <span id="shazamProgress" class="shazam-progress-text"></span>
-                            <div class="shazam-preview-buttons">
-                                <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-small btn-danger">Stop sync</button>
-                                <button type="button" id="shazamHidePreviewBtn" onclick="shazamHidePreview()" class="btn btn-small btn-secondary">Hide preview</button>
-                            </div>
-                        </div>
-                    </div>
+                <div class="toolbar-divider"></div>
+                <button type="button" id="shazamRescanBtn" onclick="shazamRescan()" class="btn btn-secondary btn-small">Rescan folders</button>
+                <div class="toolbar-stats">
+                    <span id="shazamCount">0</span> shazam · <span id="shazamLocalCount">0</span> local · <span id="shazamHaveCount">0</span> have · <span id="shazamToDownloadCount">0</span> to DL
                 </div>
-                <div class="shazam-stats">
-                    <span class="stat-item">Shazam: <strong id="shazamCount">0</strong></span>
-                    <span class="stat-item">Local files: <strong id="shazamLocalCount">0</strong></span>
-                    <span class="stat-item">Have locally: <strong id="shazamHaveCount">0</strong></span>
-                    <span class="stat-item">To download: <strong id="shazamToDownloadCount">0</strong></span>
-                </div>
-                <div id="shazamFolderWarning" class="shazam-folder-warning" style="display:none;"></div>
-                <div id="shazamFolderStats" class="shazam-folder-stats" style="display:none;"></div>
-                <div class="shazam-export-links" style="margin-top:8px; font-size:0.9em;">
-                    <span>Download logs:</span>
-                    <a href="/api/shazam-sync/export/local-filenames" download="local_filenames.txt" class="btn btn-small btn-secondary" style="margin-left:6px;">Local filenames</a>
-                    <a href="/api/shazam-sync/export/shazam-tracks" download="shazam_tracks.txt" class="btn btn-small btn-secondary" style="margin-left:4px;">Shazam tracks</a>
-                </div>
-                <div class="shazam-filters">
-                    <span>Time:</span>
-                    <button type="button" class="btn btn-small shazam-filter-btn active" data-time="all">All</button>
-                    <button type="button" class="btn btn-small shazam-filter-btn" data-time="week">Last week</button>
-                    <button type="button" class="btn btn-small shazam-filter-btn" data-time="quarter">Quarter</button>
-                    <button type="button" class="btn btn-small shazam-filter-btn" data-time="year">Year</button>
-                    <span style="margin-left:12px;">Status:</span>
+            </div>
+
+            <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;">
+                <span id="shazamProgress" class="shazam-progress-text"></span>
+                <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-small btn-danger">Stop</button>
+            </div>
+
+            <div id="shazamFolderWarning" class="shazam-folder-warning" style="display:none;"></div>
+
+            <div class="filters-bar">
+                <div class="filter-group">
                     <button type="button" class="btn btn-small shazam-filter-btn active" data-status="all">All</button>
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="have">Have</button>
-                    <button type="button" class="btn btn-small shazam-filter-btn" data-status="todl">To download</button>
+                    <button type="button" class="btn btn-small shazam-filter-btn" data-status="todl">To DL</button>
+                    <button type="button" class="btn btn-small shazam-filter-btn" data-status="skipped">Skipped</button>
                 </div>
-                <div id="shazamSelectionBar" class="shazam-selection-bar" style="display:none;">
+                <div id="shazamSelectionBar" class="selection-actions" style="display:none;">
                     <span id="shazamSelectedCount">0 selected</span>
-                    <button onclick="shazamSkipSelected()" class="btn btn-secondary btn-small">Skip</button>
-                    <button onclick="shazamSyncSelected()" class="btn btn-success btn-small">Sync</button>
+                    <button type="button" onclick="shazamSkipSelected()" class="btn btn-secondary btn-small">Skip</button>
+                    <button type="button" onclick="shazamSyncSelected()" class="btn btn-primary btn-small">Sync</button>
                 </div>
-                <div id="shazamTrackList" class="shazam-track-list"></div>
             </div>
-        </section>
 
-        <!-- Result Picker Modal -->
+            <div id="shazamTrackList" class="shazam-track-list"></div>
+
+        </section>
+        </div>
+
+        <!-- Result picker modal -->
         <div id="resultPickerModal" class="modal">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h3 id="modalTitle">Choose Metadata</h3>
-                    <button class="modal-close" onclick="closeResultPicker()">&times;</button>
+                    <h3 id="modalTitle">Choose metadata</h3>
+                    <button type="button" class="modal-close" onclick="closeResultPicker()" aria-label="Close">&times;</button>
                 </div>
-                <div class="modal-body" id="modalBody">
-                    <!-- Results will be inserted here -->
-                </div>
+                <div class="modal-body" id="modalBody"></div>
                 <div class="modal-footer">
-                    <button onclick="closeResultPicker()" class="btn btn-secondary">Cancel</button>
+                    <button type="button" onclick="closeResultPicker()" class="btn btn-secondary">Cancel</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=2"></script>
+    <!-- Shazam / Sync playback bar (fixed bottom, shown when playing) -->
+    <div id="shazamPlayerBar" class="shazam-player-bar" style="display: none;" role="region" aria-label="Now playing">
+        <button type="button" id="shazamBarPlayPause" class="shazam-bar-play-pause" title="Play / Pause" aria-label="Play / Pause" onclick="shazamPlayerBarPlayPause()">▶</button>
+        <div class="shazam-bar-track-info">
+            <span id="shazamBarTrackLabel" class="shazam-bar-track-label">—</span>
+        </div>
+        <div class="shazam-bar-scrub-wrap">
+            <span id="shazamBarTime" class="shazam-bar-time">0:00</span>
+            <div id="shazamBarScrub" class="shazam-bar-scrub" role="slider" aria-label="Seek" tabindex="0" onclick="shazamPlayerBarScrub(event)">
+                <div id="shazamBarProgress" class="shazam-bar-progress"></div>
+            </div>
+            <span id="shazamBarDuration" class="shazam-bar-time">0:00</span>
+        </div>
+        <button type="button" id="shazamBarClose" class="shazam-bar-close" title="Stop and close" aria-label="Stop and close" onclick="shazamPlayerBarClose()">×</button>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}?v=5"></script>
 </body>
 </html>
-

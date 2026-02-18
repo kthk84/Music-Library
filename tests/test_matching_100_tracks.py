@@ -58,7 +58,7 @@ def test_matching_100_tracks_integration():
     unmatched_samples = []
 
     for t in sample:
-        match = _find_matching_local_track(
+        match, _ = _find_matching_local_track(
             t, local_tracks,
             title_word_index=title_word_index,
             exact_match_map=exact_match_map,

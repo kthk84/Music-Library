@@ -7,9 +7,6 @@ import re
 import json
 from typing import List, Dict, Set, Tuple, Optional, Callable
 
-# Debug: count unmatched so we only log first N (set by compute_to_download)
-_unmatched_diagnostic_count = [0]
-
 # Supported extensions for scanning
 AUDIO_EXTENSIONS = ('.mp3', '.aiff', '.aif', '.wav')
 
@@ -90,6 +87,35 @@ def _canon_match(a: str, b: str) -> bool:
     if ca == cb:
         return True
     return ca in cb or cb in ca
+
+
+def _parenthetical_part(s: str) -> str:
+    """Extract content of last parenthetical (e.g. ' (Tom Zeta Maccabi Remix)' -> 'tom zeta maccabi remix')."""
+    if not s:
+        return ""
+    s = s.strip()
+    # Find last '(' and matching ')'
+    start = s.rfind("(")
+    if start == -1:
+        return ""
+    end = s.find(")", start)
+    if end == -1:
+        return ""
+    return s[start + 1:end].strip().lower()
+
+
+def _different_remix_or_version(shazam_title: str, local_title: str, sim_threshold: float = 0.65) -> bool:
+    """
+    True if both titles have a parenthetical part (e.g. remix name) and those parts differ significantly.
+    Used to avoid matching "1977 (Tom Zeta Maccabi Remix)" to "1977 (Other Remix)".
+    """
+    p_shazam = _parenthetical_part(shazam_title)
+    p_local = _parenthetical_part(local_title)
+    if not p_shazam or not p_local:
+        return False  # one or both have no parenthetical – allow match to be decided by other logic
+    from app import similarity_score
+    sim = similarity_score(p_shazam, p_local)
+    return sim < sim_threshold
 
 
 def parse_artist_title_from_filename(filename: str) -> Tuple[str, str]:
@@ -211,14 +237,23 @@ def _build_title_word_index(local_tracks: List[Dict]) -> Dict[str, List[int]]:
     return index
 
 
+def _prefer_extended_track(tracks: List[Dict]) -> Optional[Dict]:
+    """Given multiple matching tracks, prefer one with 'Extended' in title (explicit rule)."""
+    if not tracks:
+        return None
+    for lt in tracks:
+        if "extended" in (lt.get("title") or "").lower():
+            return lt
+    return tracks[0]
+
+
 def _build_exact_match_map(local_tracks: List[Dict]) -> Dict[Tuple[str, str], Dict]:
-    """(normalized_artist, normalized_title) -> one local track. For O(1) exact match."""
-    out: Dict[Tuple[str, str], Dict] = {}
+    """(normalized_artist, normalized_title) -> one local track. For O(1) exact match. Prefer Extended when same key."""
+    out: Dict[Tuple[str, str], List[Dict]] = {}
     for lt in local_tracks:
         key = (normalize(lt['artist']), normalize(lt['title']))
-        if key not in out:
-            out[key] = lt
-    return out
+        out.setdefault(key, []).append(lt)
+    return {k: _prefer_extended_track(v) for k, v in out.items()}
 
 
 def _track_matches(
@@ -230,9 +265,10 @@ def _track_matches(
     local_canon: Optional[List[Tuple[str, str]]] = None,
 ) -> bool:
     """Check if track (artist, title) exists in local_tracks."""
-    return _find_matching_local_track(
+    match, _ = _find_matching_local_track(
         track, local_tracks, sim_threshold, title_word_index, exact_match_map, local_canon
-    ) is not None
+    )
+    return match is not None
 
 
 def _find_matching_local_track(
@@ -242,13 +278,10 @@ def _find_matching_local_track(
     title_word_index: Optional[Dict[str, List[int]]] = None,
     exact_match_map: Optional[Dict[Tuple[str, str], Dict]] = None,
     local_canon: Optional[List[Tuple[str, str]]] = None,
-) -> Optional[Dict]:
+) -> Tuple[Optional[Dict], Optional[float]]:
     """
-    Find matching local track for shazam track. Returns local track dict (with filepath) or None.
-    If title_word_index is provided, fuzzy match only checks local tracks that share a title word (much faster).
-    If exact_match_map is provided, exact match is O(1) and avoids rebuilding local_keys per call.
-    If local_canon is provided (list of (canon_title, canon_artist) per local track), run full canonical
-    match first so we never miss a "name vs name" match when the candidate set was capped or empty.
+    Find matching local track for shazam track. Returns (local track dict with filepath, match_score) or (None, None).
+    match_score is in [0, 1]; 1.0 = exact, lower = fuzzy. Used for "Manual check" when score < 0.8.
     """
     from app import similarity_score
     n_artist = normalize(track['artist'])
@@ -258,20 +291,21 @@ def _find_matching_local_track(
     if exact_match_map is not None:
         hit = exact_match_map.get((n_artist, n_title))
         if hit is not None:
-            return hit
+            return (hit, 1.0)
     else:
         local_keys = _build_local_keys(local_tracks)
         if (n_artist, n_title) in local_keys:
-            for lt in local_tracks:
-                if (normalize(lt['artist']), normalize(lt['title'])) == (n_artist, n_title):
-                    return lt
+            same_key = [lt for lt in local_tracks if (normalize(lt['artist']), normalize(lt['title'])) == (n_artist, n_title)]
+            if same_key:
+                return (_prefer_extended_track(same_key), 1.0)
 
-    # Full canonical "name vs name" pass so we never miss due to index/cap (script found 15 such misses)
+    # Full canonical "name vs name" pass so we never miss due to index/cap (script found 15 such misses). Prefer Extended.
     if local_canon is not None and len(local_canon) == len(local_tracks):
         st, sa = _canon(track['title']), _canon(track['artist'])
-        for (lt, la), lt_dict in zip(local_canon, local_tracks):
-            if (st == lt or st in lt or lt in st) and (sa == la or sa in la or la in sa):
-                return lt_dict
+        canon_matches = [lt_dict for (lt, la), lt_dict in zip(local_canon, local_tracks)
+                         if (st == lt or st in lt or lt in st) and (sa == la or sa in la or la in sa)]
+        if canon_matches:
+            return (_prefer_extended_track(canon_matches), 0.95)
 
     # Fuzzy: restrict candidates by title words when index available.
     # Use intersection of 2 smallest word-index sets to avoid huge candidate sets (e.g. "mix" in 10k tracks).
@@ -296,58 +330,45 @@ def _find_matching_local_track(
     else:
         candidates = local_tracks
 
-    # Compare: canonical "name vs name" first, then normalized + similarity
+    # Compare: canonical "name vs name" first, then normalized + similarity.
+    # Never match different remixes/versions: if both titles have parenthetical (e.g. remix name), they must agree.
+    # Collect fuzzy matches then prefer Extended (explicit rule).
+    fuzzy_matches: List[Tuple[Dict, float]] = []
     for lt in candidates:
+        if _different_remix_or_version(track['title'], lt['title']):
+            continue
         if _canon_match(track['title'], lt['title']) and _canon_match(track['artist'], lt['artist']):
-            return lt
+            fuzzy_matches.append((lt, 0.95))
+            continue
         lt_artist_norm = normalize(lt['artist'])
         lt_title_norm = normalize(lt['title'])
         title_sim = similarity_score(n_title, lt_title_norm)
         artist_sim = similarity_score(n_artist, lt_artist_norm)
         fn_lower = (lt.get('filename') or lt.get('filepath', '').split(os.sep)[-1] or '').lower()
         artist_in_fn = _artist_overlap_or_in_filename(track['artist'], lt_artist_norm, fn_lower)
+        combined = 0.6 * title_sim + 0.4 * artist_sim
+        score = round(combined, 2)
 
         if artist_sim >= sim_threshold and title_sim >= sim_threshold:
-            return lt
-        # Strong title: accept lower artist bar or artist token overlap (e.g. "Artist A & B" vs "Artist A" or filename)
-        if title_sim >= 0.8 and artist_sim >= 0.5:
-            return lt
-        if title_sim >= 0.95 and artist_sim >= 0.4:
-            return lt
-        if title_sim >= 0.85 and artist_in_fn:
-            return lt
-        if title_sim >= 0.9 and (artist_sim >= 0.35 or artist_in_fn):
-            return lt
-        if n_artist and n_artist in fn_lower and title_sim >= 0.5:
-            return lt
-        if n_title and n_title in fn_lower and artist_sim >= 0.5:
-            return lt
+            fuzzy_matches.append((lt, score))
+        elif title_sim >= 0.8 and artist_sim >= 0.5:
+            fuzzy_matches.append((lt, score))
+        elif title_sim >= 0.95 and artist_sim >= 0.4:
+            fuzzy_matches.append((lt, score))
+        elif title_sim >= 0.85 and artist_in_fn:
+            fuzzy_matches.append((lt, score))
+        elif title_sim >= 0.9 and (artist_sim >= 0.35 or artist_in_fn):
+            fuzzy_matches.append((lt, score))
+        elif n_artist and n_artist in fn_lower and title_sim >= 0.5:
+            fuzzy_matches.append((lt, score))
+        elif n_title and n_title in fn_lower and artist_sim >= 0.5:
+            fuzzy_matches.append((lt, score))
 
-    # #region agent log
-    _unmatched_diagnostic_count[0] += 1
-    if _unmatched_diagnostic_count[0] <= 50:
-        try:
-            _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cursor')
-            _log_path = os.path.join(_log_dir, 'debug.log')
-            payload = {'location': 'local_scanner:_find_matching_local_track', 'message': 'unmatched', 'hypothesisId': 'H1H2H3', 'data': {'shazam_artist': track.get('artist', '')[:60], 'shazam_title': track.get('title', '')[:60], 'n_candidates': len(candidates), 'was_capped': was_capped}, 'timestamp': int(__import__('time').time() * 1000)}
-            if candidates:
-                best_raw_a = best_raw_t = best_norm_a = best_norm_t = 0.0
-                for lt in candidates:
-                    raw_a = similarity_score(n_artist, lt['artist'])
-                    raw_t = similarity_score(n_title, lt['title'])
-                    norm_a = similarity_score(n_artist, normalize(lt['artist']))
-                    norm_t = similarity_score(n_title, normalize(lt['title']))
-                    if raw_a > best_raw_a: best_raw_a = raw_a
-                    if raw_t > best_raw_t: best_raw_t = raw_t
-                    if norm_a > best_norm_a: best_norm_a = norm_a
-                    if norm_t > best_norm_t: best_norm_t = norm_t
-                payload['data'].update({'best_raw_artist': round(best_raw_a, 3), 'best_raw_title': round(best_raw_t, 3), 'best_norm_artist': round(best_norm_a, 3), 'best_norm_title': round(best_norm_t, 3)})
-            with open(_log_path, 'a') as _f:
-                _f.write(json.dumps(payload) + '\n')
-        except Exception:
-            pass
-    # #endregion
-    return None
+    if fuzzy_matches:
+        best = max(fuzzy_matches, key=lambda x: (x[1], 1 if "extended" in (x[0].get("title") or "").lower() else 0))
+        return (best[0], best[1])
+
+    return (None, None)
 
 
 def compute_to_download(
@@ -358,9 +379,6 @@ def compute_to_download(
     Return (to_download, title_word_index, exact_match_map, local_canon). to_download = Shazam tracks NOT found locally.
     Pass title_word_index, exact_match_map, local_canon to _find_matching_local_track for matching.
     """
-    # #region agent log
-    _unmatched_diagnostic_count[0] = 0
-    # #endregion
     title_word_index = _build_title_word_index(local_tracks)
     exact_match_map = _build_exact_match_map(local_tracks)
     local_canon = [(_canon(lt['title']), _canon(lt['artist'])) for lt in local_tracks]
@@ -373,13 +391,4 @@ def compute_to_download(
             if t.get('shazamed_at') is not None:
                 item['shazamed_at'] = t['shazamed_at']
             to_download.append(item)
-    # #region agent log
-    try:
-        _log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.cursor')
-        _log_path = os.path.join(_log_dir, 'debug.log')
-        with open(_log_path, 'a') as _f:
-            _f.write(json.dumps({'location': 'local_scanner:compute_to_download', 'message': 'summary', 'hypothesisId': 'H1H2H3', 'data': {'to_download_count': len(to_download), 'shazam_count': len(shazam_tracks), 'local_count': len(local_tracks)}, 'timestamp': int(__import__('time').time() * 1000)}) + '\n')
-    except Exception:
-        pass
-    # #endregion
     return to_download, title_word_index, exact_match_map, local_canon

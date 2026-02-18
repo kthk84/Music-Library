@@ -246,7 +246,7 @@ function renderFileList() {
         <span>Album</span>
         <span>Year</span>
         <span>Genre</span>
-        <span style="text-align: center;" title="Match confidence">✓%</span>
+        <span style="text-align: center;" title="Match">%</span>
         <span>Actions</span>
     `;
     fileList.appendChild(header);
@@ -332,74 +332,47 @@ function createFileItem(file, index) {
     // Confidence badge (if lookup was done)
     let confidenceBadge = '';
     if (file.rank_score !== undefined || file.confidence !== undefined) {
-        // Use rank_score if available (more accurate), otherwise use confidence
         const score = file.rank_score !== undefined ? file.rank_score : file.confidence;
         const percentage = Math.round(Math.min(Math.max(score * 100, 0), 100));
-        
         let badgeClass = 'confidence-low';
-        let badgeColor = '#ef4444'; // red
-        let icon = '⚠️';
-        
-        if (percentage >= 80) {
-            badgeClass = 'confidence-high';
-            badgeColor = '#10b981'; // green
-            icon = '✓';
-        } else if (percentage >= 60) {
-            badgeClass = 'confidence-medium';
-            badgeColor = '#f59e0b'; // orange
-            icon = '~';
-        }
-        
-        confidenceBadge = `
-            <div class="confidence-badge-large ${badgeClass}" 
-                 style="background: ${badgeColor}15; color: ${badgeColor}; border: 2px solid ${badgeColor};"
-                 title="Match confidence: ${percentage}%">
-                <span class="confidence-icon">${icon}</span>
-                <span class="confidence-number">${percentage}%</span>
-            </div>
-        `;
+        if (percentage >= 80) badgeClass = 'confidence-high';
+        else if (percentage >= 60) badgeClass = 'confidence-medium';
+        confidenceBadge = `<span class="confidence-badge ${badgeClass}" title="Match: ${percentage}%">${percentage}%</span>`;
     } else if (status === 'processing') {
-        confidenceBadge = '<span class="spinner-small" title="Looking up...">⏳</span>';
+        confidenceBadge = '<span class="spinner-small" title="Looking up…">⋯</span>';
     } else if (status === 'lookup_error') {
-        confidenceBadge = '<span style="color: var(--danger); font-size: 1.2rem;" title="Not found">❌</span>';
+        confidenceBadge = '<span class="confidence-low" style="font-size:0.75rem;" title="Not found">—</span>';
     } else if (status === 'success') {
-        confidenceBadge = '<span style="color: var(--success); font-size: 1.2rem;" title="Saved">💾</span>';
+        confidenceBadge = '<span class="confidence-high" style="font-size:0.75rem;" title="Saved">✓</span>';
     } else if (file.has_spam) {
-        confidenceBadge = '<span style="color: var(--warning); font-size: 1.2rem;" title="Has spam">⚠️</span>';
+        confidenceBadge = '<span class="confidence-medium" style="font-size:0.75rem;" title="Has spam">!</span>';
     }
 
-    // Album cover thumbnail
+    // Album cover thumbnail (36px compact)
     const cover = file.newCover || file.cover;
     let coverHtml = '';
     if (cover) {
-        coverHtml = `<img src="data:image/jpeg;base64,${cover}" 
-                          class="album-cover-thumb" 
-                          style="width: 50px; height: 50px; max-width: 50px; max-height: 50px; object-fit: cover;"
-                          title="Click to view full size"
-                          data-cover-index="${index}">`;
+        coverHtml = `<img src="data:image/jpeg;base64,${cover}" class="album-cover-thumb" title="Click to view full size" data-cover-index="${index}">`;
     } else {
-        coverHtml = `<div class="no-cover" title="No album cover - click Lookup to find it">
-                        📀
-                     </div>`;
+        coverHtml = '<div class="no-cover" title="No cover – run Lookup">—</div>';
     }
-    
+
+    const revertDisplay = (file.newTitle || file.newArtist) ? 'inline-flex' : 'none';
     div.innerHTML = `
-        <div class="cover-cell" style="text-align: center; width: 50px; height: 52px; display: flex; align-items: center; justify-content: center; overflow: hidden;">
-            ${coverHtml}
-        </div>
-        <div style="display: flex; align-items: center; justify-content: center; height: 52px;">
-            <button onclick="togglePlay(${index})" id="play-btn-${index}" class="play-btn" style="background: linear-gradient(135deg, var(--primary) 0%, #7c3aed 100%); border: none; cursor: pointer; font-size: 1.3rem; padding: 0; width: 46px; height: 46px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; box-shadow: 0 3px 10px rgba(99, 102, 241, 0.4); transition: all 0.2s; flex-shrink: 0;">
-                <span style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding-left: 3px;">▶</span>
+        <div class="cover-cell">${coverHtml}</div>
+        <div style="display:flex;align-items:center;justify-content:center;">
+            <button type="button" onclick="togglePlay(${index})" id="play-btn-${index}" class="play-btn" style="width:28px;height:28px;border-radius:50%;border:none;background:var(--accent);color:white;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;flex-shrink:0;">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-left:2px;"><use href="#icon-play"/></svg>
             </button>
             <audio id="audio-${index}" src="/file/${encodeURIComponent(file.filename)}" preload="metadata"></audio>
         </div>
-        <div style="display: flex; flex-direction: column; gap: 1px; height: 52px; justify-content: center; overflow: visible; min-width: 0; padding: 2px 0;">
-            <div class="file-name" title="${file.filename}" style="margin: 0; margin-bottom: 0; height: auto; font-size: 0.82rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #1f2937; font-weight: 500; line-height: 1.2;">${filenameDisplay}</div>
-            <div style="display: flex; align-items: center; gap: 10px; height: 20px;">
-                <div class="progress-container" onclick="scrubAudio(event, ${index})" style="flex: 1; height: 10px; background: #e5e7eb; border-radius: 5px; cursor: pointer; position: relative; box-shadow: inset 0 1px 3px rgba(0,0,0,0.12); padding: 2px; min-width: 100px;">
-                    <div id="progress-${index}" class="progress-bar" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--primary) 0%, #7c3aed 100%); border-radius: 4px; transition: width 0.1s; box-shadow: 0 1px 4px rgba(99, 102, 241, 0.5);"></div>
+        <div style="display:flex;flex-direction:column;gap:2px;justify-content:center;min-width:0;">
+            <div class="file-name" title="${(file.filename || '').replace(/"/g, '&quot;')}">${filenameDisplay}</div>
+            <div style="display:flex;align-items:center;gap:6px;">
+                <div class="progress-container" onclick="scrubAudio(event, ${index})" style="flex:1;height:6px;background:var(--border);border-radius:3px;cursor:pointer;min-width:60px;">
+                    <div id="progress-${index}" class="progress-bar" style="width:0%;height:100%;background:var(--accent);border-radius:3px;transition:width 0.1s;"></div>
                 </div>
-                <span id="time-${index}" style="font-size: 0.78rem; color: #374151; min-width: 45px; font-family: 'SF Mono', 'Monaco', 'Courier New', monospace; text-align: right; font-weight: 600; letter-spacing: 0.3px; line-height: 1.4; display: flex; align-items: center; justify-content: flex-end;">0:00</span>
+                <span id="time-${index}" style="font-size:0.7rem;color:var(--ink-subtle);min-width:36px;font-family:var(--font-mono);text-align:right;">0:00</span>
             </div>
         </div>
         <div class="${titleClass}">${titleDisplay}</div>
@@ -407,25 +380,13 @@ function createFileItem(file, index) {
         <div class="${albumClass}">${albumDisplay}</div>
         <div class="${yearClass}">${yearDisplay}</div>
         <div class="${genreClass}">${genreDisplay}</div>
-        <div id="confidence-${index}" style="text-align: center; min-height: 52px; max-height: 52px; display: flex; justify-content: center; align-items: center;">
-            ${confidenceBadge}
-        </div>
+        <div id="confidence-${index}" style="text-align:center;display:flex;justify-content:center;align-items:center;">${confidenceBadge}</div>
         <div class="file-actions">
-            <button onclick="lookupMetadata(${index}, true)" class="btn btn-primary btn-small" title="Auto lookup (uses best match)">
-                🔍
-            </button>
-            <button onclick="lookupMetadata(${index}, false)" class="btn btn-secondary btn-small" title="Manual lookup (choose from results)">
-                📝
-            </button>
-            <button onclick="revertLookup(${index})" class="btn btn-warning btn-small" title="Revert to original tags" style="display: ${file.newTitle || file.newArtist ? 'inline-flex' : 'none'};">
-                ↶
-            </button>
-            <button onclick="viewMetadata(${index})" class="btn btn-secondary btn-small" title="View all metadata">
-                📋
-            </button>
-            <button onclick="saveFile(${index})" class="btn btn-success btn-small" title="Save changes">
-                💾
-            </button>
+            <button type="button" onclick="lookupMetadata(${index}, true)" class="btn btn-primary btn-small" title="Auto lookup"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-search"/></svg></button>
+            <button type="button" onclick="lookupMetadata(${index}, false)" class="btn btn-secondary btn-small" title="Choose result"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-edit"/></svg></button>
+            <button type="button" onclick="revertLookup(${index})" class="btn btn-warning btn-small" title="Revert" style="display:${revertDisplay}"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-refresh"/></svg></button>
+            <button type="button" onclick="viewMetadata(${index})" class="btn btn-secondary btn-small" title="Metadata"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-info"/></svg></button>
+            <button type="button" onclick="saveFile(${index})" class="btn btn-success btn-small" title="Save"><svg class="icon" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><use href="#icon-save"/></svg></button>
         </div>
     `;
     
@@ -1123,107 +1084,57 @@ let timeUpdateListeners = {};
 let endedListeners = {};
 
 function togglePlay(index) {
-    console.log('=== TOGGLE PLAY DEBUG ===');
-    console.log('Index:', index);
-    console.log('Current file:', currentFiles[index]);
-    
     const audio = document.getElementById(`audio-${index}`);
     const playBtn = document.getElementById(`play-btn-${index}`);
-    
-    if (!audio) {
-        console.error('❌ Audio element not found for index', index);
-        alert('Audio element not found!');
-        return;
-    }
-    
-    console.log('Audio element:', audio);
-    console.log('Audio src:', audio.src);
-    console.log('Audio readyState:', audio.readyState);
-    console.log('Audio networkState:', audio.networkState);
-    console.log('Audio error:', audio.error);
-    
+
+    if (!audio) return;
+
     if (audio.error) {
-        console.error('❌ Audio has error:', audio.error.code, audio.error.message);
         const errorMessages = {
-            1: 'MEDIA_ERR_ABORTED - Loading was aborted',
-            2: 'MEDIA_ERR_NETWORK - Network error',
-            3: 'MEDIA_ERR_DECODE - Decode error',
-            4: 'MEDIA_ERR_SRC_NOT_SUPPORTED - Source not supported'
+            1: 'Loading was aborted',
+            2: 'Network error',
+            3: 'Decode error',
+            4: 'Source not supported'
         };
-        alert('Audio Error: ' + errorMessages[audio.error.code] + '\n\nSrc: ' + audio.src);
+        alert('Audio Error: ' + (errorMessages[audio.error.code] || 'Unknown'));
         return;
     }
-    
-    // Stop any other playing audio
+
     if (currentlyPlaying !== null && currentlyPlaying !== index) {
-        console.log('Stopping currently playing track:', currentlyPlaying);
         const otherAudio = document.getElementById(`audio-${currentlyPlaying}`);
         const otherBtn = document.getElementById(`play-btn-${currentlyPlaying}`);
-        if (otherAudio) {
-            otherAudio.pause();
-            otherAudio.currentTime = 0;
-        }
-        if (otherBtn) {
-            otherBtn.innerHTML = '<span style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding-left: 3px;">▶</span>';
-        }
-        // Reset progress bar
+        if (otherAudio) { otherAudio.pause(); otherAudio.currentTime = 0; }
+        if (otherBtn) otherBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-left:2px;"><use href="#icon-play"/></svg>';
         const otherProgress = document.getElementById(`progress-${currentlyPlaying}`);
         const otherTime = document.getElementById(`time-${currentlyPlaying}`);
         if (otherProgress) otherProgress.style.width = '0%';
         if (otherTime) otherTime.textContent = '0:00';
     }
-    
+
     if (audio.paused) {
-        console.log('▶️ Attempting to play audio...');
         audio.play().then(() => {
-            console.log('✅ Audio playing successfully!', audio.src);
-            playBtn.innerHTML = '<span style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%;">⏸</span>';
+            playBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><use href="#icon-pause"/></svg>';
             currentlyPlaying = index;
-        }).catch(error => {
-            console.error('❌ Error playing audio:', error);
-            console.error('Error name:', error.name);
-            console.error('Error message:', error.message);
-            console.error('Audio src:', audio.src);
-            console.error('Audio readyState:', audio.readyState);
-            alert('Could not play audio:\n' + error.message + '\n\nSrc: ' + audio.src);
-        });
-        
-        // Remove old listeners if they exist
-        if (timeUpdateListeners[index]) {
-            audio.removeEventListener('timeupdate', timeUpdateListeners[index]);
-        }
-        if (endedListeners[index]) {
-            audio.removeEventListener('ended', endedListeners[index]);
-        }
-        
-        // Add new listeners
-        timeUpdateListeners[index] = function() {
-            updateProgress(index);
-        };
+        }).catch(() => {});
+
+        if (timeUpdateListeners[index]) audio.removeEventListener('timeupdate', timeUpdateListeners[index]);
+        if (endedListeners[index]) audio.removeEventListener('ended', endedListeners[index]);
+
+        timeUpdateListeners[index] = function() { updateProgress(index); };
         endedListeners[index] = function() {
-            console.log('🏁 Audio ended for index', index);
-            playBtn.innerHTML = '<span style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding-left: 3px;">▶</span>';
+            playBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-left:2px;"><use href="#icon-play"/></svg>';
             currentlyPlaying = null;
             document.getElementById(`progress-${index}`).style.width = '0%';
             document.getElementById(`time-${index}`).textContent = '0:00';
         };
-        
+
         audio.addEventListener('timeupdate', timeUpdateListeners[index]);
         audio.addEventListener('ended', endedListeners[index]);
-        
-        // Add error listener
-        audio.addEventListener('error', function(e) {
-            console.error('❌ Audio error event:', e);
-            console.error('Audio error object:', audio.error);
-        });
     } else {
-        console.log('⏸️ Pausing audio');
         audio.pause();
-        playBtn.innerHTML = '<span style="display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; padding-left: 3px;">▶</span>';
+        playBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" style="margin-left:2px;"><use href="#icon-play"/></svg>';
         currentlyPlaying = null;
     }
-    
-    console.log('=== END DEBUG ===');
 }
 
 function updateProgress(index) {
@@ -1259,20 +1170,19 @@ function scrubAudio(event, index) {
 
 const SHAZAM_COMPARE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 let shazamComparePollInterval = null;
-let shazamSectionOpen = true;
 let shazamFolderInputs = [];
 let shazamProgressInterval = null;
 let shazamTrackUrls = {};
 /** Per-track "starred in Soundeo" state (key: "Artist - Title"). Restored from status on load. */
 let shazamStarred = {};
-
-function toggleShazamSection() {
-    shazamSectionOpen = !shazamSectionOpen;
-    const content = document.getElementById('shazamSyncContent');
-    const icon = document.getElementById('shazamToggleIcon');
-    if (content) content.style.display = shazamSectionOpen ? 'block' : 'none';
-    if (icon) icon.textContent = shazamSectionOpen ? '▼' : '▶';
-}
+/** Per-track dismissed state (key: "Artist - Title"). Dismissed = unstarred on Soundeo + strikethrough. */
+let shazamDismissed = {};
+/** Track keys for which the user dismissed the "Manual check" message. Restored from status on load. */
+let shazamDismissedManualCheck = {};
+/** Per-track Soundeo display title (exact as listed on Soundeo). Key: "Artist - Title". Restored from status on load. */
+let shazamSoundeoTitles = {};
+/** Track keys currently being processed by a per-row action (dismiss/sync/skip). */
+let shazamActionPending = {};
 
 async function shazamLoadSettings() {
     try {
@@ -1292,19 +1202,11 @@ function shazamApplySettings(cfg) {
     shazamRenderFolderList();
     const statusEl = document.getElementById('soundeoSessionStatus');
     const pathEl = document.getElementById('soundeoSessionPath');
+    const btn = document.getElementById('shazamSaveSessionBtn');
     const hasSession = !!(cfg.soundeo_cookies_path || cfg.soundeo_cookies_path_resolved);
-    if (statusEl) statusEl.textContent = hasSession ? 'Soundeo session: Saved' : 'Soundeo session: Not saved';
-    if (pathEl) {
-        const resolved = cfg.soundeo_cookies_path_resolved || cfg.soundeo_cookies_path;
-        if (resolved) {
-            pathEl.style.display = 'block';
-            pathEl.textContent = 'Session file: ' + resolved;
-        } else {
-            pathEl.style.display = 'none';
-        }
-    }
-    const headedCb = document.getElementById('shazamHeadedMode');
-    if (headedCb) headedCb.checked = cfg.headed_mode !== false;
+    if (statusEl) statusEl.textContent = hasSession ? '· connected' : '· not connected';
+    if (btn) btn.textContent = hasSession ? 'Reconnect' : 'Connect Soundeo';
+    if (pathEl) pathEl.style.display = 'none';
 }
 
 async function shazamBootstrapLoad() {
@@ -1349,11 +1251,25 @@ function shazamFolderChanged(input) {
     shazamFolderInputs[idx] = val;
     if (shazamFolderInputs.length === 1 && !val) shazamFolderInputs = [];
     shazamRenderFolderList();
+    const folders = shazamFolderInputs.filter(Boolean);
+    if (folders.length) {
+        fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ destination_folders: folders })
+        }).catch(() => {});
+    }
 }
 
 function shazamRemoveFolder(idx) {
     shazamFolderInputs.splice(idx, 1);
     shazamRenderFolderList();
+    const folders = shazamFolderInputs.filter(Boolean);
+    fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ destination_folders: folders })
+    }).catch(() => {});
 }
 
 async function shazamRescanFolder(idx) {
@@ -1401,6 +1317,11 @@ async function shazamAddFolder() {
         if (data.folder_path && !shazamFolderInputs.includes(data.folder_path)) {
             shazamFolderInputs.push(data.folder_path);
             shazamRenderFolderList();
+            fetch('/api/settings', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ destination_folders: shazamFolderInputs.filter(Boolean) })
+            }).catch(() => {});
         }
     } catch (e) {
         hideLoading();
@@ -1411,47 +1332,65 @@ async function shazamAddFolder() {
 async function shazamSaveSettings() {
     const inputs = document.querySelectorAll('#shazamFolderList input');
     shazamFolderInputs = Array.from(inputs).map(i => i.value.trim()).filter(Boolean);
-    const headedCb = document.getElementById('shazamHeadedMode');
-    const headedMode = headedCb ? headedCb.checked : true;
     try {
         await fetch('/api/settings', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                destination_folders: shazamFolderInputs,
-                headed_mode: headedMode
-            })
+            body: JSON.stringify({ destination_folders: shazamFolderInputs })
         });
         alert('Settings saved.');
         shazamRenderFolderList();
-        shazamLoadSettings();
     } catch (e) {
         alert('Error saving: ' + e.message);
     }
 }
 
 async function shazamSaveSession() {
+    const statusEl = document.getElementById('soundeoSessionStatus');
+    const saveBtn = document.getElementById('shazamSaveSessionBtn');
+    if (saveBtn) saveBtn.disabled = true;
+    if (statusEl) statusEl.textContent = 'Opening browser…';
     try {
         const res = await fetch('/api/soundeo/start-save-session', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
         const data = await res.json();
         if (data.error) {
+            if (statusEl) statusEl.textContent = 'Soundeo session: not connected';
+            if (saveBtn) saveBtn.disabled = false;
             alert(data.error);
             return;
         }
+        if (statusEl) statusEl.textContent = 'Waiting for login…';
         document.getElementById('shazamLoggedInBtn').style.display = 'inline-block';
-        alert('Browser opened. Log in to Soundeo. Wait until you see the main Soundeo page (not the login form), then click "I have logged in".');
+        if (saveBtn) saveBtn.style.display = 'none';
     } catch (e) {
+        if (statusEl) statusEl.textContent = 'Soundeo session: not connected';
+        if (saveBtn) saveBtn.disabled = false;
         alert('Error: ' + e.message);
     }
 }
 
 async function shazamSessionSaved() {
+    const statusEl = document.getElementById('soundeoSessionStatus');
+    const loggedInBtn = document.getElementById('shazamLoggedInBtn');
+    const saveBtn = document.getElementById('shazamSaveSessionBtn');
+    if (loggedInBtn) loggedInBtn.disabled = true;
+    if (statusEl) statusEl.textContent = 'Saving session…';
     try {
-        await fetch('/api/soundeo/session-saved', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
-        document.getElementById('shazamLoggedInBtn').style.display = 'none';
-        document.getElementById('soundeoSessionStatus').textContent = 'Soundeo session: Saved';
-        shazamLoadSettings();
+        const res = await fetch('/api/soundeo/session-saved', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+        const data = await res.json();
+        if (loggedInBtn) { loggedInBtn.style.display = 'none'; loggedInBtn.disabled = false; }
+        if (saveBtn) { saveBtn.style.display = ''; saveBtn.disabled = false; }
+        if (data.logged_in) {
+            if (statusEl) statusEl.textContent = 'Soundeo session: connected';
+            if (saveBtn) saveBtn.textContent = 'Reconnect';
+        } else {
+            if (statusEl) statusEl.textContent = 'Soundeo session: login failed';
+            alert(data.message || 'Could not verify login. Try again and make sure you are logged in before clicking the button.');
+        }
     } catch (e) {
+        if (loggedInBtn) { loggedInBtn.style.display = 'none'; loggedInBtn.disabled = false; }
+        if (saveBtn) { saveBtn.style.display = ''; saveBtn.disabled = false; }
+        if (statusEl) statusEl.textContent = 'Soundeo session: error';
         alert('Error: ' + e.message);
     }
 }
@@ -1531,9 +1470,6 @@ async function shazamCompare() {
         }
         const res = await fetch('/api/shazam-sync/compare', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
         const data = await res.json();
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d42056e9-4ace-4e98-8de1-2a37a10359ad',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:shazamCompare',message:'compare response',data:{running:!!data.running,error:data.error||null,hasShazamCount:data.shazam_count!=null},timestamp:Date.now(),hypothesisId:'H1'})}).catch(function(){});
-        // #endregion
         if (!res.ok) {
             shazamShowCompareProgress(false);
             alert(data.error || 'Compare failed');
@@ -1547,18 +1483,12 @@ async function shazamCompare() {
             return;
         }
         if (data.running) {
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/d42056e9-4ace-4e98-8de1-2a37a10359ad',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:shazamCompare',message:'showing progress',data:{},timestamp:Date.now(),hypothesisId:'H2'})}).catch(function(){});
-            // #endregion
             shazamShowCompareProgress(true, 0, 0, 'Starting compare...');
             const start = Date.now();
             setTimeout(function () { shazamComparePoll(start); }, 120);
             shazamComparePollInterval = setInterval(function () { shazamComparePoll(start); }, 500);
             return;
         }
-        // #region agent log
-        fetch('http://127.0.0.1:7242/ingest/d42056e9-4ace-4e98-8de1-2a37a10359ad',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:shazamCompare',message:'immediate status',hypothesisId:'H5',data:{have_len:(data.have_locally&&data.have_locally.length)||0,to_download_count:data.to_download_count},timestamp:Date.now()})}).catch(function(){});
-        // #endregion
         shazamShowCompareProgress(false);
         document.getElementById('shazamCount').textContent = data.shazam_count || 0;
         document.getElementById('shazamLocalCount').textContent = data.local_count || 0;
@@ -1591,9 +1521,6 @@ async function shazamComparePoll(startTime) {
             const cur = sp.current || 0;
             const tot = sp.total || 0;
             const msg = sp.message || (tot > 0 ? 'Scanning files...' : 'Discovering files...');
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/d42056e9-4ace-4e98-8de1-2a37a10359ad',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:shazamComparePoll',message:'poll running',data:{cur:cur,tot:tot},timestamp:Date.now(),hypothesisId:'H4'})}).catch(function(){});
-            // #endregion
             shazamShowCompareProgress(true, cur, tot, tot > 0 ? (cur.toLocaleString() + ' / ' + tot.toLocaleString() + ' files') : msg);
             return;
         }
@@ -1676,11 +1603,6 @@ async function shazamLoadStatus(retryCount = 0) {
 
 function shazamApplyStatus(data) {
     if (!data) data = {};
-    // #region agent log
-    var _u = data.urls ? Object.keys(data.urls) : [];
-    var _s = data.starred ? Object.keys(data.starred) : [];
-    fetch('http://127.0.0.1:7242/ingest/d42056e9-4ace-4e98-8de1-2a37a10359ad',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:shazamApplyStatus',message:'applying',hypothesisId:'H3H4',data:{urls_keys:_u,starred_keys:_s,have_len:(data.have_locally&&data.have_locally.length)||0,to_download_count:data.to_download_count},timestamp:Date.now()})}).catch(function(){});
-    // #endregion
     const setText = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val; };
     setText('shazamCount', data.shazam_count ?? 0);
     setText('shazamLocalCount', data.local_count ?? 0);
@@ -1695,20 +1617,17 @@ function shazamApplyStatus(data) {
             warnEl.style.display = 'none';
         }
     }
-    const statsEl = document.getElementById('shazamFolderStats');
-    if (statsEl && data.folder_stats && data.folder_stats.length > 0) {
-        statsEl.innerHTML = '<strong>Per folder:</strong> ' + data.folder_stats.map(function (f) {
-            var name = f.path.split(/[/\\]/).filter(Boolean).pop() || f.path;
-            return name + ': ' + f.scanned + ' scanned, ' + f.matched + ' matched';
-        }).join(' · ');
-        statsEl.style.display = 'block';
-    } else if (statsEl) {
-        statsEl.style.display = 'none';
-    }
     const syncBtn = document.getElementById('shazamSyncBtn');
     if (syncBtn) syncBtn.disabled = !(data.to_download && data.to_download.length > 0);
     if (data.starred) Object.assign(shazamStarred, data.starred);
     if (data.urls && (!data.starred || Object.keys(data.starred).length === 0)) { Object.keys(data.urls).forEach(k => { shazamStarred[k] = true; }); }
+    if (data.dismissed_manual_check && Array.isArray(data.dismissed_manual_check)) {
+        shazamDismissedManualCheck = {};
+        data.dismissed_manual_check.forEach(k => { shazamDismissedManualCheck[k] = true; });
+    }
+    if (data.soundeo_titles && typeof data.soundeo_titles === 'object') {
+        Object.assign(shazamSoundeoTitles, data.soundeo_titles);
+    }
     shazamRenderTrackList(data);
     if (data.compare_running && !shazamComparePollInterval) {
         const sp = data.scan_progress || {};
@@ -1739,15 +1658,100 @@ let shazamToDownloadTracks = [];
 let shazamLastData = null;
 let shazamFilterTime = 'all';
 let shazamFilterStatus = 'all';
+/** Scan Soundeo favorites range: 'all' | '1_month' | '2_months' | '3_months'. Use All time to fix starred state. */
+let shazamScanRange = 'all';
 let shazamCurrentlyPlaying = null;
 let shazamAudioEl = null;
+/** Row play button for the currently playing track (for bar sync). */
+let shazamPlayingBtn = null;
+let shazamBarTimeUpdate = null;
+let shazamBarEnded = null;
+
+function shazamPlayerBarShow(label) {
+    const bar = document.getElementById('shazamPlayerBar');
+    const labelEl = document.getElementById('shazamBarTrackLabel');
+    const playPauseBtn = document.getElementById('shazamBarPlayPause');
+    if (!bar || !labelEl || !playPauseBtn) return;
+    labelEl.textContent = label || '—';
+    bar.style.display = 'flex';
+    playPauseBtn.textContent = '⏸';
+    playPauseBtn.classList.remove('paused');
+    if (shazamAudioEl) {
+        if (shazamBarTimeUpdate) shazamAudioEl.removeEventListener('timeupdate', shazamBarTimeUpdate);
+        if (shazamBarEnded) shazamAudioEl.removeEventListener('ended', shazamBarEnded);
+        shazamBarTimeUpdate = function () { shazamPlayerBarUpdateProgress(); };
+        shazamBarEnded = function () {
+            shazamPlayerBarHide();
+            const playingBtn = document.querySelector('.shazam-play-btn.playing');
+            if (playingBtn) { playingBtn.textContent = '▶'; playingBtn.classList.remove('playing'); }
+            shazamCurrentlyPlaying = null;
+        };
+        shazamAudioEl.addEventListener('timeupdate', shazamBarTimeUpdate);
+        shazamAudioEl.addEventListener('ended', shazamBarEnded);
+    }
+    shazamPlayerBarUpdateProgress();
+}
+
+function shazamPlayerBarHide() {
+    const bar = document.getElementById('shazamPlayerBar');
+    if (!bar) return;
+    bar.style.display = 'none';
+    if (shazamAudioEl && shazamBarTimeUpdate) shazamAudioEl.removeEventListener('timeupdate', shazamBarTimeUpdate);
+    if (shazamAudioEl && shazamBarEnded) shazamAudioEl.removeEventListener('ended', shazamBarEnded);
+    shazamBarTimeUpdate = null;
+    shazamBarEnded = null;
+    if (shazamPlayingBtn) { shazamPlayingBtn.textContent = '▶'; shazamPlayingBtn.classList.remove('playing'); shazamPlayingBtn = null; }
+}
+
+function shazamPlayerBarUpdateProgress() {
+    if (!shazamAudioEl) return;
+    const progressEl = document.getElementById('shazamBarProgress');
+    const timeEl = document.getElementById('shazamBarTime');
+    const durationEl = document.getElementById('shazamBarDuration');
+    if (progressEl) progressEl.style.width = (shazamAudioEl.duration ? (shazamAudioEl.currentTime / shazamAudioEl.duration) * 100 : 0) + '%';
+    const fmt = (s) => { const m = Math.floor(s / 60); const sec = Math.floor(s % 60); return m + ':' + (sec < 10 ? '0' : '') + sec; };
+    if (timeEl) timeEl.textContent = fmt(isFinite(shazamAudioEl.currentTime) ? shazamAudioEl.currentTime : 0);
+    if (durationEl) durationEl.textContent = fmt(shazamAudioEl.duration && isFinite(shazamAudioEl.duration) ? shazamAudioEl.duration : 0);
+}
+
+function shazamPlayerBarScrub(e) {
+    if (!shazamAudioEl || !shazamAudioEl.duration) return;
+    const scrub = document.getElementById('shazamBarScrub');
+    if (!scrub) return;
+    const rect = scrub.getBoundingClientRect();
+    const x = (e && e.clientX != null) ? e.clientX - rect.left : 0;
+    const pct = Math.max(0, Math.min(1, x / rect.width));
+    shazamAudioEl.currentTime = shazamAudioEl.duration * pct;
+    shazamPlayerBarUpdateProgress();
+}
+
+function shazamPlayerBarPlayPause() {
+    if (!shazamAudioEl) return;
+    const playPauseBtn = document.getElementById('shazamBarPlayPause');
+    if (shazamAudioEl.paused) {
+        shazamAudioEl.play();
+        if (playPauseBtn) { playPauseBtn.textContent = '⏸'; playPauseBtn.classList.remove('paused'); }
+        if (shazamPlayingBtn) { shazamPlayingBtn.textContent = '⏸'; shazamPlayingBtn.classList.add('playing'); }
+    } else {
+        shazamAudioEl.pause();
+        if (playPauseBtn) { playPauseBtn.textContent = '▶'; playPauseBtn.classList.add('paused'); }
+        if (shazamPlayingBtn) { shazamPlayingBtn.textContent = '▶'; shazamPlayingBtn.classList.remove('playing'); }
+    }
+}
+
+function shazamPlayerBarClose() {
+    if (shazamAudioEl) shazamAudioEl.pause();
+    shazamCurrentlyPlaying = null;
+    shazamPlayerBarHide();
+}
 
 function shazamApplyFilters(merged) {
     const now = Math.floor(Date.now() / 1000);
-    const week = 7 * 86400, quarter = 91 * 86400, year = 365 * 86400;
+    const oneMonth = 30 * 86400, twoMonths = 60 * 86400, threeMonths = 91 * 86400;
     let out = merged;
     if (shazamFilterTime !== 'all') {
-        const cutoff = now - (shazamFilterTime === 'week' ? week : shazamFilterTime === 'quarter' ? quarter : year);
+        const sec = shazamFilterTime === '1_month' ? oneMonth : shazamFilterTime === '2_months' ? twoMonths : threeMonths;
+        const cutoff = now - sec;
         out = out.filter(t => (t.shazamed_at ?? 0) >= cutoff);
     }
     if (shazamFilterStatus !== 'all') {
@@ -1762,13 +1766,17 @@ function shazamRenderTrackList(data) {
     if (data.urls) Object.assign(shazamTrackUrls, data.urls);
     if (data.starred) Object.assign(shazamStarred, data.starred);
     if (data.urls && (!data.starred || Object.keys(data.starred).length === 0)) { Object.keys(data.urls).forEach(k => { shazamStarred[k] = true; }); }
-    // #region agent log
-    var _rows = (data.to_download || []).slice(0, 3);
-    var _sample = _rows.map(function(r) { var k = r.artist + ' - ' + r.title; return { key: k, hasUrl: !!shazamTrackUrls[k], hasStarred: !!shazamStarred[k] }; });
-    fetch('http://127.0.0.1:7242/ingest/d42056e9-4ace-4e98-8de1-2a37a10359ad',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:shazamRenderTrackList',message:'sample keys',hypothesisId:'H4',data:{sample:_sample},timestamp:Date.now()})}).catch(function(){});
-    // #endregion
+    if (data.dismissed) Object.assign(shazamDismissed, data.dismissed);
+    if (data.dismissed_manual_check && Array.isArray(data.dismissed_manual_check)) {
+        shazamDismissedManualCheck = {};
+        data.dismissed_manual_check.forEach(k => { shazamDismissedManualCheck[k] = true; });
+    }
+    if (data.soundeo_titles && typeof data.soundeo_titles === 'object') {
+        Object.assign(shazamSoundeoTitles, data.soundeo_titles);
+    }
     const have = (data.have_locally || []).map(t => ({ ...t, status: 'have' }));
     const toDl = (data.to_download || []).map((t, i) => ({ ...t, status: 'todl', _idx: i }));
+    const skipped = (data.skipped_tracks || []).map(t => ({ ...t, status: 'skipped' }));
     shazamToDownloadTracks = data.to_download || [];
     const el = document.getElementById('shazamTrackList');
     const selectionBar = document.getElementById('shazamSelectionBar');
@@ -1784,7 +1792,7 @@ function shazamRenderTrackList(data) {
     if (data.error) {
         html += `<p class="shazam-info-msg shazam-warning">${escapeHtml(data.error)}</p>`;
     }
-    if (have.length === 0 && toDl.length === 0) {
+    if (have.length === 0 && toDl.length === 0 && skipped.length === 0) {
         if (!data.error) {
             html += '<p class="shazam-info-msg">Click <strong>Fetch Shazam</strong> to load tracks, add destination folders in Settings, then <strong>Compare</strong>.</p>';
         }
@@ -1792,48 +1800,139 @@ function shazamRenderTrackList(data) {
         if (selectionBar) selectionBar.style.display = 'none';
         return;
     }
-    const merged = [...have, ...toDl];
+    const merged = [...have, ...toDl, ...skipped];
     merged.sort((a, b) => { const sa = a.shazamed_at ?? 0; const sb = b.shazamed_at ?? 0; return sb - sa; });
     const filtered = shazamApplyFilters(merged);
-    const hasPlayable = have.some(t => t.filepath);
-    html += '<table class="shazam-track-table"><thead><tr><th>Status</th><th>Shazam</th><th>Artist</th><th>Title</th>';
-    if (hasPlayable) html += '<th class="shazam-play-col"></th>';
-    html += '<th>Starred</th><th>Link</th>';
-    if (filtered.some(r => r.status === 'todl')) html += '<th class="shazam-select-col"><input type="checkbox" id="shazamSelectAll" onchange="shazamToggleSelectAll(this)" title="Select all" /></th>';
+    const hasTodl = filtered.some(r => r.status === 'todl');
+    const hasSkipped = filtered.some(r => r.status === 'skipped');
+    html += '<table class="shazam-track-table"><thead><tr><th></th><th>When</th><th>Artist</th><th>Title</th><th class="shazam-match-col">Match</th>';
+    html += '<th></th><th></th><th>Actions</th>';
+    html += '<th class="shazam-select-col">' + (hasTodl ? '<input type="checkbox" id="shazamSelectAll" onchange="shazamToggleSelectAll(this)" title="Select all" />' : '') + '</th>';
     html += '</tr></thead><tbody>';
     filtered.forEach((row, i) => {
         const when = shazamFormatRelativeTime(row.shazamed_at);
         const isTodl = row.status === 'todl';
+        const isSkipped = row.status === 'skipped';
         const idx = row._idx;
         const key = `${row.artist} - ${row.title}`;
-        const url = shazamTrackUrls[key] || (data.urls || {})[key];
-        const starred = !!(shazamStarred[key] || (data.starred || {})[key]);
-        const starredCell = isTodl ? (starred ? '<td class="shazam-starred">★ Starred</td>' : '<td class="shazam-not-starred">—</td>') : '<td></td>';
-        const link = isTodl ? (url ? `<a href="${escapeHtml(url)}" target="_blank">Open in Soundeo</a>` : '-') : '';
-        let playCell = '';
-        if (hasPlayable) {
-            if (row.filepath) {
-                const pathB64 = btoa(unescape(encodeURIComponent(row.filepath)));
-                playCell = `<td class="shazam-play-col"><button type="button" class="shazam-play-btn" data-path="${escapeHtml(pathB64)}" onclick="shazamTogglePlay(this.dataset.path, this)" title="Play">▶</button></td>`;
-            } else {
-                playCell = '<td class="shazam-play-col"></td>';
-            }
+        const keyLower = key.toLowerCase();
+        const keyNorm = key.indexOf(' (') !== -1 ? key.substring(0, key.indexOf(' (')).trim() : key;
+        const keyNormLower = keyNorm.toLowerCase();
+        const keyDeep = (() => { let s = keyNormLower.replace(/ & /g, ', '); const d = s.indexOf(' - '); if (d !== -1) { const arts = s.substring(0, d).split(', ').map(a => a.trim()).filter(Boolean).sort().join(', '); s = arts + ' - ' + s.substring(d + 3); } return s; })();
+        const _lu = (map, ...keys) => { for (const k of keys) { const v = map[k]; if (v) return v; } return undefined; };
+        const url = _lu(shazamTrackUrls, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.urls || {}, key, keyLower, keyNorm, keyNormLower, keyDeep);
+        const soundeoTitle = _lu(shazamSoundeoTitles, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.soundeo_titles || {}, key, keyLower, keyNorm, keyNormLower, keyDeep);
+        const starred = !!(_lu(shazamStarred, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.starred || {}, key, keyLower, keyNorm, keyNormLower, keyDeep));
+        const score = row.match_score != null ? row.match_score : null;
+        const isSynced = !!url;
+        const isDismissed = !!(shazamDismissed[key] || shazamDismissed[keyLower]);
+        const manualCheckDismissed = !!shazamDismissedManualCheck[key];
+        const isNonExtendedVersion = soundeoTitle && /\((original\s+mix|radio\s+edit|radio\s+version|short\s+version)\)/i.test(soundeoTitle.trim()) && !/extended/i.test(soundeoTitle.trim());
+        const showManualCheck = isTodl && !isDismissed && isSynced && !manualCheckDismissed && isNonExtendedVersion;
+        const isPending = !!shazamActionPending[key];
+        const escapedKey = escapeHtml(key);
+        const escapedArtist = escapeHtml(row.artist);
+        const escapedTitle = escapeHtml(row.title);
+
+        let statusCell = '';
+        if (isDismissed) {
+            statusCell = '<td class="status-cell"><span class="status-dot status-dismissed" title="Dismissed">\u00d7</span></td>';
+        } else if (row.status === 'have') {
+            statusCell = '<td class="status-cell"><span class="status-dot status-have" title="Have locally"></span></td>';
+        } else if (row.status === 'todl') {
+            statusCell = '<td class="status-cell"><span class="status-dot status-todl" title="To download"></span></td>';
+        } else if (row.status === 'skipped') {
+            statusCell = '<td class="status-cell"><span class="status-dot status-skipped" title="Skipped">\u2014</span></td>';
         }
-        if (isTodl) {
-            html += `<tr class="to-download" data-idx="${idx}"><td>To download</td><td class="shazam-when">${escapeHtml(when)}</td><td>${escapeHtml(row.artist)}</td><td>${escapeHtml(row.title)}</td>${playCell}${starredCell}<td>${link}</td>`;
-            html += `<td class="shazam-select-col"><input type="checkbox" class="shazam-track-cb" data-idx="${idx}" onchange="shazamUpdateSelectionCount()" /></td>`;
+
+        let starredCell = '';
+        if (starred && !isDismissed) {
+            starredCell = '<td class="starred-cell" title="In Soundeo favorites"><svg class="star-icon starred" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></td>';
         } else {
-            const haveStarred = !!(shazamStarred[key] || (data.starred || {})[key]);
-            const haveStarredCell = haveStarred ? '<td class="shazam-starred">★</td>' : '<td class="shazam-not-starred">—</td>';
-            html += `<tr class="have-local"><td>✓ Have</td><td class="shazam-when">${escapeHtml(when)}</td><td>${escapeHtml(row.artist)}</td><td>${escapeHtml(row.title)}</td>${playCell}${haveStarredCell}<td></td>`;
-            if (filtered.some(r => r.status === 'todl')) html += '<td></td>';
+            starredCell = '<td class="starred-cell"><svg class="star-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg></td>';
         }
-        html += '</tr>';
+
+        let matchCell = '';
+        if (isSkipped || isDismissed) {
+            matchCell = '<td class="shazam-match-col">\u2014</td>';
+        } else if (isTodl) {
+            const manualIcon = showManualCheck
+                ? '<span class="manual-check-icon" title="Soundeo link is Original Mix / Radio Edit \u2013 check for Extended" data-track-key="' + escapedKey + '" onclick="shazamDismissManualCheck(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>'
+                : '\u2014';
+            matchCell = '<td class="shazam-match-col">' + manualIcon + '</td>';
+        } else {
+            const pct = score != null ? Math.round(score * 100) : null;
+            matchCell = '<td class="shazam-match-col">' + (pct != null ? '<span class="shazam-match-pct">' + pct + '%</span>' : '\u2014') + '</td>';
+        }
+
+        const trackLabel = (soundeoTitle || key).replace(/"/g, '&quot;');
+        let playCell = '';
+        if (row.filepath) {
+            const pathB64 = btoa(unescape(encodeURIComponent(row.filepath)));
+            const localFile = row.filepath.split('/').pop() || row.filepath;
+            playCell = `<td class="shazam-play-col"><button type="button" class="shazam-play-btn" data-path="${escapeHtml(pathB64)}" data-track-label="${escapeHtml(trackLabel)}" onclick="shazamTogglePlay(this.dataset.path, this)" title="Play local file: ${escapeHtml(localFile)}" style="width:24px;height:24px;">\u25b6</button></td>`;
+        } else if (url) {
+            const previewTip = soundeoTitle ? `Stream Soundeo preview: ${escapeHtml(soundeoTitle)}` : 'Stream Soundeo preview';
+            playCell = `<td class="shazam-play-col"><button type="button" class="shazam-play-btn shazam-soundeo-play" data-soundeo-url="${escapeHtml(url)}" data-track-label="${escapeHtml(trackLabel)}" onclick="shazamToggleSoundeoPlay(this)" title="${previewTip}" style="width:24px;height:24px;">\u25b6</button></td>`;
+        } else {
+            playCell = '<td class="shazam-play-col"></td>';
+        }
+
+        const safeAttr = s => escapeHtml(s).replace(/'/g, '&#39;');
+        let actionsCell = '<td class="shazam-actions-col">';
+        if (isPending) {
+            actionsCell += '<span class="shazam-action-spinner" title="Processing\u2026">&#8987;</span>';
+        } else if (isDismissed) {
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-undo-action" data-action="undismiss" data-key="${safeAttr(key)}" data-url="${safeAttr(url || '')}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Undo dismiss (re-star on Soundeo)">Undo</button>`;
+        } else if (isSkipped) {
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-undo-action" onclick="shazamUnskipRow(this)" title="Undo skip">Undo</button>`;
+        } else if (isTodl) {
+            if (!isSynced) {
+                actionsCell += `<button type="button" class="shazam-row-action-btn shazam-sync-action" data-action="sync" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Find &amp; star on Soundeo"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></button>`;
+            }
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-dismiss-action" data-action="dismiss" data-key="${safeAttr(key)}" data-url="${safeAttr(url || '')}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Dismiss (unstar on Soundeo)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-skip-action" data-action="skip" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Skip (hide locally)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>`;
+        }
+        actionsCell += '</td>';
+
+        let selectCell = '';
+        if (isTodl && !isDismissed) {
+            selectCell = `<td class="shazam-select-col"><input type="checkbox" class="shazam-track-cb" data-idx="${idx}" onchange="shazamUpdateSelectionCount()" /></td>`;
+        } else {
+            selectCell = '<td class="shazam-select-col"></td>';
+        }
+
+        let rowClass = isSkipped ? 'shazam-row-skipped' : (isDismissed ? 'shazam-row-dismissed' : (isTodl ? 'to-download' : 'have-local'));
+        const rowAttrs = isSkipped
+            ? ` data-artist="${escapedArtist}" data-title="${escapedTitle}"`
+            : (isTodl ? ` data-idx="${idx}"` : '');
+
+        let titleCellContent = escapeHtml(row.title);
+        if (soundeoTitle && !isDismissed && !isSkipped) {
+            titleCellContent += `<div class="soundeo-source-title" title="${escapeHtml(soundeoTitle)}">${escapeHtml(soundeoTitle)}</div>`;
+        }
+
+        html += `<tr class="${rowClass}"${rowAttrs}>${statusCell}<td class="shazam-when">${escapeHtml(when)}</td><td>${escapeHtml(row.artist)}</td><td>${titleCellContent}</td>${matchCell}${playCell}${starredCell}${actionsCell}${selectCell}</tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
     if (selectionBar) selectionBar.style.display = filtered.some(r => r.status === 'todl') ? 'flex' : 'none';
     shazamUpdateSelectionCount();
+}
+
+async function shazamDismissManualCheck(btn) {
+    const key = (btn && btn.dataset && btn.dataset.trackKey) ? btn.dataset.trackKey : null;
+    if (!key) return;
+    try {
+        const res = await fetch('/api/shazam-sync/dismiss-manual-check', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_key: key })
+        });
+        if (!res.ok) return;
+        shazamDismissedManualCheck[key] = true;
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    } catch (e) {}
 }
 
 function shazamTogglePlay(pathB64, btn) {
@@ -1849,18 +1948,154 @@ function shazamTogglePlay(pathB64, btn) {
     if (shazamCurrentlyPlaying === pathB64) {
         shazamAudioEl.pause();
         shazamCurrentlyPlaying = null;
+        shazamPlayerBarHide();
         return;
     }
     shazamAudioEl.src = streamUrl;
-    shazamAudioEl.play().then(() => {
-        btn.textContent = '⏸';
-        btn.classList.add('playing');
-        shazamCurrentlyPlaying = pathB64;
-    }).catch(() => {});
     shazamAudioEl.onended = () => {
         if (btn) { btn.textContent = '▶'; btn.classList.remove('playing'); }
         shazamCurrentlyPlaying = null;
     };
+    shazamAudioEl.play().then(() => {
+        btn.textContent = '⏸';
+        btn.classList.add('playing');
+        shazamCurrentlyPlaying = pathB64;
+        shazamPlayingBtn = btn;
+        shazamPlayerBarShow(btn.dataset.trackLabel || '—');
+    }).catch(() => {});
+}
+
+async function shazamToggleSoundeoPlay(btn) {
+    const trackUrl = btn.dataset.soundeoUrl;
+    if (!trackUrl) return;
+
+    if (!shazamAudioEl) {
+        shazamAudioEl = document.createElement('audio');
+    }
+    const playingBtn = document.querySelector('.shazam-play-btn.playing');
+    if (playingBtn && playingBtn !== btn) {
+        playingBtn.textContent = '▶';
+        playingBtn.classList.remove('playing');
+    }
+    if (shazamCurrentlyPlaying === trackUrl) {
+        shazamAudioEl.pause();
+        btn.textContent = '▶';
+        btn.classList.remove('playing');
+        shazamCurrentlyPlaying = null;
+        shazamPlayerBarHide();
+        return;
+    }
+
+    btn.textContent = '…';
+    btn.disabled = true;
+    const resetBtn = () => { btn.textContent = '▶'; btn.classList.remove('playing'); btn.disabled = false; };
+    try {
+        const streamUrl = '/api/soundeo/stream-preview?track_url=' + encodeURIComponent(trackUrl);
+        shazamAudioEl.onerror = () => {
+            console.warn('Soundeo preview audio error');
+            resetBtn();
+            shazamCurrentlyPlaying = null;
+        };
+        shazamAudioEl.onended = () => {
+            resetBtn();
+            shazamCurrentlyPlaying = null;
+        };
+        shazamAudioEl.src = streamUrl;
+        shazamAudioEl.load();
+        await shazamAudioEl.play();
+        btn.textContent = '⏸';
+        btn.classList.add('playing');
+        btn.disabled = false;
+        shazamCurrentlyPlaying = trackUrl;
+        shazamPlayingBtn = btn;
+        shazamPlayerBarShow(btn.dataset.trackLabel || '—');
+    } catch (e) {
+        console.warn('Soundeo preview playback failed:', e);
+        resetBtn();
+        shazamCurrentlyPlaying = null;
+    }
+}
+
+async function shazamDismissTrack(key, trackUrl, artist, title) {
+    if (shazamActionPending[key]) return;
+    shazamActionPending[key] = true;
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    try {
+        const res = await fetch('/api/shazam-sync/dismiss-track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, track_url: trackUrl }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            shazamDismissed[key] = true;
+            shazamStarred[key] = false;
+        }
+    } catch (e) {}
+    delete shazamActionPending[key];
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+}
+
+async function shazamUndismissTrack(key, trackUrl, artist, title) {
+    if (shazamActionPending[key]) return;
+    shazamActionPending[key] = true;
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    try {
+        const res = await fetch('/api/shazam-sync/undismiss-track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, track_url: trackUrl, artist, title }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            delete shazamDismissed[key];
+            shazamStarred[key] = true;
+            if (data.url) shazamTrackUrls[key] = data.url;
+        }
+    } catch (e) {}
+    delete shazamActionPending[key];
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+}
+
+async function shazamSkipSingleTrack(artist, title) {
+    const key = `${artist} - ${title}`;
+    if (shazamActionPending[key]) return;
+    shazamActionPending[key] = true;
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    try {
+        const res = await fetch('/api/shazam-sync/skip-track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ artist, title }),
+        });
+        if (res.ok) {
+            shazamLoadStatus();
+            return;
+        }
+    } catch (e) {}
+    delete shazamActionPending[key];
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+}
+
+async function shazamSyncSingleTrack(key, artist, title) {
+    if (shazamActionPending[key]) return;
+    shazamActionPending[key] = true;
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    try {
+        const res = await fetch('/api/shazam-sync/sync-single-track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, artist, title }),
+        });
+        const data = await res.json();
+        if (res.ok && data.ok) {
+            shazamTrackUrls[key] = data.url;
+            shazamStarred[key] = true;
+            if (data.display_text) shazamSoundeoTitles[key] = data.display_text;
+        }
+    } catch (e) {}
+    delete shazamActionPending[key];
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
 }
 
 
@@ -1895,19 +2130,83 @@ async function shazamSkipSelected() {
     } catch (e) { alert('Error: ' + e.message); }
 }
 
+function shazamUnskipRow(btn) {
+    const tr = btn.closest('tr');
+    if (!tr) return;
+    shazamUnskip(tr.dataset.artist || '', tr.dataset.title || '');
+}
+
+async function shazamUnskip(artist, title) {
+    try {
+        const res = await fetch('/api/shazam-sync/unskip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ tracks: [{ artist, title }] }),
+        });
+        const data = await res.json();
+        if (!res.ok) { alert(data.error || 'Undo failed'); return; }
+        shazamLoadStatus();
+    } catch (e) { alert('Error: ' + e.message); }
+}
+
+function shazamIgnoreTrackRow(btn) {
+    const key = (btn && btn.dataset && btn.dataset.trackKey) ? btn.dataset.trackKey : '';
+    const url = (btn && btn.dataset && btn.dataset.trackUrl) ? btn.dataset.trackUrl : '';
+    if (key && url) shazamIgnoreTrack(key, url);
+}
+
+async function shazamIgnoreTrack(key, url) {
+    if (!confirm('Remove this track from your Soundeo favorites? This cannot be undone from the app.')) return;
+    try {
+        const res = await fetch('/api/shazam-sync/remove-from-soundeo', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ track_key: key, track_url: url })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) { alert(data.error || 'Failed to remove from Soundeo'); return; }
+        shazamLoadStatus();
+    } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function shazamIgnoreSelected() {
+    const tracks = shazamGetSelectedTracks();
+    if (!tracks.length) { alert('Select tracks first'); return; }
+    const keyToUrl = shazamTrackUrls || {};
+    const withUrl = tracks.filter(t => {
+        const k = `${t.artist} - ${t.title}`;
+        return keyToUrl[k];
+    });
+    if (!withUrl.length) { alert('Selected tracks have no Soundeo link. Sync first or select tracks with a link.'); return; }
+    const n = withUrl.length;
+    if (!confirm(`Remove ${n} track(s) from your Soundeo favorites? This cannot be undone from the app.`)) return;
+    try {
+        for (const t of withUrl) {
+            const key = `${t.artist} - ${t.title}`;
+            const url = keyToUrl[key];
+            await fetch('/api/shazam-sync/remove-from-soundeo', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ track_key: key, track_url: url })
+            });
+        }
+        shazamLoadStatus();
+    } catch (e) { alert('Error: ' + e.message); }
+}
+
 async function shazamSyncSelected() {
     const tracks = shazamGetSelectedTracks();
     if (!tracks.length) { alert('Select tracks first'); return; }
     try {
+        const timeRange = shazamFilterTime || 'all';
         const res = await fetch('/api/shazam-sync/run-soundeo', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ tracks }),
+            body: JSON.stringify({ tracks, time_range: timeRange }),
         });
         const data = await res.json();
         if (data.error) { alert(data.error); return; }
-        shazamShowPreviewAndControls(true);
-        document.getElementById('shazamVideoFeed').src = '/api/shazam-sync/video-feed';
+        shazamShowSyncProgress();
         shazamProgressInterval = setInterval(shazamPollProgress, 500);
     } catch (e) { alert('Error: ' + e.message); }
 }
@@ -1920,34 +2219,18 @@ async function shazamStopSync() {
     } catch (e) { alert('Error: ' + e.message); }
 }
 
-function shazamHidePreview() {
-    const container = document.querySelector('.shazam-preview-container');
-    const img = document.getElementById('shazamVideoFeed');
-    const btn = document.getElementById('shazamHidePreviewBtn');
-    if (!container || !btn) return;
-    if (container.classList.contains('hide-video')) {
-        container.classList.remove('hide-video');
-        if (img) img.src = '/api/shazam-sync/video-feed';
-        btn.textContent = 'Hide preview';
-    } else {
-        container.classList.add('hide-video');
-        if (img) img.src = '';
-        btn.textContent = 'Show preview';
-    }
+function shazamShowSyncProgress() {
+    const el = document.getElementById('shazamSyncProgress');
+    const stopBtn = document.getElementById('shazamSyncStopBtn');
+    if (el) el.style.display = 'flex';
+    if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = 'Stop'; }
 }
 
-function shazamShowPreviewAndControls(showVideo) {
-    const liveView = document.getElementById('shazamLiveView');
-    const container = document.querySelector('.shazam-preview-container');
-    const stopBtn = document.getElementById('shazamSyncStopBtn');
-    const hideBtn = document.getElementById('shazamHidePreviewBtn');
-    if (liveView) liveView.style.display = 'block';
-    if (container) {
-        if (showVideo) container.classList.remove('hide-video');
-    }
-    if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = 'Stop sync'; }
-    if (hideBtn) hideBtn.textContent = 'Hide preview';
+function shazamHideSyncProgress() {
+    const el = document.getElementById('shazamSyncProgress');
+    if (el) el.style.display = 'none';
 }
+
 
 function escapeHtml(s) {
     if (!s) return '';
@@ -1958,18 +2241,57 @@ function escapeHtml(s) {
 
 async function shazamRunSync() {
     try {
-        const res = await fetch('/api/shazam-sync/run-soundeo', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+        const timeRange = shazamFilterTime || 'all';
+        const res = await fetch('/api/shazam-sync/run-soundeo', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ time_range: timeRange })
+        });
         const data = await res.json();
         if (data.error) {
             alert(data.error);
             return;
         }
-        shazamShowPreviewAndControls(true);
-        document.getElementById('shazamVideoFeed').src = '/api/shazam-sync/video-feed';
+        shazamShowSyncProgress();
         shazamProgressInterval = setInterval(shazamPollProgress, 500);
     } catch (e) {
         alert('Error: ' + e.message);
     }
+}
+
+async function shazamSyncFavoritesFromSoundeo() {
+    try {
+        const timeRange = shazamScanRange || 'all';
+        const res = await fetch('/api/shazam-sync/sync-favorites-from-soundeo', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ time_range: timeRange })
+        });
+        const data = await res.json();
+        if (data.error) { alert(data.error); return; }
+        shazamShowSyncProgress();
+        shazamProgressInterval = setInterval(function () {
+            fetch('/api/shazam-sync/progress').then(r => r.json()).then(p => {
+                const el = document.getElementById('shazamProgress');
+                const stopBtn = document.getElementById('shazamSyncStopBtn');
+                if (el) {
+                    if (p.running) {
+                        const pagePart = p.current_page != null ? `Page ${p.current_page} — ` : '';
+                        el.textContent = pagePart + (p.message || 'Syncing favorites...');
+                    } else {
+                        el.textContent = p.error ? 'Error: ' + p.error : ('Done. ' + (p.message || 'Favorites synced.'));
+                    }
+                }
+                if (!p.running) {
+                    if (shazamProgressInterval) clearInterval(shazamProgressInterval);
+                    shazamProgressInterval = null;
+                    if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopped'; }
+                    shazamHideSyncProgress();
+                    if (!p.error) shazamLoadStatus();
+                }
+            });
+        }, 500);
+    } catch (e) { alert('Error: ' + e.message); }
 }
 
 function shazamPollProgress() {
@@ -1979,9 +2301,18 @@ function shazamPollProgress() {
         const doneMsg = p.stopped
             ? `Stopped. Favorited: ${p.done || 0}, Failed: ${p.failed || 0}`
             : (p.error ? `Error: ${p.error}` : `Done. Favorited: ${p.done || 0}, Failed: ${p.failed || 0}`);
-        if (el) el.textContent = p.running
-            ? `Syncing ${p.current}/${p.total}: ${p.message || ''}`
-            : doneMsg;
+        if (el) {
+            if (p.running) {
+                let text = `Syncing ${p.current}/${p.total}: ${p.message || ''}`;
+                if (p.last_url) {
+                    const urlDisplay = p.last_url.replace(/^https?:\/\//, '');
+                    text += ' — ' + urlDisplay.slice(0, 60) + (urlDisplay.length > 60 ? '…' : '');
+                }
+                el.textContent = text;
+            } else {
+                el.textContent = doneMsg;
+            }
+        }
         if (p.urls) {
             Object.assign(shazamTrackUrls, p.urls);
             Object.keys(p.urls).forEach(k => { shazamStarred[k] = true; });
@@ -1989,23 +2320,38 @@ function shazamPollProgress() {
         if (!p.running && shazamProgressInterval) {
             clearInterval(shazamProgressInterval);
             shazamProgressInterval = null;
-            document.getElementById('shazamVideoFeed').src = '';
-            document.getElementById('shazamLiveView').style.display = 'none';
-            if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = 'Stop sync'; }
-            const container = document.querySelector('.shazam-preview-container');
-            if (container) container.classList.remove('hide-video');
-            const hideBtn = document.getElementById('shazamHidePreviewBtn');
-            if (hideBtn) hideBtn.textContent = 'Hide preview';
-            // #region agent log
-            fetch('http://127.0.0.1:7242/ingest/d42056e9-4ace-4e98-8de1-2a37a10359ad',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'app.js:shazamPollProgress',message:'sync stopped',hypothesisId:'H5',data:{progress_urls_keys:p.urls?Object.keys(p.urls):[],calling:'shazamCompare'},timestamp:Date.now()})}).catch(function(){});
-            // #endregion
+            if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopped'; }
+            shazamHideSyncProgress();
             shazamCompare();
         }
     }).catch(() => {});
 }
 
+function switchTab(tabId) {
+    const panels = document.querySelectorAll('.tab-panel');
+    const buttons = document.querySelectorAll('.tab-btn');
+    const targetPanel = document.getElementById('tab-panel-' + tabId);
+    const targetBtn = document.getElementById('tab-btn-' + tabId);
+    if (!targetPanel || !targetBtn) return;
+    panels.forEach(p => {
+        p.classList.toggle('active', p.id === 'tab-panel-' + tabId);
+    });
+    buttons.forEach(b => {
+        b.classList.toggle('active', b.dataset.tab === tabId);
+        b.setAttribute('aria-selected', b.dataset.tab === tabId ? 'true' : 'false');
+    });
+    saveAppStateToStorage({ active_tab: tabId });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     restoreAppState();
+    const savedTab = loadAppStateFromStorage().active_tab;
+    if (savedTab === 'shazam' || savedTab === 'mp3') {
+        switchTab(savedTab);
+    }
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
     const folderInput = document.getElementById('folderPath');
     if (folderInput) {
         folderInput.addEventListener('blur', () => {
@@ -2014,12 +2360,12 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
     shazamBootstrapLoad();
-    document.querySelectorAll('.shazam-filter-btn[data-time]').forEach(btn => {
+    document.querySelectorAll('.shazam-scan-range-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-            document.querySelectorAll('.shazam-filter-btn[data-time]').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.shazam-scan-range-btn').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
-            shazamFilterTime = btn.dataset.time;
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            shazamScanRange = btn.dataset.scanRange || 'all';
+            shazamSyncFavoritesFromSoundeo();
         });
     });
     document.querySelectorAll('.shazam-filter-btn[data-status]').forEach(btn => {
@@ -2029,6 +2375,20 @@ document.addEventListener('DOMContentLoaded', () => {
             shazamFilterStatus = btn.dataset.status;
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
         });
+    });
+    document.addEventListener('click', (e) => {
+        const btn = e.target.closest('[data-action]');
+        if (!btn) return;
+        const action = btn.dataset.action;
+        if (action === 'dismiss') {
+            shazamDismissTrack(btn.dataset.key, btn.dataset.url, btn.dataset.artist, btn.dataset.title);
+        } else if (action === 'undismiss') {
+            shazamUndismissTrack(btn.dataset.key, btn.dataset.url, btn.dataset.artist, btn.dataset.title);
+        } else if (action === 'skip') {
+            shazamSkipSingleTrack(btn.dataset.artist, btn.dataset.title);
+        } else if (action === 'sync') {
+            shazamSyncSingleTrack(btn.dataset.key, btn.dataset.artist, btn.dataset.title);
+        }
     });
 });
 

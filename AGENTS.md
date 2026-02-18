@@ -18,6 +18,14 @@ See **[docs/STATE_PERSISTENCE.md](docs/STATE_PERSISTENCE.md)** for the full list
 - Compare results, “to download” list, “have locally” list, **favorited/fetched track URLs** (`urls`), and **starred-in-Soundeo per track** (`starred`) are stored in the status cache and must be returned by the status/bootstrap API so the frontend can restore them after refresh.
 - When sync completes, merge new `urls` and `starred` from the sync result into the current status and call `save_status_cache(status)`.
 
+## Prefer Extended version (explicit rule)
+
+**When multiple versions of a track exist (e.g. Original Mix, Extended Mix, Radio Edit), always prefer the Extended version.** This is integrated everywhere relevant:
+
+- **Soundeo automation** (`soundeo_automation.py`): When choosing the best search result link, add a bonus to the match score for links whose text contains "extended" so Extended Mix/Version is chosen over Original Mix/Radio Edit when both match.
+- **Local scanner** (`local_scanner.py`): When multiple local tracks match the same Shazam track (e.g. same normalized key or same canonical title), prefer the one whose title contains "extended" (exact-match map, canon pass, and fuzzy match collection all use `_prefer_extended_track` or equivalent).
+- **Manual check**: Shown only when the synced Soundeo title indicates a non-extended version (e.g. "Original Mix", "Radio Edit") so the user can consider checking for an Extended version; not shown when the link is already Extended.
+
 ## Other
 
 - Soundeo session (cookies) is saved to a path from config; sync and Save Session flow load it so login is remembered.
