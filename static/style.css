@@ -18,6 +18,10 @@
     --negative-bg: rgba(220, 38, 38, 0.08);
     --warn: #b45309;
     --warn-bg: rgba(180, 83, 9, 0.08);
+    --status-found: #3b82f6;
+    --status-starred: #8b5cf6;
+    --status-not-found: #c9863a;
+    --status-not-searched: #d4d4d4;
     --sp-1: 4px;
     --sp-2: 8px;
     --sp-3: 12px;
@@ -1261,49 +1265,67 @@ button[onclick*="revertLookup"] {
 .shazam-track-table tr {
     height: 32px;
 }
-
-/* Status dot indicators */
-.shazam-track-table .have-local > td:first-child {
-    font-size: 0;
-    line-height: 0;
-    text-align: center;
-    width: 32px;
+.shazam-track-table tbody tr:hover {
+    background: var(--bg-tertiary);
 }
 
-.shazam-track-table .have-local > td:first-child::before {
-    content: '';
+/* Status dot indicators (row first cell: dot or symbol from span) */
+.shazam-track-table .status-cell {
+    text-align: center;
+    width: 32px;
+    vertical-align: middle;
+}
+.shazam-track-table .status-cell .status-dot {
     display: inline-block;
     width: 8px;
     height: 8px;
     border-radius: 50%;
+    vertical-align: middle;
+}
+.shazam-track-table .status-cell .status-dot.status-dismissed,
+.shazam-track-table .status-cell .status-dot.status-skipped {
+    width: auto;
+    height: auto;
+    border-radius: 0;
+    font-size: var(--text-sm);
+}
+.shazam-track-table .status-cell .status-dot.status-not-searched {
+    background: var(--status-not-searched);
+}
+.shazam-track-table .status-cell .status-dot.status-not-found {
+    background: var(--status-not-found);
+}
+.shazam-track-table .status-cell .status-dot.status-found {
+    background: var(--status-found);
+}
+.shazam-track-table .status-cell .status-dot.status-starred {
+    background: var(--status-starred);
+}
+.shazam-track-table .status-cell .status-dot.status-have-starred {
     background: var(--positive);
 }
-
+/* Spinner in status cell for the row currently being processed (Search all / Run sync) */
+.shazam-track-table .status-cell .status-spinner {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border: 2px solid var(--text-tertiary);
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: shazam-spin 0.8s linear infinite;
+    vertical-align: middle;
+}
+/* Legacy row first-cell sizing (keep layout) */
+.shazam-track-table .have-local > td:first-child,
 .shazam-track-table .to-download > td:first-child {
     font-size: 0;
     line-height: 0;
-    text-align: center;
-    width: 32px;
-}
-
-.shazam-track-table .to-download > td:first-child::before {
-    content: '–';
-    font-size: var(--text-sm);
-    color: var(--text-tertiary);
 }
 
 .shazam-track-table .shazam-row-skipped > td:first-child {
-    font-size: 0;
-    line-height: 0;
     text-align: center;
     width: 32px;
     text-decoration: none !important;
-}
-
-.shazam-track-table .shazam-row-skipped > td:first-child::before {
-    content: '✕';
-    font-size: var(--text-xs);
-    color: var(--text-tertiary);
 }
 
 /* Have local rows */
@@ -1409,7 +1431,17 @@ button[onclick*="revertLookup"] {
     text-align: center;
 }
 
-/* Starred column — simple star character */
+/* Starred column — always show star; grey when not relevant */
+.shazam-track-table .starred-cell {
+    text-align: center;
+    color: var(--text-tertiary);
+}
+.shazam-track-table .starred-cell .star-icon.starred {
+    color: var(--accent);
+}
+.shazam-track-table .starred-cell-inactive {
+    opacity: 0.35;
+}
 .shazam-track-table .shazam-starred {
     color: var(--text);
     font-size: var(--text-md);
@@ -1682,6 +1714,15 @@ button[onclick*="revertLookup"] {
 .shazam-sync-action:hover {
     color: var(--accent);
     border-color: var(--accent);
+}
+.shazam-star-action:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.shazam-row-action-inactive {
+    opacity: 0.35;
+    cursor: default;
+    pointer-events: none;
 }
 .shazam-undo-action {
     width: auto;

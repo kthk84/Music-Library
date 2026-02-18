@@ -129,6 +129,7 @@
                 <div class="toolbar-group">
                     <button type="button" onclick="shazamFetchShazam()" class="btn btn-secondary" id="shazamFetchBtn">Fetch</button>
                     <button type="button" id="shazamCompareBtn" onclick="shazamCompare()" class="btn btn-secondary">Compare</button>
+                    <button type="button" id="shazamSearchAllBtn" onclick="shazamSearchAllOnSoundeo()" class="btn btn-secondary" title="Find links only for tracks that don't have one yet (not found or new). Use per-row Search to re-search a single track.">Search all</button>
                     <button type="button" id="shazamSyncBtn" onclick="shazamRunSync()" class="btn btn-primary" disabled>Sync</button>
                 </div>
                 <div class="toolbar-divider"></div>
@@ -146,7 +147,7 @@
                 </div>
             </div>
 
-            <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;">
+            <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack()" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
                 <span id="shazamProgress" class="shazam-progress-text"></span>
                 <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-small btn-danger">Stop</button>
             </div>
@@ -159,6 +160,7 @@
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="have">Have</button>
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="todl">To DL</button>
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="skipped">Skipped</button>
+                    <button type="button" class="btn btn-small shazam-filter-btn" data-status="ignored">Ignored</button>
                 </div>
                 <div id="shazamSelectionBar" class="selection-actions" style="display:none;">
                     <span id="shazamSelectedCount">0 selected</span>

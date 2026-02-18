@@ -343,6 +343,64 @@ def _extended_preference_bonus(link_text: str) -> float:
     return 0.0
 
 
+def find_track_on_soundeo(
+    driver,
+    artist: str,
+    title: str,
+    on_progress: Optional[Callable[[str], None]] = None,
+    delay: float = 2.5,
+) -> Optional[tuple]:
+    """
+    Search for track on Soundeo and return (url, display_text) of the best match.
+    Does NOT open the track page or click favorite — use for "Search on Soundeo" only.
+    """
+    queries = _search_queries(artist, title)
+    for q in queries:
+        encoded = urllib.parse.quote(q)
+        url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
+        if on_progress:
+            on_progress(f"Searching: {q}")
+        driver.get(url)
+        time.sleep(1.5)
+
+        from selenium.webdriver.common.by import By
+        try:
+            links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
+        except Exception:
+            links = []
+
+        if not links:
+            continue
+
+        best_link = None
+        best_score = -1
+        for lnk in links[:15]:
+            try:
+                txt = (lnk.text or "").strip()
+                if not txt or len(txt) < 3:
+                    continue
+                score = _best_match_score({}, txt, artist, title) + _extended_preference_bonus(txt)
+                if score > best_score:
+                    best_score = score
+                    best_link = lnk
+            except Exception:
+                pass
+
+        if best_link and best_score >= 0.3:
+            try:
+                href = best_link.get_attribute("href")
+                if not href:
+                    continue
+                display_text = (best_link.text or "").strip()
+                return (href, display_text)
+            except Exception:
+                pass
+
+        time.sleep(delay)
+
+    return None
+
+
 def find_and_favorite_track(
     driver,
     artist: str,
@@ -522,6 +580,55 @@ def unfavorite_track_on_soundeo(
                 pass
         # Do not use F-key fallback here: F toggles favorite state. Pressing F without
         # confirming the track is favorited could accidentally favorite instead of unfavorite.
+    except Exception:
+        pass
+    return False
+
+
+def favorite_track_by_url(driver, track_url: str) -> bool:
+    """
+    Open a Soundeo track URL and favorite it (click the favorite button when it is not yet favorited).
+    Caller must have loaded cookies and have driver on a Soundeo page. Returns True if favorite succeeded.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    if not track_url or not track_url.strip().startswith(("https://soundeo.com/", "http://soundeo.com/")):
+        return False
+    try:
+        driver.get(track_url.strip())
+        time.sleep(2)
+        for selector in (
+            "button.favorites",
+            "button.favorite",
+            "button[class*='favorite']",
+            "button[data-track-id]",
+        ):
+            try:
+                btn = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                )
+                if btn and btn.is_displayed():
+                    if _is_favorited_state(driver, btn):
+                        return True  # Already favorited
+                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                    time.sleep(0.3)
+                    btn.click()
+                    time.sleep(0.8)
+                    return True
+            except Exception:
+                pass
+        # Fallback: F key toggles favorite
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.common.action_chains import ActionChains
+        try:
+            body = driver.find_element(By.TAG_NAME, "body")
+            ActionChains(driver).send_keys(body, "f").perform()
+            time.sleep(0.8)
+            return True
+        except Exception:
+            pass
     except Exception:
         pass
     return False
@@ -957,15 +1064,16 @@ def run_favorite_tracks(
             if _sync_stop_requested:
                 results["stopped"] = True
                 if on_progress:
-                    on_progress(i, len(tracks), "Stopped by user", None)
+                    on_progress(i, len(tracks), "Stopped by user", None, None)
                 break
             artist = t.get("artist", "")
             title = t.get("title", "")
+            key = f"{artist} - {title}"
             progress_msg = f"Processing {i+1}/{len(tracks)}: {artist} - {title}"
 
-            def prog(s):
+            def prog(s, _key=key):
                 if on_progress:
-                    on_progress(i + 1, len(tracks), s, None)
+                    on_progress(i + 1, len(tracks), s, None, _key)
 
             out = find_and_favorite_track(
                 driver, artist, title,
@@ -975,17 +1083,16 @@ def run_favorite_tracks(
             if out:
                 url = out[0] if isinstance(out, tuple) else out
                 display_text = (out[1] if isinstance(out, tuple) and len(out) > 1 else "") or ""
-                key = f"{artist} - {title}"
                 results["done"] += 1
                 results["urls"][key] = url
                 results["soundeo_titles"][key] = display_text or key
                 if on_progress:
-                    on_progress(i + 1, len(tracks), f"Favorited: {artist} - {title}", url)
+                    on_progress(i + 1, len(tracks), f"Favorited: {artist} - {title}", url, key)
             else:
                 results["failed"] += 1
                 results["errors"].append(f"Not found: {artist} - {title}")
                 if on_progress:
-                    on_progress(i + 1, len(tracks), f"Not found: {artist} - {title}", None)
+                    on_progress(i + 1, len(tracks), f"Not found: {artist} - {title}", None, key)
 
             time.sleep(2.5)
 
@@ -998,6 +1105,152 @@ def run_favorite_tracks(
             results["error"] = _chrome_session_error_message(e) if "session not created" in err_msg or "chrome instance exited" in err_msg else str(e)
     finally:
         _graceful_quit(driver)
+
+    return results
+
+
+def run_search_tracks(
+    tracks: List[Dict[str, str]],
+    cookies_path: str,
+    headed: bool = False,
+    on_progress: Optional[Callable[[int, int, str, Optional[str]], None]] = None,
+    skip_keys: Optional[set] = None,
+) -> Dict:
+    """
+    Search Soundeo for each track (no favorite). Returns urls and soundeo_titles.
+    skip_keys: set of "Artist - Title" keys that already have a URL; those tracks are skipped.
+    Stops if request_sync_stop() was called.
+    """
+    global _sync_stop_requested
+    clear_sync_stop_request()
+    skip_keys = skip_keys or set()
+    driver = None
+    try:
+        driver = _get_driver(headless=not headed, use_persistent_profile=True)
+    except Exception as e:
+        return {"error": _chrome_session_error_message(e)}
+
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "stopped": False}
+
+    try:
+        if not load_cookies(driver, cookies_path):
+            return {"error": "No saved session. Save Soundeo session first in Settings."}
+        if not verify_logged_in(driver):
+            return {"error": "Soundeo session expired or you are logged out. Please use Save session to log in again."}
+
+        for i, t in enumerate(tracks):
+            if _sync_stop_requested:
+                results["stopped"] = True
+                if on_progress:
+                    on_progress(i, len(tracks), "Stopped by user", None, None)
+                break
+            artist = t.get("artist", "")
+            title = t.get("title", "")
+            key = f"{artist} - {title}"
+            key_lower = key.lower()
+            if key in skip_keys or key_lower in skip_keys:
+                if on_progress:
+                    on_progress(i + 1, len(tracks), f"Skipped (already found): {artist} - {title}", None, key)
+                continue
+
+            def prog(s, _key=key):
+                if on_progress:
+                    on_progress(i + 1, len(tracks), s, None, _key)
+
+            out = find_track_on_soundeo(driver, artist, title, on_progress=prog, delay=2.5)
+            if out:
+                url = out[0] if isinstance(out, tuple) else out
+                display_text = (out[1] if isinstance(out, tuple) and len(out) > 1 else "") or ""
+                results["done"] += 1
+                results["urls"][key] = url
+                results["soundeo_titles"][key] = display_text or key
+                if on_progress:
+                    on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", url, key)
+            else:
+                results["failed"] += 1
+                results["errors"].append(f"Not found: {artist} - {title}")
+                if on_progress:
+                    on_progress(i + 1, len(tracks), f"Not found: {artist} - {title}", None, key)
+
+            time.sleep(2.5)
+
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "no such window" in err_msg or "target window" in err_msg or "web view not found" in err_msg:
+            results["error"] = "Browser was closed."
+            results["stopped"] = True
+        else:
+            results["error"] = _chrome_session_error_message(e) if "session not created" in err_msg or "chrome instance exited" in err_msg else str(e)
+    finally:
+        _graceful_quit(driver)
+
+    return results
+
+
+def run_search_tracks_http(
+    tracks: List[Dict[str, str]],
+    cookies_path: str,
+    on_progress: Optional[Callable[[int, int, str, Optional[str]], None]] = None,
+    skip_keys: Optional[set] = None,
+) -> Dict:
+    """
+    Search Soundeo for each track via HTTP (no browser). Same contract as run_search_tracks:
+    returns {done, failed, urls, soundeo_titles, error?, stopped}. Does not favorite.
+    Use when browser/Selenium path fails or to avoid opening Chrome.
+    """
+    global _sync_stop_requested
+    clear_sync_stop_request()
+    skip_keys = skip_keys or set()
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "stopped": False}
+
+    if not os.path.exists(os.path.abspath(cookies_path)):
+        return {"error": "No saved session. Save Soundeo session first in Settings."}
+
+    for i, t in enumerate(tracks):
+        if _sync_stop_requested:
+            results["stopped"] = True
+            if on_progress:
+                on_progress(i, len(tracks), "Stopped by user", None, None)
+            break
+        artist = t.get("artist", "")
+        title = t.get("title", "")
+        key = f"{artist} - {title}"
+        key_lower = key.lower()
+        if key in skip_keys or key_lower in skip_keys:
+            if on_progress:
+                on_progress(i + 1, len(tracks), f"Skipped (already found): {artist} - {title}", None, key)
+            continue
+
+        if on_progress:
+            on_progress(i + 1, len(tracks), f"Searching: {artist} - {title}", None, key)
+        best_url = None
+        best_title = None
+        best_score = -1
+        for q in _search_queries(artist, title):
+            try:
+                search_results = soundeo_api_search(q, cookies_path)
+            except Exception:
+                continue
+            for r in search_results[:15]:
+                score = _best_match_score({}, r["title"], artist, title) + _extended_preference_bonus(r["title"])
+                if score > best_score and score >= 0.3:
+                    best_score = score
+                    best_url = r.get("href")
+                    best_title = r.get("title") or key
+
+        if best_url and best_score >= 0.3:
+            results["done"] += 1
+            results["urls"][key] = best_url
+            results["soundeo_titles"][key] = best_title or key
+            if on_progress:
+                on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", best_url, key)
+        else:
+            results["failed"] += 1
+            results["errors"].append(f"Not found: {artist} - {title}")
+            if on_progress:
+                on_progress(i + 1, len(tracks), f"Not found: {artist} - {title}", None, key)
+
+        time.sleep(0.8)
 
     return results
 

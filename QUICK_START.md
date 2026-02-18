@@ -42,7 +42,7 @@ python3 app.py
 
 ### Step 2: Open in Browser
 
-Navigate to: **http://localhost:5000**
+Navigate to: **http://localhost:5002**
 
 ### Step 3: Clean Your MP3s
 
@@ -116,9 +116,9 @@ Press `Ctrl+C` in the terminal to stop the Flask server
 
 ## 🐛 Troubleshooting
 
-**Can't connect to localhost:5000**
-- Check if the server is running (look for "Running on http://127.0.0.1:5000")
-- Try http://127.0.0.1:5000 instead
+**Can't connect to localhost:5002**
+- Check if the server is running (look for "Running on http://127.0.0.1:5002")
+- Try http://127.0.0.1:5002 instead
 
 **"Invalid folder path"**
 - Make sure you use the full absolute path

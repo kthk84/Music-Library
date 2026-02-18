@@ -32,7 +32,7 @@ A professional web-based application for cleaning and organizing MP3 metadata us
    ```
 
 2. **Open Your Browser**
-   - Navigate to: `http://localhost:5000`
+   - Navigate to: `http://localhost:5002`
 
 3. **Clean Your MP3s**
    - Paste your folder path (e.g., `/Users/keith/Music/Downloads` or `C:\Music\Downloads`)

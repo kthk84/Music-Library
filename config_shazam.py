@@ -16,6 +16,8 @@ DEFAULT_CONFIG = {
     "shazam_db_path": "",
     "headed_mode": True,
     "stream_to_ui": True,
+    # Search all: False = browser (Selenium), True = HTTP (no Chrome). Use True if browser path fails.
+    "search_all_use_http": False,
     # --- Soundeo browser: one of two modes ---
     # "attach" = connect to Chrome already running with --remote-debugging-port=9222
     # "launch" = start Chrome with a persistent profile (cookies/login persist; no temp profile)
