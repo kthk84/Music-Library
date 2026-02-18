@@ -309,11 +309,16 @@ def _graceful_quit(driver) -> None:
 
 
 def _search_queries(artist: str, title: str) -> List[str]:
-    """Generate search query variants."""
+    """Generate search query variants.
+
+    Only combined artist+title queries; partial (artist-only / title-only)
+    queries cause too many false matches (e.g. matching a random popular
+    track that shares one word).
+    """
     a, t = (artist or "").strip(), (title or "").strip()
     queries = []
     if a and t:
-        queries.extend([f"{a} {t}", f"{t} {a}", a, t])
+        queries.extend([f"{a} {t}", f"{t} {a}"])
     elif a:
         queries.append(a)
     elif t:
@@ -322,24 +327,61 @@ def _search_queries(artist: str, title: str) -> List[str]:
 
 
 def _best_match_score(track: Dict, link_text: str, target_artist: str, target_title: str) -> float:
-    """Score a result link against target artist/title. Higher = better match."""
-    from app import similarity_score
-    text_lower = (link_text or "").lower()
-    # Often "Artist - Title (Mix)"
-    artist_score = similarity_score(target_artist, text_lower) if target_artist else 0.5
-    title_score = similarity_score(target_title, text_lower) if target_title else 0.5
-    return artist_score * 0.4 + title_score * 0.6
+    """Score a result link against target artist/title. Higher = better match.
 
+    Soundeo results are typically formatted as "ARTIST - Title (Mix)".
+    We split the result text on " - " and compare each part against the
+    target artist and title separately. Both parts must score above a
+    minimum for the match to be accepted (returns 0 otherwise).
+    """
+    from app import similarity_score
+    text = (link_text or "").strip()
+    if not text:
+        return 0.0
+
+    t_artist = (target_artist or "").strip()
+    t_title = (target_title or "").strip()
+
+    if not t_artist and not t_title:
+        return 0.0
+
+    text_lower = text.lower()
+
+    if " - " in text:
+        r_artist, r_title = text.split(" - ", 1)
+    else:
+        r_artist = ""
+        r_title = text
+
+    artist_score = similarity_score(t_artist, r_artist) if t_artist and r_artist else 0.0
+    title_score = similarity_score(t_title, r_title) if t_title else 0.0
+
+    if not t_artist:
+        artist_score = title_score * 0.3
+
+    if t_artist and t_title:
+        if artist_score < 0.15 or title_score < 0.15:
+            return 0.0
+
+    whole_artist = similarity_score(t_artist, text_lower) if t_artist else 0.0
+    whole_title = similarity_score(t_title, text_lower) if t_title else 0.0
+    split_score = artist_score * 0.4 + title_score * 0.6
+    whole_score = whole_artist * 0.4 + whole_title * 0.6
+
+    return max(split_score, whole_score)
+
+
+_MATCH_THRESHOLD = 0.55
 
 def _extended_preference_bonus(link_text: str) -> float:
     """
     Prefer Extended Mix/Version when multiple links match (explicit rule).
-    Only add bonus for Extended; do not penalize Original so we still pick it if it's the only match.
+    Small bonus so it only differentiates between otherwise-equal matches.
     """
     if not link_text:
         return 0.0
     if "extended" in link_text.lower():
-        return 0.5
+        return 0.1
     return 0.0
 
 
@@ -351,10 +393,16 @@ def find_track_on_soundeo(
     delay: float = 2.5,
 ) -> Optional[tuple]:
     """
-    Search for track on Soundeo and return (url, display_text) of the best match.
+    Search for track on Soundeo and return (url, display_text, score) of the best match.
     Does NOT open the track page or click favorite — use for "Search on Soundeo" only.
+    Evaluates ALL query variants and returns the single best match across all.
     """
     queries = _search_queries(artist, title)
+    overall_best_link = None
+    overall_best_score = -1
+    overall_best_href = None
+    overall_best_text = None
+
     for q in queries:
         encoded = urllib.parse.quote(q)
         url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
@@ -370,33 +418,30 @@ def find_track_on_soundeo(
             links = []
 
         if not links:
+            time.sleep(delay)
             continue
 
-        best_link = None
-        best_score = -1
         for lnk in links[:15]:
             try:
                 txt = (lnk.text or "").strip()
                 if not txt or len(txt) < 3:
                     continue
                 score = _best_match_score({}, txt, artist, title) + _extended_preference_bonus(txt)
-                if score > best_score:
-                    best_score = score
-                    best_link = lnk
-            except Exception:
-                pass
-
-        if best_link and best_score >= 0.3:
-            try:
-                href = best_link.get_attribute("href")
-                if not href:
-                    continue
-                display_text = (best_link.text or "").strip()
-                return (href, display_text)
+                if score > overall_best_score:
+                    overall_best_score = score
+                    overall_best_link = lnk
+                    overall_best_text = txt
+                    try:
+                        overall_best_href = lnk.get_attribute("href")
+                    except Exception:
+                        overall_best_href = None
             except Exception:
                 pass
 
         time.sleep(delay)
+
+    if overall_best_href and overall_best_score >= _MATCH_THRESHOLD:
+        return (overall_best_href, overall_best_text or "", overall_best_score)
 
     return None
 
@@ -412,9 +457,15 @@ def find_and_favorite_track(
     """
     Search for track on Soundeo, open best match, favorite if not already starred.
     If already_starred contains "Artist - Title", we never open the track page or click
-    anything (to avoid ever un-starring). Returns (url, display_text) or None.
+    anything (to avoid ever un-starring). Returns (url, display_text, score) or None.
+    Evaluates ALL query variants and picks the single best match.
     """
     queries = _search_queries(artist, title)
+    overall_best_link = None
+    overall_best_score = -1
+    overall_best_href = None
+    overall_best_text = None
+
     for q in queries:
         encoded = urllib.parse.quote(q)
         url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
@@ -423,7 +474,6 @@ def find_and_favorite_track(
         driver.get(url)
         time.sleep(1.5)
 
-        # Find track links: a[href*="/track/"]
         from selenium.webdriver.common.by import By
         try:
             links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
@@ -431,89 +481,90 @@ def find_and_favorite_track(
             links = []
 
         if not links:
+            time.sleep(delay)
             continue
 
-        best_link = None
-        best_score = -1
         for lnk in links[:15]:
             try:
                 txt = (lnk.text or "").strip()
                 if not txt or len(txt) < 3:
                     continue
                 score = _best_match_score({}, txt, artist, title) + _extended_preference_bonus(txt)
-                if score > best_score:
-                    best_score = score
-                    best_link = lnk
-            except Exception:
-                pass
-
-        if best_link and best_score >= 0.3:
-            try:
-                href = best_link.get_attribute("href")
-                if not href:
-                    continue
-                display_text = (best_link.text or "").strip()
-                key = f"{artist} - {title}"
-                if already_starred:
-                    dn = _strip_all_parens_lower(key).replace(' & ', ', ')
-                    if ' - ' in dn:
-                        ap, tp = dn.split(' - ', 1)
-                        dn = ', '.join(sorted(a.strip() for a in ap.split(', ') if a.strip())) + ' - ' + tp
-                    if key in already_starred or key.lower() in already_starred or dn in already_starred:
-                        if on_progress:
-                            on_progress(f"Already starred: {key[:50]}...")
-                        return (href, display_text)
-
-                if on_progress:
-                    on_progress(f"Opening: {best_link.text[:50]}...")
-                driver.get(href)
-                time.sleep(2)
-
-                # Click favorite button only if not already favorited (blue/starred). Never un-favorite.
-                favorited = False
-                from selenium.webdriver.support.ui import WebDriverWait
-                from selenium.webdriver.support import expected_conditions as EC
-
-                for selector in (
-                    "button.favorites",
-                    "button.favorite",
-                    "button[class*='favorite']",
-                    "button[data-track-id]",
-                ):
+                if score > overall_best_score:
+                    overall_best_score = score
+                    overall_best_link = lnk
+                    overall_best_text = txt
                     try:
-                        btn = WebDriverWait(driver, 5).until(
-                            EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                        )
-                        if btn and btn.is_displayed():
-                            if _is_favorited_state(driver, btn):
-                                favorited = True  # Already favorited; do not click (would un-favorite)
-                                time.sleep(0.3)
-                                break
-                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                            time.sleep(0.3)
-                            btn.click()
-                            favorited = True
-                            time.sleep(0.8)
-                            break
+                        overall_best_href = lnk.get_attribute("href")
                     except Exception:
-                        pass
-                if not favorited:
-                    # Fallback: press F key (only if we didn't skip due to already favorited)
-                    from selenium.webdriver.common.keys import Keys
-                    from selenium.webdriver.common.action_chains import ActionChains
-                    try:
-                        body = driver.find_element(By.TAG_NAME, "body")
-                        ActionChains(driver).send_keys(body, "f").perform()
-                        favorited = True
-                        time.sleep(0.8)
-                    except Exception:
-                        pass
-
-                return (href, display_text)
+                        overall_best_href = None
             except Exception:
                 pass
 
         time.sleep(delay)
+
+    if overall_best_link and overall_best_href and overall_best_score >= _MATCH_THRESHOLD:
+        href = overall_best_href
+        display_text = overall_best_text or ""
+        key = f"{artist} - {title}"
+        if already_starred:
+            dn = _strip_all_parens_lower(key).replace(' & ', ', ')
+            if ' - ' in dn:
+                ap, tp = dn.split(' - ', 1)
+                dn = ', '.join(sorted(a.strip() for a in ap.split(', ') if a.strip())) + ' - ' + tp
+            if key in already_starred or key.lower() in already_starred or dn in already_starred:
+                if on_progress:
+                    on_progress(f"Already starred: {key[:50]}...")
+                return (href, display_text, overall_best_score)
+
+        try:
+            if on_progress:
+                on_progress(f"Opening: {display_text[:50]}...")
+            driver.get(href)
+            time.sleep(2)
+
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support import expected_conditions as EC
+
+            favorited = False
+            for selector in (
+                "button.favorites",
+                "button.favorite",
+                "button[class*='favorite']",
+                "button[data-track-id]",
+            ):
+                try:
+                    btn = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+                    )
+                    if btn and btn.is_displayed():
+                        if _is_favorited_state(driver, btn):
+                            favorited = True
+                            time.sleep(0.3)
+                            break
+                        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                        time.sleep(0.3)
+                        btn.click()
+                        favorited = True
+                        time.sleep(0.8)
+                        break
+                except Exception:
+                    pass
+            if not favorited:
+                from selenium.webdriver.common.keys import Keys
+                from selenium.webdriver.common.action_chains import ActionChains
+                try:
+                    body = driver.find_element(By.TAG_NAME, "body")
+                    ActionChains(driver).send_keys(body, "f").perform()
+                    favorited = True
+                    time.sleep(0.8)
+                except Exception:
+                    pass
+
+            return (href, display_text, overall_best_score)
+        except Exception:
+            pass
 
     return None
 
@@ -1024,7 +1075,7 @@ def run_favorite_tracks(
     except Exception as e:
         return {"error": _chrome_session_error_message(e)}
 
-    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "crawled_favorites": [], "stopped": False}
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "crawled_favorites": [], "stopped": False}
 
     try:
         if not load_cookies(driver, cookies_path):
@@ -1083,9 +1134,12 @@ def run_favorite_tracks(
             if out:
                 url = out[0] if isinstance(out, tuple) else out
                 display_text = (out[1] if isinstance(out, tuple) and len(out) > 1 else "") or ""
+                match_score = (out[2] if isinstance(out, tuple) and len(out) > 2 else None)
                 results["done"] += 1
                 results["urls"][key] = url
                 results["soundeo_titles"][key] = display_text or key
+                if match_score is not None:
+                    results["soundeo_match_scores"][key] = round(match_score, 3)
                 if on_progress:
                     on_progress(i + 1, len(tracks), f"Favorited: {artist} - {title}", url, key)
             else:
@@ -1130,7 +1184,7 @@ def run_search_tracks(
     except Exception as e:
         return {"error": _chrome_session_error_message(e)}
 
-    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "stopped": False}
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "stopped": False}
 
     try:
         if not load_cookies(driver, cookies_path):
@@ -1161,9 +1215,12 @@ def run_search_tracks(
             if out:
                 url = out[0] if isinstance(out, tuple) else out
                 display_text = (out[1] if isinstance(out, tuple) and len(out) > 1 else "") or ""
+                match_score = (out[2] if isinstance(out, tuple) and len(out) > 2 else None)
                 results["done"] += 1
                 results["urls"][key] = url
                 results["soundeo_titles"][key] = display_text or key
+                if match_score is not None:
+                    results["soundeo_match_scores"][key] = round(match_score, 3)
                 if on_progress:
                     on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", url, key)
             else:
@@ -1201,7 +1258,7 @@ def run_search_tracks_http(
     global _sync_stop_requested
     clear_sync_stop_request()
     skip_keys = skip_keys or set()
-    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "stopped": False}
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "stopped": False}
 
     if not os.path.exists(os.path.abspath(cookies_path)):
         return {"error": "No saved session. Save Soundeo session first in Settings."}
@@ -1233,15 +1290,16 @@ def run_search_tracks_http(
                 continue
             for r in search_results[:15]:
                 score = _best_match_score({}, r["title"], artist, title) + _extended_preference_bonus(r["title"])
-                if score > best_score and score >= 0.3:
+                if score > best_score:
                     best_score = score
                     best_url = r.get("href")
                     best_title = r.get("title") or key
 
-        if best_url and best_score >= 0.3:
+        if best_url and best_score >= _MATCH_THRESHOLD:
             results["done"] += 1
             results["urls"][key] = best_url
             results["soundeo_titles"][key] = best_title or key
+            results["soundeo_match_scores"][key] = round(best_score, 3)
             if on_progress:
                 on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", best_url, key)
         else:

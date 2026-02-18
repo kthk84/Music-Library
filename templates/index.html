@@ -147,8 +147,9 @@
                 </div>
             </div>
 
-            <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack()" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
+            <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack(event)" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
                 <span id="shazamProgress" class="shazam-progress-text"></span>
+                <button type="button" id="shazamProgressGotoBtn" class="btn btn-small btn-secondary shazam-progress-goto-btn" style="display:none;" onclick="event.stopPropagation(); shazamScrollToCurrentTrack();">Go to row</button>
                 <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-small btn-danger">Stop</button>
             </div>
 
@@ -205,6 +206,6 @@
         <button type="button" id="shazamBarClose" class="shazam-bar-close" title="Stop and close" aria-label="Stop and close" onclick="shazamPlayerBarClose()">×</button>
     </div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=5"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=7"></script>
 </body>
 </html>

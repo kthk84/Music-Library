@@ -13,6 +13,7 @@ import hashlib
 from typing import Dict, List, Optional
 import base64
 import logging
+import shutil
 import threading
 
 app = Flask(__name__)
@@ -424,29 +425,36 @@ def is_single_release(album_name: str) -> bool:
     return any(keyword in album_lower for keyword in single_keywords)
 
 def similarity_score(str1: str, str2: str) -> float:
-    """Calculate similarity between two strings (0-1)"""
+    """Calculate similarity between two strings (0-1).
+
+    Uses word-overlap (Jaccard) plus a length-ratio penalty so that
+    matching a short word inside a long string doesn't score too high.
+    """
     if not str1 or not str2:
         return 0.0
-    
-    str1 = str1.lower().strip()
-    str2 = str2.lower().strip()
-    
-    if str1 == str2:
+
+    s1 = str1.lower().strip()
+    s2 = str2.lower().strip()
+
+    if s1 == s2:
         return 1.0
-    
-    # Check if one contains the other
-    if str1 in str2 or str2 in str1:
-        return 0.8
-    
-    # Simple word overlap
-    words1 = set(str1.split())
-    words2 = set(str2.split())
-    if words1 and words2:
-        overlap = len(words1.intersection(words2))
-        total = len(words1.union(words2))
-        return overlap / total if total > 0 else 0.0
-    
-    return 0.0
+
+    words1 = set(s1.split())
+    words2 = set(s2.split())
+    if not words1 or not words2:
+        return 0.0
+
+    overlap = len(words1 & words2)
+    union = len(words1 | words2)
+    jaccard = overlap / union if union else 0.0
+
+    shorter, longer = (len(s1), len(s2)) if len(s1) <= len(s2) else (len(s2), len(s1))
+    length_ratio = shorter / longer if longer else 0.0
+
+    if s1 in s2 or s2 in s1:
+        return min(0.85, jaccard * 0.5 + length_ratio * 0.5)
+
+    return jaccard
 
 def rank_result(result: Dict, existing_title: str = '', existing_artist: str = '', filename: str = '', all_results: list = None) -> float:
     """Calculate ranking score for a result (higher is better)"""
@@ -978,10 +986,46 @@ def _run_compare_background():
             to_download_raw, title_word_index, exact_match_map, local_canon = compute_to_download(shazam_tracks, local_tracks)
             to_download = [t for t in to_download_raw if (t['artist'].strip().lower(), t['title'].strip().lower()) not in skipped]
             to_download = _dedupe_tracks_by_key(to_download)
+            skipped_tracks = [
+                {'artist': t['artist'], 'title': t['title'], **({'shazamed_at': t['shazamed_at']} if t.get('shazamed_at') is not None else {})}
+                for t in to_download_raw
+                if (t['artist'].strip().lower(), t['title'].strip().lower()) in skipped
+            ]
             to_dl_set = {_track_key_norm(s) for s in to_download}
+            app._shazam_scan_progress = {}  # clear file-scan progress so UI shows match phase
+            # Sort by shazamed_at desc so live-updated rows match final order
+            sorted_tracks = sorted(shazam_tracks, key=lambda t: (t.get('shazamed_at') or 0), reverse=True)
+            total_tracks = len(sorted_tracks)
             have_by_key = {}
-            for s in shazam_tracks:
+            for idx, s in enumerate(sorted_tracks):
+                if getattr(app, '_shazam_compare_cancel_requested', False):
+                    app._shazam_sync_status = {'message': 'Compare cancelled.'}
+                    app._shazam_scan_progress = {}
+                    app._shazam_compare_running = False
+                    return
                 k = _track_key_norm(s)
+                current_key = f"{s['artist']} - {s['title']}"
+                # Emit partial status so frontend can live-update rows and show spinner on current
+                partial = {
+                    'shazam_count': len(shazam_tracks),
+                    'local_count': len(local_tracks),
+                    'to_download_count': len(to_download),
+                    'to_download': to_download,
+                    'have_locally': list(have_by_key.values()),
+                    'folder_stats': _folder_scan_stats(folder_paths, local_tracks, list(have_by_key.values())),
+                    'skipped_tracks': skipped_tracks,
+                    'match_progress': {
+                        'running': True,
+                        'current': idx,
+                        'total': total_tracks,
+                        'current_key': current_key,
+                    },
+                }
+                missing = [p for p in configured_folders if p not in folder_paths]
+                if missing:
+                    partial['folder_warning'] = f'{len(missing)} folder(s) not found or not accessible (not scanned): ' + ', '.join(os.path.basename(p.rstrip(os.sep)) or p for p in missing[:5])
+                _merge_preserved_urls_into_status(partial)
+                app._shazam_sync_status = partial
                 if k in to_dl_set:
                     continue
                 item = {'artist': s['artist'], 'title': s['title']}
@@ -1003,6 +1047,7 @@ def _run_compare_background():
                 'to_download': to_download,
                 'have_locally': have_locally,
                 'folder_stats': folder_stats,
+                'skipped_tracks': skipped_tracks,
             }
             missing = [p for p in configured_folders if p not in folder_paths]
             if missing:
@@ -1188,6 +1233,8 @@ def _rebuild_status_from_caches():
                 out['starred'] = dict(old['starred'])
             if old.get('not_found'):
                 out['not_found'] = dict(old['not_found'])
+            if old.get('soundeo_match_scores'):
+                out['soundeo_match_scores'] = dict(old['soundeo_match_scores'])
         return out
     local_scan = load_local_scan_cache()
     if not local_scan_cache_valid(local_scan, folder_paths):
@@ -1229,6 +1276,8 @@ def _rebuild_status_from_caches():
             out['dismissed_manual_check'] = list(old['dismissed_manual_check'])
         if old.get('soundeo_titles'):
             out['soundeo_titles'] = dict(old['soundeo_titles'])
+        if old.get('soundeo_match_scores'):
+            out['soundeo_match_scores'] = dict(old['soundeo_match_scores'])
         if old.get('dismissed'):
             out['dismissed'] = dict(old['dismissed'])
         if old.get('not_found'):
@@ -1249,6 +1298,8 @@ def _merge_preserved_urls_into_status(status: Dict) -> None:
             status['dismissed_manual_check'] = list(old['dismissed_manual_check'])
         if old.get('soundeo_titles'):
             status['soundeo_titles'] = {**(status.get('soundeo_titles') or {}), **old['soundeo_titles']}
+        if old.get('soundeo_match_scores'):
+            status['soundeo_match_scores'] = {**(status.get('soundeo_match_scores') or {}), **old['soundeo_match_scores']}
         if old.get('dismissed'):
             status['dismissed'] = {**(status.get('dismissed') or {}), **old['dismissed']}
         if old.get('not_found'):
@@ -1340,6 +1391,8 @@ def _get_best_available_status():
                 partial['dismissed_manual_check'] = list(old['dismissed_manual_check'])
             if old.get('soundeo_titles'):
                 partial['soundeo_titles'] = dict(old['soundeo_titles'])
+            if old.get('soundeo_match_scores'):
+                partial['soundeo_match_scores'] = dict(old['soundeo_match_scores'])
             if old.get('dismissed'):
                 partial['dismissed'] = dict(old['dismissed'])
             if old.get('not_found'):
@@ -1399,6 +1452,183 @@ def shazam_export_shazam_tracks():
     })
 
 
+# --- Temporary MP3 proxy for AIFF/WAV (instant playback + scrubbing) ---
+_PROXY_MP3_DIR = os.environ.get('MP3_CLEANER_PROXY_DIR') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'audio_proxies')
+_PROXY_TTL_SEC = 20 * 60  # 20 min since last access
+_PROXY_CLEANUP_INTERVAL_SEC = 5 * 60  # every 5 min
+_proxy_store: Dict[str, dict] = {}  # proxy_id -> { path, refcount, last_access }
+_proxy_lock = threading.Lock()
+_PROXY_CLEANUP_STARTED = False
+
+
+def _shazam_resolve_path(allowed: List[str], dir_b64: str, file_param: str, path_b64: str):
+    """Resolve to absolute path and check under allowed. Returns (path, None) or (None, (body, status))."""
+    from urllib.parse import unquote
+    if dir_b64 and file_param:
+        dir_b64 = dir_b64.replace(' ', '+')
+        try:
+            raw = base64.b64decode(dir_b64)
+            directory = os.path.abspath(raw.decode('utf-8'))
+        except Exception:
+            return None, ("Invalid dir", 400)
+        filename = unquote(file_param)
+        if not filename:
+            return None, ("Invalid file", 400)
+        path = os.path.normpath(os.path.join(directory, filename))
+        path = os.path.abspath(path)
+        if not path.startswith(directory + os.sep):
+            return None, ("Invalid file", 400)
+    elif path_b64:
+        path_b64 = path_b64.replace(' ', '+')
+        try:
+            raw = base64.b64decode(path_b64)
+            path = raw.decode('utf-8')
+        except Exception:
+            return None, ("Invalid path", 400)
+        path = os.path.abspath(path)
+    else:
+        return None, ("Missing path or dir+file", 400)
+    if not os.path.exists(path) or not os.path.isfile(path):
+        return None, ("File not found", 404)
+    if not allowed:
+        return None, ("Access denied (no Sync folders configured)", 403)
+    if not any(path == d or path.startswith(d + os.sep) for d in allowed):
+        return None, ("Access denied", 403)
+    return path, None
+
+
+@app.route('/api/shazam-sync/prepare-proxy', methods=['POST'])
+def shazam_prepare_proxy():
+    """Generate or reuse a temporary 128k MP3 proxy for AIFF/WAV. Returns mp3_url and proxy_id for playback + release."""
+    from config_shazam import get_destination_folders_raw
+    from urllib.parse import unquote
+    data = request.get_json() or {}
+    dir_b64 = (data.get('dir_b64') or data.get('dir') or '').strip()
+    file_param = (data.get('file') or '').strip()
+    path_b64 = (data.get('path_b64') or data.get('path') or '').strip()
+    allowed = [os.path.abspath(f).rstrip(os.sep) for f in get_destination_folders_raw() if f]
+    path, err = _shazam_resolve_path(allowed, dir_b64, file_param, path_b64)
+    if err:
+        return err[0], err[1]
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in ('.aiff', '.aif', '.wav'):
+        return jsonify({'error': 'prepare-proxy is only for AIFF/WAV'}), 400
+    ffmpeg_cmd = shutil.which('ffmpeg') or ('/opt/homebrew/bin/ffmpeg' if os.path.exists('/opt/homebrew/bin/ffmpeg') else None) or '/usr/local/bin/ffmpeg'
+    if not ffmpeg_cmd or not os.path.isfile(ffmpeg_cmd):
+        return jsonify({'error': 'ffmpeg not found. Install with e.g. brew install ffmpeg'}), 503
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        return "File not found", 404
+    proxy_id = hashlib.sha256(f"{path}:{mtime}".encode()).hexdigest()[:24]
+    os.makedirs(_PROXY_MP3_DIR, exist_ok=True)
+    mp3_path = os.path.join(_PROXY_MP3_DIR, f"{proxy_id}.mp3")
+    now = time.time()
+    with _proxy_lock:
+        if proxy_id in _proxy_store:
+            entry = _proxy_store[proxy_id]
+            if os.path.isfile(entry['path']):
+                entry['refcount'] += 1
+                entry['last_access'] = now
+                mp3_url = f"/api/shazam-sync/proxy/{proxy_id}.mp3"
+                expires_at = now + _PROXY_TTL_SEC
+                return jsonify({'mp3_url': mp3_url, 'proxy_id': proxy_id, 'expires_at': expires_at})
+            else:
+                del _proxy_store[proxy_id]
+        # Generate
+        try:
+            subprocess.run(
+                [ffmpeg_cmd, '-y', '-i', path, '-b:a', '128k', '-ar', '44100', '-ac', '2', '-f', 'mp3', mp3_path],
+                capture_output=True,
+                timeout=120,
+                check=True,
+            )
+        except subprocess.CalledProcessError as e:
+            logging.warning("prepare-proxy ffmpeg failed: %s", e.stderr and e.stderr.decode()[:200])
+            return jsonify({'error': 'Failed to generate MP3 proxy'}), 500
+        except subprocess.TimeoutExpired:
+            return jsonify({'error': 'Proxy generation timed out'}), 504
+        except FileNotFoundError:
+            return jsonify({'error': 'ffmpeg not found'}), 503
+        if not os.path.isfile(mp3_path):
+            return jsonify({'error': 'Proxy file was not created'}), 500
+        _proxy_store[proxy_id] = {'path': mp3_path, 'refcount': 1, 'last_access': now}
+    mp3_url = f"/api/shazam-sync/proxy/{proxy_id}.mp3"
+    expires_at = now + _PROXY_TTL_SEC
+    return jsonify({'mp3_url': mp3_url, 'proxy_id': proxy_id, 'expires_at': expires_at})
+
+
+@app.route('/api/shazam-sync/proxy/<proxy_id>.mp3')
+def shazam_proxy_mp3(proxy_id: str):
+    """Serve temporary MP3 with Range support for scrubbing."""
+    if not proxy_id or '..' in proxy_id or '/' in proxy_id or '\\' in proxy_id:
+        return "Invalid proxy id", 400
+    with _proxy_lock:
+        if proxy_id not in _proxy_store:
+            return "Proxy not found or expired", 404
+        entry = _proxy_store[proxy_id]
+        mp3_path = entry['path']
+        entry['last_access'] = time.time()
+    if not os.path.isfile(mp3_path):
+        with _proxy_lock:
+            if proxy_id in _proxy_store:
+                del _proxy_store[proxy_id]
+        return "File not found", 404
+    return send_file(mp3_path, mimetype='audio/mpeg', as_attachment=False, conditional=True)
+
+
+@app.route('/api/shazam-sync/release-proxy', methods=['POST'])
+def shazam_release_proxy():
+    """Release a proxy; delete file when refcount reaches 0."""
+    data = request.get_json() or {}
+    proxy_id = (data.get('proxy_id') or '').strip()
+    if not proxy_id:
+        return jsonify({'error': 'proxy_id required'}), 400
+    with _proxy_lock:
+        if proxy_id not in _proxy_store:
+            return jsonify({'ok': True})
+        entry = _proxy_store[proxy_id]
+        entry['refcount'] -= 1
+        if entry['refcount'] <= 0:
+            path = entry['path']
+            del _proxy_store[proxy_id]
+            try:
+                if os.path.isfile(path):
+                    os.remove(path)
+            except OSError:
+                pass
+    return jsonify({'ok': True})
+
+
+def _proxy_cleanup_job():
+    global _PROXY_CLEANUP_STARTED
+    while True:
+        time.sleep(_PROXY_CLEANUP_INTERVAL_SEC)
+        now = time.time()
+        with _proxy_lock:
+            to_remove = [
+                pid for pid, e in _proxy_store.items()
+                if e['refcount'] <= 0 and (now - e['last_access']) >= _PROXY_TTL_SEC
+            ]
+            for pid in to_remove:
+                path = _proxy_store[pid]['path']
+                del _proxy_store[pid]
+                try:
+                    if os.path.isfile(path):
+                        os.remove(path)
+                except OSError:
+                    pass
+
+
+def _start_proxy_cleanup():
+    global _PROXY_CLEANUP_STARTED
+    if _PROXY_CLEANUP_STARTED:
+        return
+    _PROXY_CLEANUP_STARTED = True
+    t = threading.Thread(target=_proxy_cleanup_job, daemon=True)
+    t.start()
+
+
 @app.route('/api/shazam-sync/stream-file')
 def shazam_stream_file():
     """Stream audio file for playback. Path must be under a destination folder.
@@ -1438,11 +1668,17 @@ def shazam_stream_file():
         path = os.path.abspath(path)
 
     if not os.path.exists(path) or not os.path.isfile(path):
+        logging.warning("stream-file: file not found %s", path)
         return "File not found", 404
+    if not allowed:
+        logging.warning("stream-file: no destination folders configured")
+        return "Access denied (no Sync folders configured)", 403
     if not any(path == d or path.startswith(d + os.sep) for d in allowed):
+        logging.warning("stream-file: path not under allowed folders: %s", path[:80])
         return "Access denied", 403
     ext = os.path.splitext(path)[1].lower()
     mimetypes = {'.mp3': 'audio/mpeg', '.aiff': 'audio/aiff', '.aif': 'audio/aiff', '.wav': 'audio/wav'}
+    # AIFF/WAV in Chrome use prepare-proxy (temp MP3) for instant playback + scrubbing. stream-file serves raw only (MP3, WAV, Safari AIFF).
     mimetype = mimetypes.get(ext, 'application/octet-stream')
     return send_file(path, mimetype=mimetype, as_attachment=False, conditional=True)
 
@@ -1826,6 +2062,7 @@ def _run_soundeo_automation(tracks: list):
         _merge_crawled_favorites_into_status(status, results.get('crawled_favorites') or [])
         new_urls = results.get('urls') or {}
         new_titles = results.get('soundeo_titles') or {}
+        new_scores = results.get('soundeo_match_scores') or {}
         for k, url in new_urls.items():
             status.setdefault('urls', {})[k] = url
             status['urls'][k.lower()] = url
@@ -1834,6 +2071,9 @@ def _run_soundeo_automation(tracks: list):
         for k, title in new_titles.items():
             status.setdefault('soundeo_titles', {})[k] = title
             status['soundeo_titles'][k.lower()] = title
+        for k, sc in new_scores.items():
+            status.setdefault('soundeo_match_scores', {})[k] = sc
+            status['soundeo_match_scores'][k.lower()] = sc
         app._shazam_sync_status = status
         save_status_cache(status)
     except Exception as e:
@@ -2008,11 +2248,16 @@ def _run_sync_single_track_browser(artist: str, title: str):
             status = dict(getattr(app, '_shazam_sync_status', None) or {})
             status.setdefault('urls', {})
             status.setdefault('soundeo_titles', {})
+            status.setdefault('soundeo_match_scores', {})
             status.setdefault('starred', {})
             url_val = out[0] if isinstance(out, tuple) else out
             title_val = (out[1] if isinstance(out, tuple) and len(out) > 1 else '') or key
+            match_sc = (out[2] if isinstance(out, tuple) and len(out) > 2 else None)
             status['urls'][key] = status['urls'][key.lower()] = url_val
             status['soundeo_titles'][key] = status['soundeo_titles'][key.lower()] = title_val
+            if match_sc is not None:
+                status['soundeo_match_scores'][key] = round(match_sc, 3)
+                status['soundeo_match_scores'][key.lower()] = round(match_sc, 3)
             status['starred'][key] = status['starred'][key.lower()] = True
             app._shazam_sync_status = status
             save_status_cache(status)
@@ -2058,10 +2303,15 @@ def _run_search_soundeo_single(artist: str, title: str):
             status = dict(getattr(app, '_shazam_sync_status', None) or {})
             status.setdefault('urls', {})
             status.setdefault('soundeo_titles', {})
+            status.setdefault('soundeo_match_scores', {})
             status.setdefault('not_found', {})
             status['urls'][key] = status['urls'][key.lower()] = out[0]
             title_val = (out[1] if len(out) > 1 else '') or key
             status['soundeo_titles'][key] = status['soundeo_titles'][key.lower()] = title_val
+            match_sc = out[2] if len(out) > 2 else None
+            if match_sc is not None:
+                status['soundeo_match_scores'][key] = round(match_sc, 3)
+                status['soundeo_match_scores'][key.lower()] = round(match_sc, 3)
             status['not_found'].pop(key, None)
             status['not_found'].pop(key.lower(), None)
             app._shazam_sync_status = status
@@ -2146,6 +2396,7 @@ def _run_search_soundeo_global():
         status = dict(getattr(app, '_shazam_sync_status', None) or {})
         status.setdefault('urls', {})
         status.setdefault('soundeo_titles', {})
+        status.setdefault('soundeo_match_scores', {})
         status.setdefault('not_found', {})
         found_keys = set()
         for k, v in (result.get('urls') or {}).items():
@@ -2156,6 +2407,9 @@ def _run_search_soundeo_global():
         for k, v in (result.get('soundeo_titles') or {}).items():
             status['soundeo_titles'][k] = v
             status['soundeo_titles'][k.lower()] = v
+        for k, sc in (result.get('soundeo_match_scores') or {}).items():
+            status['soundeo_match_scores'][k] = sc
+            status['soundeo_match_scores'][k.lower()] = sc
         for t in tracks:
             k = f"{t.get('artist', '')} - {t.get('title', '')}"
             if k not in found_keys and k.lower() not in found_keys:
@@ -2699,6 +2953,76 @@ def shazam_sync_mutation_log():
     log.reverse()
     limit = request.args.get('limit', 200, type=int)
     return jsonify({'mutations': log[:limit], 'total': len(log)})
+
+
+@app.route('/api/shazam-sync/cleanup-matches', methods=['POST'])
+def shazam_sync_cleanup_matches():
+    """Re-score all cached Soundeo matches and remove those below the current threshold.
+
+    Updates both in-memory status and file cache. Returns counts of kept/removed.
+    """
+    from shazam_cache import save_status_cache
+    from soundeo_automation import _best_match_score, _extended_preference_bonus, _MATCH_THRESHOLD
+
+    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    if not status:
+        from shazam_cache import load_status_cache
+        status = dict(load_status_cache() or {})
+    if not status:
+        return jsonify({'error': 'No status to clean'}), 400
+
+    urls = status.get('urls', {})
+    titles = status.get('soundeo_titles', {})
+    not_found = status.setdefault('not_found', {})
+    new_scores = {}
+    keys_to_remove = set()
+    kept = 0
+    removed = 0
+
+    for key in list(urls.keys()):
+        url = urls[key]
+        soundeo_title = titles.get(key, '')
+        if not soundeo_title or not url or ' - ' not in key:
+            continue
+        artist, title = key.split(' - ', 1)
+        base_score = _best_match_score({}, soundeo_title, artist, title)
+        bonus = _extended_preference_bonus(soundeo_title)
+        total = base_score + bonus
+        if total < _MATCH_THRESHOLD:
+            keys_to_remove.add(key)
+            keys_to_remove.add(key.lower())
+            removed += 1
+        else:
+            new_scores[key] = round(total, 3)
+            new_scores[key.lower()] = round(total, 3)
+            kept += 1
+
+    for k in keys_to_remove:
+        urls.pop(k, None)
+        titles.pop(k, None)
+        not_found.pop(k, None)
+        not_found.pop(k.lower() if isinstance(k, str) else k, None)
+
+    status['urls'] = urls
+    status['soundeo_titles'] = titles
+    status['soundeo_match_scores'] = new_scores
+    status['not_found'] = not_found
+    app._shazam_sync_status = status
+    save_status_cache(status)
+
+    return jsonify({'kept': kept, 'removed': removed, 'threshold': _MATCH_THRESHOLD})
+
+
+@app.route('/api/shazam-sync/reset-not-found', methods=['POST'])
+def shazam_sync_reset_not_found():
+    """One-time: clear the not_found paper trail so all no-link tracks show grey.
+    From then on, only Search all / per-row Search will set orange (searched, not found)."""
+    from shazam_cache import load_status_cache, save_status_cache
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
+    status['not_found'] = {}
+    app._shazam_sync_status = status
+    save_status_cache(status)
+    return jsonify({'ok': True, 'message': 'Not-found state cleared. All no-link tracks will show grey until you run Search again.'})
 
 
 @app.route('/api/shazam-sync/dismiss-manual-check', methods=['POST'])
