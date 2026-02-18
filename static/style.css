@@ -975,6 +975,72 @@ button[onclick*="revertLookup"] {
     gap: 2px;
 }
 
+/* Search dropdown (unfound / new) */
+.search-dropdown-wrap {
+    position: relative;
+}
+
+.search-dropdown-wrap .search-dropdown-chevron {
+    font-size: 0.7em;
+    opacity: 0.8;
+}
+
+.search-dropdown-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    margin-top: 2px;
+    display: none;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    z-index: 20;
+    min-width: 200px;
+    padding: 4px 0;
+}
+
+.search-dropdown-wrap.open .search-dropdown-menu {
+    display: block;
+}
+
+.search-dropdown-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 12px;
+    text-align: left;
+    border: none;
+    background: none;
+    cursor: pointer;
+    font-size: var(--text-sm);
+    color: var(--text);
+}
+
+.search-dropdown-item:hover {
+    background: var(--bg-secondary);
+}
+
+.search-dropdown-item .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.search-dropdown-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 0;
+    padding: 0;
+}
+
+.search-dropdown-item-reset {
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+}
+
 /* Legacy shazam actions row */
 .shazam-actions {
     display: flex;

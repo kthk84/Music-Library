@@ -17,6 +17,7 @@ See **[docs/STATE_PERSISTENCE.md](docs/STATE_PERSISTENCE.md)** for the full list
 
 - Compare results, “to download” list, “have locally” list, **favorited/fetched track URLs** (`urls`), and **starred-in-Soundeo per track** (`starred`) are stored in the status cache and must be returned by the status/bootstrap API so the frontend can restore them after refresh.
 - When sync completes, merge new `urls` and `starred` from the sync result into the current status and call `save_status_cache(status)`.
+- **Live dot update:** When per-row Search completes and a track is not found, the row dot must turn from grey to orange **without a page refresh**. The frontend does this by updating `shazamNotFound` and re-rendering; `shazamNotFound` is only replaced when applying fresh server data in `shazamApplyStatus`, never inside `shazamRenderTrackList`, or the per-row update is overwritten.
 
 ## Prefer Extended version (explicit rule)
 

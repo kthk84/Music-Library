@@ -129,7 +129,15 @@
                 <div class="toolbar-group">
                     <button type="button" onclick="shazamFetchShazam()" class="btn btn-secondary" id="shazamFetchBtn">Fetch</button>
                     <button type="button" id="shazamCompareBtn" onclick="shazamCompare()" class="btn btn-secondary">Compare</button>
-                    <button type="button" id="shazamSearchAllBtn" onclick="shazamSearchAllOnSoundeo()" class="btn btn-secondary" title="Find links only for tracks that don't have one yet (not found or new). Use per-row Search to re-search a single track.">Search all</button>
+                    <div class="search-dropdown-wrap toolbar-group">
+                        <button type="button" id="shazamSearchDropdownBtn" class="btn btn-secondary" title="Search: unfound (orange) or new (grey) tracks" aria-haspopup="true" aria-expanded="false">
+                            Search <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
+                        </button>
+                        <div class="search-dropdown-menu" id="shazamSearchDropdownMenu" role="menu">
+                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="unfound"><span class="status-dot status-not-found" aria-hidden="true"></span> Search unfound</button>
+                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="new"><span class="status-dot status-no-link" aria-hidden="true"></span> Search new</button>
+                        </div>
+                    </div>
                     <button type="button" id="shazamSyncBtn" onclick="shazamRunSync()" class="btn btn-primary" disabled>Sync</button>
                 </div>
                 <div class="toolbar-divider"></div>
@@ -206,6 +214,6 @@
         <button type="button" id="shazamBarClose" class="shazam-bar-close" title="Stop and close" aria-label="Stop and close" onclick="shazamPlayerBarClose()">×</button>
     </div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=7"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=10"></script>
 </body>
 </html>

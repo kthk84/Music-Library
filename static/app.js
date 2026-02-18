@@ -1653,6 +1653,11 @@ function shazamApplyStatus(data) {
     if (data.soundeo_titles && typeof data.soundeo_titles === 'object') {
         Object.assign(shazamSoundeoTitles, data.soundeo_titles);
     }
+    // not_found: only replace when applying fresh server data (so reset/refresh shows grey). Never replace inside shazamRenderTrackList or we wipe per-row search updates.
+    if (data.hasOwnProperty('not_found') && typeof data.not_found === 'object') {
+        shazamNotFound = {};
+        Object.assign(shazamNotFound, data.not_found);
+    }
     shazamRenderTrackList(data);
     if (data.compare_running && !shazamComparePollInterval) {
         const sp = data.scan_progress || {};
@@ -1884,9 +1889,6 @@ function shazamRenderTrackList(data) {
     if (data.soundeo_titles && typeof data.soundeo_titles === 'object') {
         Object.assign(shazamSoundeoTitles, data.soundeo_titles);
     }
-    if (data.not_found && typeof data.not_found === 'object') {
-        Object.assign(shazamNotFound, data.not_found);
-    }
     const have = (data.have_locally || []).map(t => ({ ...t, status: 'have' }));
     const toDl = (data.to_download || []).map((t, i) => ({ ...t, status: 'todl', _idx: i }));
     const skipped = (data.skipped_tracks || []).map(t => ({ ...t, status: 'skipped' }));
@@ -1940,7 +1942,8 @@ function shazamRenderTrackList(data) {
         const url = _lu(shazamTrackUrls, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.urls || {}, key, keyLower, keyNorm, keyNormLower, keyDeep);
         const soundeoTitle = _lu(shazamSoundeoTitles, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.soundeo_titles || {}, key, keyLower, keyNorm, keyNormLower, keyDeep);
         const starred = !!(_lu(shazamStarred, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.starred || {}, key, keyLower, keyNorm, keyNormLower, keyDeep));
-        const isSearchedNotFound = !!(_lu(shazamNotFound, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.not_found || {}, key, keyLower, keyNorm, keyNormLower, keyDeep));
+        // Only exact key or keyLower for not_found (paper trail: searched but no link). Avoid keyNorm/keyDeep so different tracks don't match the same entry and we get correct grey dots.
+        const isSearchedNotFound = !!(_lu(shazamNotFound, key, keyLower) || _lu(data.not_found || {}, key, keyLower));
         const soundeoScoreMap = data.soundeo_match_scores || {};
         const soundeoMatchScore = _lu(soundeoScoreMap, key, keyLower, keyNorm, keyNormLower, keyDeep) || null;
         const score = row.match_score != null ? row.match_score : null;
@@ -2772,6 +2775,31 @@ document.addEventListener('DOMContentLoaded', () => {
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
         });
     });
+    const searchDropdownWrap = document.querySelector('.search-dropdown-wrap');
+    const searchDropdownBtn = document.getElementById('shazamSearchDropdownBtn');
+    const searchDropdownMenu = document.getElementById('shazamSearchDropdownMenu');
+    if (searchDropdownBtn && searchDropdownMenu) {
+        searchDropdownBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const open = searchDropdownWrap.classList.toggle('open');
+            searchDropdownBtn.setAttribute('aria-expanded', open);
+        });
+        searchDropdownMenu.querySelectorAll('.search-dropdown-item').forEach(item => {
+            item.addEventListener('click', (e) => {
+                e.stopPropagation();
+                searchDropdownWrap.classList.remove('open');
+                searchDropdownBtn.setAttribute('aria-expanded', 'false');
+                const mode = item.dataset.mode;
+                shazamSearchAllOnSoundeo(mode);
+            });
+        });
+    }
+    document.addEventListener('click', (e) => {
+        if (searchDropdownWrap && !e.target.closest('.search-dropdown-wrap')) {
+            searchDropdownWrap.classList.remove('open');
+            if (searchDropdownBtn) searchDropdownBtn.setAttribute('aria-expanded', 'false');
+        }
+    });
     document.addEventListener('click', (e) => {
         const btn = e.target.closest('[data-action]');
         if (!btn) return;
@@ -2824,16 +2852,22 @@ async function shazamSearchSingleOnSoundeo(key, artist, title) {
                 clearInterval(poll);
                 shazamHideSyncProgress();
                 if (p.mode === 'search_single') {
+                    var trackKey = (p.key != null && p.key !== '') ? p.key : key;
+                    var trackKeyLower = trackKey.toLowerCase();
                     if (p.done === 1 && p.url) {
-                        shazamTrackUrls[key] = p.url;
-                        if (p.soundeo_title) shazamSoundeoTitles[key] = p.soundeo_title;
-                        delete shazamNotFound[key];
-                        delete shazamNotFound[key.toLowerCase()];
+                        shazamTrackUrls[trackKey] = p.url;
+                        shazamTrackUrls[trackKeyLower] = p.url;
+                        if (p.soundeo_title) {
+                            shazamSoundeoTitles[trackKey] = p.soundeo_title;
+                            shazamSoundeoTitles[trackKeyLower] = p.soundeo_title;
+                        }
+                        delete shazamNotFound[trackKey];
+                        delete shazamNotFound[trackKeyLower];
                     } else if (p.done === 0 && p.failed === 1) {
-                        shazamNotFound[key] = true;
-                        shazamNotFound[key.toLowerCase()] = true;
+                        shazamNotFound[trackKey] = true;
+                        shazamNotFound[trackKeyLower] = true;
                     }
-                    shazamLoadStatus();
+                    // NOTE: Grey must turn to orange live (no refresh). We re-render only; do NOT call shazamLoadStatus() here or it can overwrite this update. Replace of shazamNotFound happens only in shazamApplyStatus (fresh server data), not in shazamRenderTrackList.
                 }
                 delete shazamActionPending[key];
                 if (shazamLastData) shazamRenderTrackList(shazamLastData);
@@ -2846,15 +2880,20 @@ async function shazamSearchSingleOnSoundeo(key, artist, title) {
     }
 }
 
-async function shazamSearchAllOnSoundeo() {
+async function shazamSearchAllOnSoundeo(searchMode) {
     try {
-        const res = await fetch('/api/shazam-sync/search-soundeo-global', { method: 'POST' });
+        const body = searchMode ? JSON.stringify({ search_mode: searchMode }) : undefined;
+        const res = await fetch('/api/shazam-sync/search-soundeo-global', {
+            method: 'POST',
+            headers: body ? { 'Content-Type': 'application/json' } : {},
+            body: body
+        });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
             return;
         }
-        shazamShowSyncProgress(data.message || 'Searching all tracks…');
+        shazamShowSyncProgress(data.message || 'Searching…');
         const poll = setInterval(async () => {
             const pRes = await fetch('/api/shazam-sync/progress');
             const p = await pRes.json();
@@ -2881,9 +2920,32 @@ async function shazamSearchAllOnSoundeo() {
                 shazamCurrentProgress = {};
                 clearInterval(poll);
                 shazamHideSyncProgress();
+                if (p.mode === 'search_global') {
+                    if (p.not_found) Object.assign(shazamNotFound, p.not_found);
+                    if (p.urls) Object.assign(shazamTrackUrls, p.urls);
+                    if (p.soundeo_titles) Object.assign(shazamSoundeoTitles, p.soundeo_titles);
+                    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+                }
                 shazamLoadStatus();
             }
         }, 500);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
+
+async function shazamResetNotFound() {
+    try {
+        const res = await fetch('/api/shazam-sync/reset-not-found', { method: 'POST' });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+            alert(data.error || 'Failed to reset not-found state.');
+            return;
+        }
+        Object.keys(shazamNotFound).forEach(k => delete shazamNotFound[k]);
+        shazamNotFound = {};
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        if (data.message) alert(data.message);
     } catch (e) {
         alert('Error: ' + e.message);
     }
