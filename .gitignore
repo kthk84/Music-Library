@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Test files
+test_mp3s/
+*.mp3
+
+# Shazam-Soundeo sync
+config.json
+soundeo_cookies.json
+.soundeo_browser_profile/
+shazam_cache.json
+local_scan_cache.json
+shazam_status_cache.json
+app_state.json
+shazam_skip_list.json
+
