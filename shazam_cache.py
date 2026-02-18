@@ -240,13 +240,118 @@ STATUS_CACHE_PATH = os.path.join(_PROJECT_ROOT, "shazam_status_cache.json")
 
 
 def load_status_cache() -> Optional[Dict]:
-    """Load last compare result for instant display."""
-    return _load_json(STATUS_CACHE_PATH, None)
+    """Load last compare result for instant display. One-time: if status has no search_outcomes and old shazam_search_log.json exists, migrate it in."""
+    status = _load_json(STATUS_CACHE_PATH, None)
+    if status is not None and not status.get("search_outcomes"):
+        _old_log_path = os.path.join(_PROJECT_ROOT, "shazam_search_log.json")
+        if os.path.exists(_old_log_path):
+            old_log = _load_json(_old_log_path, [])
+            if old_log:
+                status = dict(status)
+                status["search_outcomes"] = old_log
+                save_status_cache(status)
+                try:
+                    os.remove(_old_log_path)
+                except OSError:
+                    pass
+    return status
 
 
 def save_status_cache(status: Dict) -> None:
-    """Persist compare result. Uses atomic write to prevent corrupt reads on refresh."""
-    _save_json_atomic(STATUS_CACHE_PATH, status)
+    """Persist compare result. Uses atomic write to prevent corrupt reads on refresh.
+    Paper trail: never persist not_found for a track that has a URL (so status stays correct).
+    When search_outcomes exists, urls/not_found are derived from it so batch search data is always consistent.
+    Never wipe search_outcomes: if status has none, preserve the existing file's log so dots survive compare/refresh."""
+    out = dict(status)
+    log = out.get('search_outcomes') or []
+    if not log:
+        existing = load_status_cache()
+        if existing:
+            existing_log = (existing.get('search_outcomes') or [])[:]
+            if existing_log:
+                out['search_outcomes'] = existing_log
+                log = existing_log
+    if log:
+        urls, nf = _replay_search_outcomes(log, out.get('urls'))
+        out['urls'] = urls
+        out['not_found'] = nf
+    urls = out.get('urls') or {}
+    nf = out.get('not_found') or {}
+    out['not_found'] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
+    _save_json_atomic(STATUS_CACHE_PATH, out)
+
+
+# --- Search outcomes: stored inside status cache (single source of truth) ---
+_MAX_SEARCH_OUTCOMES = 100_000
+
+
+def _replay_search_outcomes(log: List[Dict], existing_urls: Optional[Dict] = None) -> tuple:
+    """Replay search_outcomes list (newest per key wins). Returns (urls, not_found). Merge in existing_urls for keys not in log (e.g. sync-origin)."""
+    urls = {}
+    not_found = {}
+    for e in log:
+        key = e.get("k")
+        if not key or not isinstance(key, str):
+            continue
+        action = e.get("a")
+        if action == "f":
+            url = e.get("u")
+            if url:
+                urls[key] = url
+                urls[key.lower()] = url
+                not_found.pop(key, None)
+                not_found.pop(key.lower(), None)
+        elif action == "n":
+            not_found[key] = True
+            not_found[key.lower()] = True
+    not_found = {k: v for k, v in not_found.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
+    for k, v in (existing_urls or {}).items():
+        if isinstance(k, str) and k not in urls:
+            urls[k] = v
+    return (urls, not_found)
+
+
+def get_urls_and_not_found_from_log(existing_status: Optional[Dict] = None) -> tuple:
+    """Return (urls, not_found) from status['search_outcomes'] in the same file — single source of truth. If no outcomes, returns existing_status urls/not_found."""
+    e = existing_status or {}
+    log = e.get("search_outcomes") or []
+    if not log:
+        return (dict(e.get("urls") or {}), dict(e.get("not_found") or {}))
+    return _replay_search_outcomes(log, e.get("urls"))
+
+
+def log_search_outcome(key: str, found: bool, url: Optional[str] = None, status_to_update: Optional[Dict] = None) -> None:
+    """Append one search outcome. If status_to_update is provided, append to it and derive urls/not_found on it (caller saves). Otherwise load status cache, append, save — single source of truth in that file."""
+    from datetime import datetime
+    entry = {"t": datetime.utcnow().isoformat() + "Z", "a": "f" if found else "n", "k": key}
+    if found and url:
+        entry["u"] = url
+    log_search_outcomes_batch([entry], status_to_update)
+
+
+def log_search_outcomes_batch(entries: List[Dict], status_to_update: Optional[Dict] = None) -> None:
+    """Append multiple search outcomes (each: t, a, k, u?). If status_to_update provided, caller saves. Otherwise load, append, save."""
+    if not entries:
+        return
+    status = status_to_update if status_to_update is not None else (load_status_cache() or {})
+    status.setdefault("search_outcomes", [])
+    status["search_outcomes"] = (status.get("search_outcomes") or []) + list(entries)
+    if len(status["search_outcomes"]) > _MAX_SEARCH_OUTCOMES:
+        status["search_outcomes"] = status["search_outcomes"][-_MAX_SEARCH_OUTCOMES:]
+    status["urls"], status["not_found"] = _replay_search_outcomes(status["search_outcomes"], status.get("urls"))
+    if status_to_update is None:
+        save_status_cache(status)
+
+
+def rebuild_status_from_search_log(existing_status: Optional[Dict] = None) -> Dict:
+    """Replay search_outcomes (from status cache) to rebuild urls and not_found. Use for recovery. Single source of truth = status cache only."""
+    status = existing_status or load_status_cache() or {}
+    log = status.get("search_outcomes") or []
+    urls, not_found = _replay_search_outcomes(log, status.get("urls"))
+    out = dict(status)
+    out["urls"] = urls
+    out["not_found"] = not_found
+    return out
 
 
 # --- Mutation log ---

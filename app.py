@@ -1295,7 +1295,8 @@ def _rebuild_status_from_caches():
 
 
 def _merge_preserved_urls_into_status(status: Dict) -> None:
-    """Merge existing favorited/synced URLs, starred state, dismissed, and dismissed manual-check keys from cache into status. Mutates status."""
+    """Merge existing favorited/synced URLs, starred, dismissed, etc. from status cache file into status. Mutates status.
+    not_found is single-source-of-truth from file only (replace, never merge) so we don't pollute from in-memory state."""
     from shazam_cache import load_status_cache
     old = load_status_cache()
     if old:
@@ -1311,8 +1312,8 @@ def _merge_preserved_urls_into_status(status: Dict) -> None:
             status['soundeo_match_scores'] = {**(status.get('soundeo_match_scores') or {}), **old['soundeo_match_scores']}
         if old.get('dismissed'):
             status['dismissed'] = {**(status.get('dismissed') or {}), **old['dismissed']}
-        if old.get('not_found'):
-            status['not_found'] = {**(status.get('not_found') or {}), **old['not_found']}
+        # not_found: replace from file only (single source of truth; never merge in-memory)
+        status['not_found'] = dict(old.get('not_found') or {})
 
 
 def _status_is_stale(status: Optional[Dict]) -> bool:
@@ -1351,32 +1352,46 @@ def _add_starred_lowercase_aliases(status: Dict) -> Dict:
 
 def _get_best_available_status():
     """Return best available status: in-memory, file, rebuild, or partial. Persists when building fresh.
-    Always prefers cached data on restart - only rebuilds when Shazam tracks have changed (new/removed).
-    not_found is always refreshed from file so that reset_not_found.py (or any file-only update) takes effect without restart."""
-    from shazam_cache import load_status_cache, save_status_cache, load_shazam_cache, load_skip_list
+    urls and not_found (dot state) are ALWAYS derived from the cache file's search_outcomes when present,
+    so search/refresh never shows wrong or empty dots."""
+    from shazam_cache import (
+        load_status_cache,
+        save_status_cache,
+        load_shazam_cache,
+        load_skip_list,
+        get_urls_and_not_found_from_log,
+        _replay_search_outcomes,
+    )
 
-    def _merge_not_found_from_file(out: Dict) -> Dict:
-        """Always overwrite not_found from file when file exists — single source of truth so reset script and no stale in-memory."""
-        on_disk = load_status_cache()
-        if on_disk is not None:
-            out = dict(out)
-            out['not_found'] = dict(on_disk.get('not_found') or {})
+    def _apply_dot_state_from_file(out: Dict) -> Dict:
+        """Overwrite urls and not_found from the cache file's search_outcomes (single source of truth). So dots always match what was saved."""
+        out = dict(out)
+        file_status = load_status_cache()
+        log = (file_status or {}).get("search_outcomes") or []
+        if log:
+            urls, nf = _replay_search_outcomes(log, out.get("urls"))
+            out["urls"] = urls
+            out["not_found"] = nf
+        else:
+            urls, nf = get_urls_and_not_found_from_log(out)
+            out["urls"] = urls
+            out["not_found"] = nf
         return out
 
     if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status and not _status_is_stale(app._shazam_sync_status):
-        out = _merge_not_found_from_file(dict(app._shazam_sync_status))
+        out = _apply_dot_state_from_file(dict(app._shazam_sync_status))
         return _add_starred_lowercase_aliases(out)
     cached = load_status_cache()
     has_cached_data = cached and (cached.get('shazam_count', 0) > 0 or cached.get('have_locally') or cached.get('to_download'))
     if has_cached_data and not _status_is_stale(cached):
         app._shazam_sync_status = cached
-        out = _merge_not_found_from_file(dict(cached))
+        out = _apply_dot_state_from_file(dict(cached))
         return _add_starred_lowercase_aliases(out)
     rebuilt = _rebuild_status_from_caches()
     if rebuilt:
         app._shazam_sync_status = rebuilt
         save_status_cache(rebuilt)
-        out = _merge_not_found_from_file(dict(rebuilt))
+        out = _apply_dot_state_from_file(dict(rebuilt))
         return _add_starred_lowercase_aliases(out)
     # Fallback: use cached status even if stale (e.g. Shazam count changed) - better than empty
     if has_cached_data:
@@ -1384,7 +1399,7 @@ def _get_best_available_status():
         if _status_is_stale(cached):
             out['message'] = out.get('message') or 'Data may be outdated. Click Fetch Shazam or Compare to refresh.'
         app._shazam_sync_status = out
-        out = _merge_not_found_from_file(out)
+        out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
     shazam_tracks = load_shazam_cache()
     if shazam_tracks:
@@ -1424,7 +1439,7 @@ def _get_best_available_status():
                 partial['not_found'] = dict(old['not_found'])
         app._shazam_sync_status = partial
         save_status_cache(partial)
-        out = _merge_not_found_from_file(dict(partial))
+        out = _apply_dot_state_from_log(dict(partial))
         return _add_starred_lowercase_aliases(out)
     return _add_starred_lowercase_aliases({'shazam_count': 0, 'local_count': 0, 'to_download_count': 0, 'to_download': [], 'have_locally': [], 'folder_stats': []})
 
@@ -2328,7 +2343,8 @@ def _run_search_soundeo_single(artist: str, title: str):
         _graceful_quit(driver)
 
         if out:
-            status = dict(getattr(app, '_shazam_sync_status', None) or {})
+            from shazam_cache import load_status_cache, log_search_outcome
+            status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
             status.setdefault('urls', {})
             status.setdefault('soundeo_titles', {})
             status.setdefault('soundeo_match_scores', {})
@@ -2343,13 +2359,17 @@ def _run_search_soundeo_single(artist: str, title: str):
             status['not_found'].pop(key, None)
             status['not_found'].pop(key.lower(), None)
             app._shazam_sync_status = status
+            log_search_outcome(key, found=True, url=out[0], status_to_update=status)
             save_status_cache(status)
         else:
-            status = dict(getattr(app, '_shazam_sync_status', None) or {})
+            from shazam_cache import load_status_cache
+            status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
             status.setdefault('not_found', {})
             status['not_found'][key] = True
             status['not_found'][key.lower()] = True
             app._shazam_sync_status = status
+            from shazam_cache import log_search_outcome
+            log_search_outcome(key, found=False, status_to_update=status)
             save_status_cache(status)
 
         if out:
@@ -2370,16 +2390,22 @@ def _run_search_soundeo_single(artist: str, title: str):
 def _run_search_soundeo_global(search_mode: Optional[str] = None):
     """Background thread: Search all (global) — only tracks without a Soundeo URL.
     search_mode: 'unfound' = only orange-dot (searched, not found); 'new' = only grey-dot (not yet searched); None = both.
-    We skip any track that already has a URL. For re-search of a single track, use the per-row Search. No favorite."""
+    We skip any track that already has a URL. For re-search of a single track, use the per-row Search. No favorite.
+    Saves to status cache as soon as each track result is known (found/not found) so restart mid-batch doesn't lose progress."""
     from config_shazam import get_soundeo_cookies_path, load_config
     from soundeo_automation import run_search_tracks, run_search_tracks_http
-    from shazam_cache import save_status_cache
+    from shazam_cache import load_status_cache, save_status_cache, log_search_outcome
 
     config = load_config()
     cookies_path = get_soundeo_cookies_path()
     use_http = config.get('search_all_use_http', False)
     headed = config.get('headed_mode', True)
-    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
+    status.setdefault('urls', {})
+    status.setdefault('soundeo_titles', {})
+    status.setdefault('soundeo_match_scores', {})
+    status.setdefault('not_found', {})
+    status.setdefault('search_outcomes', [])
     urls = status.get('urls') or {}
     not_found = status.get('not_found') or {}
     skip_keys = set(urls.keys())
@@ -2411,7 +2437,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
         app._shazam_sync_progress = {'running': False, 'message': msg, 'done': 0, 'total': 0}
         return
 
-    def on_progress(current: int, total: int, msg: str, url: Optional[str], current_key: Optional[str] = None):
+    def on_progress(current: int, total: int, msg: str, url: Optional[str], current_key: Optional[str] = None, **kwargs):
         existing = getattr(app, '_shazam_sync_progress', None) or {}
         prog = {
             'running': True, 'current': current, 'total': total, 'message': msg,
@@ -2419,15 +2445,32 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
             'urls': dict(existing.get('urls', {})),
             'not_found': dict(existing.get('not_found', {})),
             'soundeo_titles': dict(existing.get('soundeo_titles', {})),
+            'soundeo_match_scores': dict(existing.get('soundeo_match_scores', {})),
         }
         if current_key is not None:
             prog['current_key'] = current_key
-        # Paper trail: when a grey-dot track is searched and not found, record it so the dot turns orange
-        if current_key and ('Found:' in msg or 'Not found' in msg or 'not found' in msg.lower()):
-            if url:
+        # Paper trail: record outcome and save immediately so restart mid-batch doesn't lose progress
+        if current_key and 'Skipped' not in msg:
+            if 'Found:' in msg and url:
+                log_search_outcome(current_key, found=True, url=url, status_to_update=status)
+                soundeo_title = kwargs.get('soundeo_title')
+                soundeo_match_score = kwargs.get('soundeo_match_score')
+                if soundeo_title is not None:
+                    status.setdefault('soundeo_titles', {})[current_key] = soundeo_title
+                    status['soundeo_titles'][current_key.lower()] = soundeo_title
+                    prog['soundeo_titles'][current_key] = soundeo_title
+                    prog['soundeo_titles'][current_key.lower()] = soundeo_title
+                if soundeo_match_score is not None:
+                    status.setdefault('soundeo_match_scores', {})[current_key] = round(soundeo_match_score, 3)
+                    status['soundeo_match_scores'][current_key.lower()] = round(soundeo_match_score, 3)
+                    prog['soundeo_match_scores'][current_key] = round(soundeo_match_score, 3)
+                    prog['soundeo_match_scores'][current_key.lower()] = round(soundeo_match_score, 3)
+                save_status_cache(status)
                 prog['urls'][current_key] = url
                 prog['urls'][current_key.lower()] = url
-            else:
+            elif 'Not found' in msg or 'not found' in msg.lower():
+                log_search_outcome(current_key, found=False, status_to_update=status)
+                save_status_cache(status)
                 prog['not_found'][current_key] = True
                 prog['not_found'][current_key.lower()] = True
         app._shazam_sync_progress = prog
@@ -2435,7 +2478,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
     try:
         app._shazam_sync_progress = {
             'running': True, 'message': 'Starting search...', 'current': 0, 'total': len(tracks), 'mode': 'search_global',
-            'urls': {}, 'not_found': {}, 'soundeo_titles': {},
+            'urls': {}, 'not_found': {}, 'soundeo_titles': {}, 'soundeo_match_scores': {},
         }
         if use_http:
             result = run_search_tracks_http(tracks, cookies_path, on_progress=on_progress, skip_keys=skip_keys)
@@ -2447,35 +2490,19 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
         if result.get('error'):
             app._shazam_sync_progress = {'running': False, 'error': result['error'], 'mode': 'search_global'}
             return
-        status = dict(getattr(app, '_shazam_sync_status', None) or {})
-        status.setdefault('urls', {})
-        status.setdefault('soundeo_titles', {})
-        status.setdefault('soundeo_match_scores', {})
-        status.setdefault('not_found', {})
-        found_keys = set()
-        for k, v in (result.get('urls') or {}).items():
-            status['urls'][k] = v
-            status['urls'][k.lower()] = v
-            found_keys.add(k)
-            found_keys.add(k.lower())
+        # Outcomes already logged and saved per-track in on_progress; only merge titles/scores and final save
         for k, v in (result.get('soundeo_titles') or {}).items():
             status['soundeo_titles'][k] = v
             status['soundeo_titles'][k.lower()] = v
         for k, sc in (result.get('soundeo_match_scores') or {}).items():
             status['soundeo_match_scores'][k] = sc
             status['soundeo_match_scores'][k.lower()] = sc
-        # Persist paper trail: every track we searched and didn't find stays in not_found (orange dot)
-        for t in tracks:
-            k = f"{t.get('artist', '')} - {t.get('title', '')}"
-            if k not in found_keys and k.lower() not in found_keys:
-                status['not_found'][k] = True
-                status['not_found'][k.lower()] = True
         for k in list(status.get('not_found') or {}):
             if status['urls'].get(k) or status['urls'].get(k.lower() if isinstance(k, str) else None):
                 del status['not_found'][k]
         app._shazam_sync_status = status
         save_status_cache(status)
-        # Include not_found/urls/titles in final progress so frontend can update dots without refetch
+        # Include not_found/urls/titles/scores in final progress so frontend can update without refetch
         app._shazam_sync_progress = {
             'running': False,
             'done': result.get('done', 0), 'failed': result.get('failed', 0),
@@ -2484,6 +2511,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
             'not_found': dict(status.get('not_found') or {}),
             'urls': dict(status.get('urls') or {}),
             'soundeo_titles': dict(status.get('soundeo_titles') or {}),
+            'soundeo_match_scores': dict(status.get('soundeo_match_scores') or {}),
         }
     except Exception as e:
         app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'search_global'}
@@ -3138,6 +3166,26 @@ def shazam_sync_reset_not_found():
     app._shazam_sync_status = status
     save_status_cache(status)
     return jsonify({'ok': True, 'message': 'Not-found state cleared. All no-link tracks will show grey until you run Search again.'})
+
+
+@app.route('/api/shazam-sync/rebuild-from-search-log', methods=['POST'])
+def shazam_sync_rebuild_from_search_log():
+    """Replay search_outcomes in the status cache to rebuild urls and not_found. Use if state was corrupted. Single source of truth = status cache only."""
+    from shazam_cache import load_status_cache, save_status_cache, rebuild_status_from_search_log
+    existing = load_status_cache()
+    log = (existing or {}).get("search_outcomes") or []
+    if not log:
+        return jsonify({'ok': False, 'error': 'No search_outcomes in status cache.'}), 400
+    rebuilt = rebuild_status_from_search_log(existing)
+    app._shazam_sync_status = rebuilt
+    save_status_cache(rebuilt)
+    return jsonify({
+        'ok': True,
+        'message': f'Rebuilt from {len(log)} search_outcomes. Refresh to see correct dots.',
+        'log_entries': len(log),
+        'urls_count': len(rebuilt.get('urls') or {}),
+        'not_found_count': len(rebuilt.get('not_found') or {}),
+    })
 
 
 @app.route('/api/shazam-sync/dismiss-manual-check', methods=['POST'])

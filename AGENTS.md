@@ -20,6 +20,15 @@ See **[docs/STATE_PERSISTENCE.md](docs/STATE_PERSISTENCE.md)** for the full list
 - **Live dot update:** When per-row Search completes and a track is not found, the row dot must turn from grey to orange **without a page refresh**. The frontend does this by updating `shazamNotFound` and re-rendering; `shazamNotFound` is only replaced when applying fresh server data in `shazamApplyStatus`, never inside `shazamRenderTrackList`, or the per-row update is overwritten.
 - **Batch search (Search new / Search unfound):** Dots update accordingly as the run progresses (progress poll merges `p.not_found` / `p.urls` / `p.soundeo_titles` and re-renders); on completion the final progress includes full `not_found`/`urls`/`titles` so the list is correct without a full page refresh. Star and action buttons follow the same state (urls/starred/soundeo_titles).
 
+## Dot state: one-time wipe, then never again
+
+- **One-time wipe (done):** All orange (searched-not-found) were cleared so every no-link track shows grey. No need to repeat.
+- **From now on:** Every action that changes a dot (grey → orange, grey → link, orange → link) **must be saved immediately** via `save_status_cache(status)`. We never rely on in-memory state for dots; we never need to wipe again.
+- **Backtrackable:** The current dot state is always in `shazam_status_cache.json` (`urls` + `not_found`). Refresh or restart restores that state, so it can always be backtracked to what was last saved.
+- **No UI wipe button.** To turn all orange dots to grey (clear the not-found paper trail), run the script: `python3 scripts/reset_not_found.py`. Do not add a "Show all as grey" or similar button; the user wipes via script only.
+- **Single source of truth only:** All state lives in **`shazam_status_cache.json`** — no separate log file, no extra storage. That file holds `to_download`, `have_locally`, `urls`, `not_found`, `starred`, `soundeo_titles`, `dismissed`, and **`search_outcomes`** (list of per-track search results: `{t, a, k, u}`). Dot state (`urls` / `not_found`) is derived from `search_outcomes` when we read, so the UI always reflects what actually happened.
+- **Per-track tracking:** Every search outcome is appended to `status['search_outcomes']` in that same file. Single-track and batch search both save **as soon as** each result is known (found/not found) via `log_search_outcome` + `save_status_cache`, so restart mid-batch doesn’t lose progress and we never write a partial “all not_found” state. Replay (newest per key wins) gives `urls` and `not_found`. Rebuild-from-search-log (script or API) is a safety measure only.
+
 ## Prefer Extended version (explicit rule)
 
 **When multiple versions of a track exist (e.g. Original Mix, Extended Mix, Radio Edit), always prefer the Extended version.** This is integrated everywhere relevant:

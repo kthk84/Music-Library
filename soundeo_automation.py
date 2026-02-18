@@ -1300,7 +1300,12 @@ def run_search_tracks(
                 if match_score is not None:
                     results["soundeo_match_scores"][key] = round(match_score, 3)
                 if on_progress:
-                    on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", url, key)
+                    kwargs = {}
+                    if display_text:
+                        kwargs["soundeo_title"] = display_text
+                    if match_score is not None:
+                        kwargs["soundeo_match_score"] = round(match_score, 3)
+                    on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", url, key, **kwargs)
             else:
                 results["failed"] += 1
                 results["errors"].append(f"Not found: {artist} - {title}")
@@ -1379,7 +1384,11 @@ def run_search_tracks_http(
             results["soundeo_titles"][key] = best_title or key
             results["soundeo_match_scores"][key] = round(best_score, 3)
             if on_progress:
-                on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", best_url, key)
+                on_progress(
+                    i + 1, len(tracks), f"Found: {artist} - {title}", best_url, key,
+                    soundeo_title=best_title or key,
+                    soundeo_match_score=round(best_score, 3),
+                )
         else:
             results["failed"] += 1
             results["errors"].append(f"Not found: {artist} - {title}")

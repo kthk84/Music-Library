@@ -2790,7 +2790,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 searchDropdownWrap.classList.remove('open');
                 searchDropdownBtn.setAttribute('aria-expanded', 'false');
                 const mode = item.dataset.mode;
-                shazamSearchAllOnSoundeo(mode);
+                if (mode) shazamSearchAllOnSoundeo(mode);
             });
         });
     }
@@ -2914,6 +2914,9 @@ async function shazamSearchAllOnSoundeo(searchMode) {
                 }
                 if (p.not_found) Object.assign(shazamNotFound, p.not_found);
                 if (p.soundeo_titles) Object.assign(shazamSoundeoTitles, p.soundeo_titles);
+                if (p.soundeo_match_scores && shazamLastData) {
+                    shazamLastData.soundeo_match_scores = { ...(shazamLastData.soundeo_match_scores || {}), ...p.soundeo_match_scores };
+                }
             }
             if (p.running && shazamLastData) shazamRenderTrackList(shazamLastData);
             if (!p.running) {
@@ -2924,6 +2927,9 @@ async function shazamSearchAllOnSoundeo(searchMode) {
                     if (p.not_found) Object.assign(shazamNotFound, p.not_found);
                     if (p.urls) Object.assign(shazamTrackUrls, p.urls);
                     if (p.soundeo_titles) Object.assign(shazamSoundeoTitles, p.soundeo_titles);
+                    if (p.soundeo_match_scores && shazamLastData) {
+                        shazamLastData.soundeo_match_scores = { ...(shazamLastData.soundeo_match_scores || {}), ...p.soundeo_match_scores };
+                    }
                     if (shazamLastData) shazamRenderTrackList(shazamLastData);
                 }
                 shazamLoadStatus();
@@ -2942,9 +2948,8 @@ async function shazamResetNotFound() {
             alert(data.error || 'Failed to reset not-found state.');
             return;
         }
-        Object.keys(shazamNotFound).forEach(k => delete shazamNotFound[k]);
         shazamNotFound = {};
-        if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        await shazamLoadStatus();
         if (data.message) alert(data.message);
     } catch (e) {
         alert('Error: ' + e.message);
