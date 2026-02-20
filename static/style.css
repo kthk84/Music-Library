@@ -1173,19 +1173,23 @@ button[onclick*="revertLookup"] {
 }
 
 /* Batch jobs: one section for Running + Queued so both are visible together */
-/* Sticky so Running + Search queue + Queued stay visible when scrolling the track list */
+/* Fixed overlay at very top of viewport so it never takes layout space → no page jump when it appears */
 .shazam-batch-jobs-section {
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
-    margin-top: var(--sp-2);
-    margin-bottom: var(--sp-3);
-    position: sticky;
-    top: var(--sp-2);
-    z-index: 10;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
     background: var(--bg-primary);
-    padding-bottom: var(--sp-1);
+    padding: var(--sp-2) var(--sp-4) var(--sp-1);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    max-width: 1400px;
+    margin-left: auto;
+    margin-right: auto;
+    box-sizing: border-box;
 }
 .shazam-single-search-queue-bar {
     display: flex;

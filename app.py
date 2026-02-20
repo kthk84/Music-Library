@@ -78,6 +78,12 @@ def _get_soundeo_download_logger():
 
 _soundeo_download_log = _get_soundeo_download_logger()
 
+
+def _get_soundeo_download_log_path():
+    """Path to soundeo_download.log (same dir as app.py) for UI / download-log API."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "soundeo_download.log")
+
+
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max request size
 
@@ -1574,6 +1580,7 @@ def shazam_sync_status():
     download_progress = getattr(app, '_shazam_download_progress', None)
     if download_progress:
         out['download_progress'] = download_progress
+        out['download_log_path'] = _get_soundeo_download_log_path()
     resp = jsonify(out)
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return resp
@@ -2366,6 +2373,9 @@ def _run_download_queue_worker():
     if not progress or not progress.get('running'):
         return
     keys = list(progress.get('queue', []))
+    # Deduplicate so we don't download the same track multiple times in one run
+    seen = set()
+    keys = [k for k in keys if k not in seen and not seen.add(k)]
     total = len(keys)
     dest_dir = get_soundeo_download_folder()
     cookies_path = get_soundeo_cookies_path()
@@ -2428,6 +2438,11 @@ def _run_download_queue_worker():
     app._shazam_download_progress['message'] = f'Done. {done} downloaded, {failed} failed.'
     if no_credits:
         app._shazam_download_progress['error'] = 'To be able to download you need to purchase premium account.'
+    elif failed > 0 and results:
+        # Show the last failure reason so the user sees why (e.g. "Download returned 403", "No saved session")
+        last_failed = next((r for r in reversed(results) if not r.get('ok') and r.get('error')), None)
+        if last_failed:
+            app._shazam_download_progress['error'] = last_failed.get('error', 'Download failed')
     dlog.info("download_queue: finished done=%s failed=%s", done, failed)
 
 
@@ -2477,7 +2492,13 @@ def shazam_sync_download_queue():
         return jsonify({'error': 'Another operation is running.'}), 400
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
     urls = status.get('urls') or {}
-    queue = [k for k in keys if (urls.get(k) or urls.get((k or '').lower()))]
+    # Deduplicate by key (first occurrence wins) so same track isn't downloaded multiple times
+    seen = set()
+    queue = []
+    for k in keys:
+        if (urls.get(k) or urls.get((k or '').lower())) and k not in seen:
+            seen.add(k)
+            queue.append(k)
     if not queue:
         return jsonify({'error': 'No tracks with Soundeo URL in the list'}), 400
     app._shazam_download_progress = {
@@ -2487,6 +2508,26 @@ def shazam_sync_download_queue():
     thread = threading.Thread(target=_run_download_queue_worker, daemon=True)
     thread.start()
     return jsonify({'running': True, 'total': len(queue), 'message': f'Downloading {len(queue)} tracks...'})
+
+
+@app.route('/api/shazam-sync/download-log', methods=['GET'])
+def shazam_sync_download_log():
+    """Return the last N lines of soundeo_download.log for debugging (default 100). Query: ?lines=100."""
+    log_path = _get_soundeo_download_log_path()
+    try:
+        lines = int(request.args.get('lines', 100))
+        lines = min(max(1, lines), 500)
+    except (TypeError, ValueError):
+        lines = 100
+    try:
+        if not os.path.isfile(log_path):
+            return Response("Log file not created yet. Run a download first.\n", mimetype='text/plain')
+        with open(log_path, 'r', encoding='utf-8', errors='replace') as f:
+            all_lines = f.readlines()
+        last = all_lines[-lines:] if len(all_lines) > lines else all_lines
+        return Response(''.join(last), mimetype='text/plain')
+    except Exception as e:
+        return Response(f"Could not read log: {e}\n", status=500, mimetype='text/plain')
 
 
 def _strip_all_parens(key: str) -> str:

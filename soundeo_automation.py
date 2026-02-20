@@ -1694,7 +1694,7 @@ def _get_soundeo_session(cookies_path: str):
     session = req.Session()
     session.headers["User-Agent"] = (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
     )
     for c in raw_cookies:
         name = c.get("name", "")
@@ -2040,20 +2040,38 @@ def soundeo_get_aiff_download_url_http(track_url: str, cookies_path: str) -> Dic
         if resp.status_code != 200:
             return {"ok": False, "error": f"Track page returned {resp.status_code}"}
         text = resp.text or ""
-        # Soundeo AIFF is button.track-download-btn.format-3 with data-track-id and data-track-format="3"
-        # Build URL: /track/download/{track_id}?format=3 (format 3 = AIFF)
+        # Prefer direct CDN/download links from the page (fresh URL; avoids 404 from constructed /track/download/...)
+        for pattern in (
+            r'data-(?:download-)?url="(https?://[^"]+)"',
+            r'href="(https?://[^"]*sndstatic[^"]*)"',
+            r'href="(https?://[^"]*cdownload[^"]*\.aiff?)"',
+        ):
+            for m in re.finditer(pattern, text, re.I):
+                try:
+                    url = (m.group(1) or "").strip()
+                except (IndexError, AttributeError):
+                    continue
+                if not url or "logout" in url.lower() or "login" in url.lower():
+                    continue
+                # Exclude stylesheets and scripts (e.g. cdn.sndstatic.com/css/soundeo.css)
+                ul = url.lower()
+                if "/css/" in ul or ul.endswith(".css") or "/js/" in ul or ul.endswith(".js"):
+                    continue
+                if "sndstatic" in ul or "/cdownload/" in ul or url.rstrip("/").lower().endswith(".aiff"):
+                    return {"ok": True, "url": url}
+        # Soundeo download: real click goes to /download/{track_id}/{format} (format 1=MP3, 2=WAV, 3=AIFF)
         for m in re.finditer(
             r'<button[^>]*class="[^"]*track-download-btn[^"]*format-3[^"]*"[^>]*data-track-id="(\d+)"',
             text, re.I
         ):
             tid = m.group(1)
-            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/download/{tid}/3"}
         for m in re.finditer(r'data-track-id="(\d+)"[^>]*data-track-format="3"', text):
             tid = m.group(1)
-            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/download/{tid}/3"}
         for m in re.finditer(r'data-track-format="3"[^>]*data-track-id="(\d+)"', text):
             tid = m.group(1)
-            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/download/{tid}/3"}
         # Prefer links that explicitly mention AIFF or WAV in href
         for pattern in (
             r'href="([^"]*(?:format=(?:aiff|wav|3)|aiff|/download[^"]*aiff)[^"]*)"',
@@ -2077,10 +2095,10 @@ def soundeo_get_aiff_download_url_http(track_url: str, cookies_path: str) -> Dic
                     wav_url = url
             if wav_url:
                 return {"ok": True, "url": wav_url}
-        # Fallback: use track id from URL with format=3 (AIFF)
+        # Fallback: use track id from URL (AIFF = format 3)
         tid = extract_track_id(track_url)
         if tid:
-            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/download/{tid}/3"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
     return {"ok": False, "error": "not_found"}
@@ -2091,6 +2109,7 @@ def soundeo_download_file_http(
     cookies_path: str,
     dest_dir: str,
     key: str,
+    track_page_url: Optional[str] = None,
 ) -> Dict:
     """
     Download file from download_url with session cookies; save to dest_dir.
@@ -2109,20 +2128,145 @@ def soundeo_download_file_http(
             return {"ok": False, "error": f"Could not create folder: {e}"}
     try:
         slog.info("download_file_http: GET %s key=%s", (download_url or "")[:100], key[:40] if key else "")
-        resp = session.get(download_url, stream=True, timeout=60, allow_redirects=True)
-        final_url = (resp.url or "").strip().lower()
-        slog.info("download_file_http: final_url=%s content-type=%s key=%s", (final_url or "")[:80], (resp.headers.get("Content-Type") or "")[:50], key[:40] if key else "")
+        # Referer: track page when available (matches real button click); else CDN gets origin, else download URL
+        is_cdn = (download_url or "").lower()
+        is_cdn = "sndstatic" in is_cdn or "/cdownload/" in is_cdn
+        referer = (track_page_url or "").strip() if track_page_url else (SOUNDEO_BASE if is_cdn else ((download_url or "").strip() or SOUNDEO_BASE))
+        # Soundeo /download/{id}/{format} expects X-Requested-With and Accept like the real button
+        is_soundeo_download = "soundeo.com/download/" in (download_url or "")
+        orig_referer = session.headers.get("Referer")
+        orig_xrw = session.headers.get("X-Requested-With")
+        orig_accept = session.headers.get("Accept")
+        orig_sec_dest = session.headers.get("Sec-Fetch-Dest")
+        orig_sec_mode = session.headers.get("Sec-Fetch-Mode")
+        orig_sec_site = session.headers.get("Sec-Fetch-Site")
+        orig_sec_user = session.headers.get("Sec-Fetch-User")
+        # For Soundeo /download/{id}/{format} we get JSON first; use stream=False so resp.content is populated
+        use_stream = not is_soundeo_download
+        try:
+            session.headers["Referer"] = referer
+            if is_soundeo_download:
+                session.headers["X-Requested-With"] = "XMLHttpRequest"
+                session.headers["Accept"] = "application/json, text/javascript, */*; q=0.01"
+            elif is_cdn:
+                # CDN (dl*.sndstatic.com/cdownload/): match browser headers so CDN returns file not HTML
+                session.headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"
+                session.headers["Sec-Fetch-Dest"] = "iframe"
+                session.headers["Sec-Fetch-Mode"] = "navigate"
+                session.headers["Sec-Fetch-Site"] = "cross-site"
+                session.headers["Sec-Fetch-User"] = "?1"
+            resp = session.get(download_url, stream=use_stream, timeout=60, allow_redirects=False)
+        finally:
+            if orig_referer is not None:
+                session.headers["Referer"] = orig_referer
+            else:
+                session.headers.pop("Referer", None)
+            if orig_xrw is not None:
+                session.headers["X-Requested-With"] = orig_xrw
+            else:
+                session.headers.pop("X-Requested-With", None)
+            if orig_accept is not None:
+                session.headers["Accept"] = orig_accept
+            else:
+                session.headers.pop("Accept", None)
+            for h in ("Sec-Fetch-Dest", "Sec-Fetch-Mode", "Sec-Fetch-Site", "Sec-Fetch-User"):
+                session.headers.pop(h, None)
+            if orig_sec_dest is not None:
+                session.headers["Sec-Fetch-Dest"] = orig_sec_dest
+            if orig_sec_mode is not None:
+                session.headers["Sec-Fetch-Mode"] = orig_sec_mode
+            if orig_sec_site is not None:
+                session.headers["Sec-Fetch-Site"] = orig_sec_site
+            if orig_sec_user is not None:
+                session.headers["Sec-Fetch-User"] = orig_sec_user
+        # If Soundeo redirects to CDN, follow manually with Referer so CDN gets it
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = (resp.headers.get("Location") or "").strip()
+            try:
+                resp.close()
+            except Exception:
+                pass
+            if location and not location.startswith(("http://", "https://")):
+                from urllib.parse import urljoin
+                location = urljoin(download_url or SOUNDEO_BASE, location)
+            if location and "/account/premium" in location.lower():
+                slog.info("download_file_http: redirect to premium (no credits) key=%s", key[:50] if key else "")
+                return {"ok": False, "error": "no_credits"}
+            if not location:
+                slog.info("download_file_http: redirect with no Location key=%s", key[:50] if key else "")
+                return {"ok": False, "error": "Download redirect had no target URL"}
+            slog.info("download_file_http: following redirect to %s key=%s", location[:80], key[:40] if key else "")
+            try:
+                session.headers["Referer"] = (download_url or "").strip() or SOUNDEO_BASE
+                resp = session.get(location, stream=True, timeout=60, allow_redirects=True)
+            except Exception as e:
+                slog.info("download_file_http: redirect request failed %s key=%s", e, key[:50] if key else "")
+                return {"ok": False, "error": "Redirect failed: " + str(e)}
+            finally:
+                session.headers.pop("Referer", None)
+        final_url = (resp.url or "").strip().lower() if getattr(resp, "url", None) else ""
+        ct = (resp.headers.get("Content-Type") or "")[:50]
+        slog.info("download_file_http: status=%s final_url=%s content-type=%s key=%s", resp.status_code, (final_url or "")[:80], ct, key[:40] if key else "")
         if "/account/premium" in final_url:
             slog.info("download_file_http: redirected to premium (no credits) key=%s", key[:50] if key else "")
             return {"ok": False, "error": "no_credits"}
         if resp.status_code != 200:
-            slog.info("download_file_http: status=%s key=%s", resp.status_code, key[:50] if key else "")
-            return {"ok": False, "error": f"Download returned {resp.status_code}"}
+            where = "CDN" if "sndstatic" in final_url else "Soundeo"
+            slog.info("download_file_http: status=%s from %s key=%s", resp.status_code, where, key[:50] if key else "")
+            return {"ok": False, "error": f"Download returned {resp.status_code} (from {where})"}
         content_type = (resp.headers.get("Content-Type") or "").lower()
         if "text/html" in content_type:
             slog.info("download_file_http: response is HTML (no subscription?) key=%s", key[:50] if key else "")
             return {"ok": False, "error": "no_credits"}
-        # Peek first chunk: if it looks like HTML, do not save — user has no subscription
+        # Soundeo /download/{id}/{format} returns JSON with the actual file URL; follow it (we used stream=False so resp.content is set)
+        if is_soundeo_download and "application/json" in content_type:
+            try:
+                body = (resp.content or b"") if getattr(resp, "content", None) is not None else b"".join(resp.iter_content(chunk_size=8192))
+                slog.info("download_file_http: [Soundeo JSON] body_len=%s key=%s", len(body), key[:40] if key else "")
+                data = json.loads(body.decode("utf-8", errors="replace"))
+                # Soundeo returns jsActions.redirect.url (e.g. https://dl1.sndstatic.com/cdownload/...)
+                js_actions = data.get("jsActions") if isinstance(data.get("jsActions"), dict) else None
+                redirect_obj = js_actions.get("redirect") if js_actions else None
+                if isinstance(redirect_obj, dict) and redirect_obj.get("url"):
+                    file_url = (redirect_obj.get("url") or "").strip()
+                    slog.info("download_file_http: [Soundeo JSON] got CDN URL from jsActions.redirect key=%s", key[:40] if key else "")
+                else:
+                    file_url = (
+                        data.get("url") or data.get("redirect") or data.get("download_url") or data.get("link")
+                        or data.get("file") or data.get("file_url") or data.get("href")
+                        or (isinstance(data.get("data"), dict) and (data["data"].get("url") or data["data"].get("link") or data["data"].get("file")))
+                        or (isinstance(data.get("result"), dict) and (data["result"].get("url") or data["result"].get("link")))
+                    )
+                    if isinstance(file_url, dict):
+                        file_url = file_url.get("url") or file_url.get("link") or file_url.get("file") or ""
+                    file_url = (file_url or "").strip()
+                if file_url and file_url.startswith(("http://", "https://")):
+                    try:
+                        resp.close()
+                    except Exception:
+                        pass
+                    slog.info("download_file_http: JSON returned url=%s, following key=%s", file_url[:80], key[:40] if key else "")
+                    return soundeo_download_file_http(file_url, cookies_path, dest_dir, key, track_page_url=track_page_url or download_url)
+                raw_preview = (body.decode("utf-8", errors="replace") or "")[:500]
+                slog.info("download_file_http: JSON keys=%s body_preview=%s key=%s", list(data.keys()) if isinstance(data, dict) else type(data).__name__, raw_preview[:200], key[:50] if key else "")
+                # Write full JSON to debug file so we can inspect structure (e.g. after user runs download)
+                try:
+                    _debug_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soundeo_download_last_json.json")
+                    with open(_debug_path, "w", encoding="utf-8") as _f:
+                        _f.write(body.decode("utf-8", errors="replace"))
+                except Exception as _e:
+                    slog.info("download_file_http: could not write debug JSON %s", _e)
+            except (json.JSONDecodeError, KeyError, TypeError) as e:
+                slog.info("download_file_http: JSON parse failed %s key=%s", e, key[:50] if key else "")
+            # fall through to reject if we didn't get a URL
+        # Reject other non-audio types (e.g. Soundeo CSS/JS)
+        if any(x in content_type for x in ("text/css", "text/javascript", "application/javascript")):
+            slog.info("download_file_http: response is %s, not audio key=%s", content_type[:40], key[:50] if key else "")
+            return {"ok": False, "error": "Server returned a web page instead of the audio file"}
+        if "application/json" in content_type:
+            slog.info("download_file_http: response is JSON but no download URL in body key=%s", key[:50] if key else "")
+            return {"ok": False, "error": "Server returned a web page instead of the audio file"}
+        # Peek first chunk: if it looks like HTML or CSS, do not save
         first_chunk = b""
         for chunk in resp.iter_content(chunk_size=8192):
             if chunk:
@@ -2133,6 +2277,10 @@ def soundeo_download_file_http(
             if b"<!doctype" in peek or b"<html" in peek or b"<script" in peek or b"upgrade" in peek or b"premium" in peek or b"subscription" in peek:
                 slog.info("download_file_http: response body is HTML/upgrade page (no subscription) key=%s", key[:50] if key else "")
                 return {"ok": False, "error": "no_credits"}
+            # CSS (e.g. html,body,div,span... or *.selector { )
+            if peek.startswith(b"html,") or (b"{" in peek and b"}" in peek and b"font-family" in peek):
+                slog.info("download_file_http: response body is CSS (not audio) key=%s", key[:50] if key else "")
+                return {"ok": False, "error": "Server returned a web page instead of the audio file"}
         # Filename from Content-Disposition or URL; fallback to track key so we don't get "downloads.aiff"
         filename = None
         cd = resp.headers.get("Content-Disposition")
@@ -2140,19 +2288,34 @@ def soundeo_download_file_http(
             m = re.search(r'filename[*]?=(?:UTF-8\'\')?["\']?([^"\';]+)', cd, re.I)
             if m:
                 filename = m.group(1).strip().strip('"\'')
-        if not filename and download_url:
+        if not filename:
             from urllib.parse import unquote, urlparse
-            filename = unquote(os.path.basename(urlparse(download_url).path)) or ""
+            # Prefer filename from final URL (CDN path, e.g. 4560715.aiff) over Soundeo path (e.g. "download")
+            final_path = urlparse(resp.url or "").path if resp.url else ""
+            if final_path and os.path.basename(final_path) and "." in os.path.basename(final_path):
+                candidate = unquote(os.path.basename(final_path)) or ""
+                # Do not use web-page extensions (server returned wrong content)
+                if candidate and os.path.splitext(candidate)[1].lower() not in (".css", ".js", ".html", ".htm", ".json"):
+                    filename = candidate
+            if not filename and download_url:
+                candidate = unquote(os.path.basename(urlparse(download_url).path)) or ""
+                if candidate and os.path.splitext(candidate)[1].lower() not in (".css", ".js", ".html", ".htm", ".json"):
+                    filename = candidate
         if not filename or not filename.strip():
             filename = ""
         base_from_server = (filename and os.path.splitext(filename)[0].strip().lower()) or ""
-        if base_from_server in ("downloads", "download", "track", "file", "aiff") or len(base_from_server) <= 2:
+        if base_from_server in ("downloads", "download", "track", "file", "aiff", "soundeo") or len(base_from_server) <= 2:
             filename = (_safe_filename_from_key(key or "") + ".aiff") if (key and key.strip()) else "track.aiff"
         if not filename or not filename.strip():
             filename = "track.aiff"
         if not filename.lower().endswith((".aiff", ".aif")):
             filename = filename + ".aiff" if not os.path.splitext(filename)[1] else filename
-        filepath = _path_with_copy_number(dest_dir, filename)
+        # Same track: overwrite existing key-derived file so we don't get multiple copies (e.g. "Track.aiff", "Track (1).aiff")
+        key_based_name = (_safe_filename_from_key(key or "") + ".aiff") if (key and key.strip()) else ""
+        if key_based_name and os.path.basename(filename) == key_based_name:
+            filepath = os.path.join(dest_dir, filename)
+        else:
+            filepath = _path_with_copy_number(dest_dir, filename)
         slog.info("download_file_http: saving to %s key=%s", filepath, key[:50] if key else "")
         with open(filepath, "wb") as f:
             if first_chunk:
@@ -2198,12 +2361,17 @@ def soundeo_download_aiff(
         if not download_url:
             return {"ok": False, "error": "Download URL not found"}
         slog.info("download_aiff: trying download_url=%s key=%s", (download_url or "")[:120], key[:50] if key else "")
-        out = soundeo_download_file_http(download_url, cookies_path, dest_dir, key)
+        out = soundeo_download_file_http(download_url, cookies_path, dest_dir, key, track_page_url=track_url)
         if out.get("ok"):
             return out
         if out.get("error") == "no_credits":
             return out
-        slog.info("download_aiff: HTTP download failed, will try crawler: %s", out.get("error"))
+        err = out.get("error", "")
+        # Don't start crawler for 404 from Soundeo — same URL would 404 again and crawler can hang
+        if err and "404" in err and "Soundeo" in err:
+            slog.info("download_aiff: HTTP 404 from Soundeo, skip crawler (would fail same way)")
+            return out
+        slog.info("download_aiff: HTTP download failed, will try crawler: %s", err)
         use_crawler = True
     # 2) Crawler fallback
     try:
@@ -2213,6 +2381,8 @@ def soundeo_download_aiff(
         from selenium.webdriver.support import expected_conditions as EC
         driver = _get_driver(headless=True, use_persistent_profile=True)
         try:
+            # Prevent hanging forever on slow or stuck page load
+            driver.set_page_load_timeout(60)
             if not load_cookies(driver, cookies_path, initial_url=track_url):
                 return {"ok": False, "error": "Could not load cookies"}
             driver.get(track_url.strip())
@@ -2226,20 +2396,20 @@ def soundeo_download_aiff(
                 btn = driver.find_element(By.CSS_SELECTOR, "button.track-download-btn.format-3")
                 tid = (btn.get_attribute("data-track-id") or "").strip()
                 if tid and tid.isdigit():
-                    download_url = f"{SOUNDEO_BASE}/track/download/{tid}?format=3"
+                    download_url = f"{SOUNDEO_BASE}/download/{tid}/3"
                     slog.info("download_aiff: crawler found AIFF button data-track-id=%s url=%s", tid, download_url[:80])
                     _graceful_quit(driver)
-                    return soundeo_download_file_http(download_url, cookies_path, dest_dir, key)
+                    return soundeo_download_file_http(download_url, cookies_path, dest_dir, key, track_page_url=track_url)
             except Exception:
                 pass
             try:
                 btn = driver.find_element(By.CSS_SELECTOR, "button[data-track-format='3']")
                 tid = (btn.get_attribute("data-track-id") or "").strip()
                 if tid and tid.isdigit():
-                    download_url = f"{SOUNDEO_BASE}/track/download/{tid}?format=3"
+                    download_url = f"{SOUNDEO_BASE}/download/{tid}/3"
                     slog.info("download_aiff: crawler found button data-track-format=3 id=%s", tid)
                     _graceful_quit(driver)
-                    return soundeo_download_file_http(download_url, cookies_path, dest_dir, key)
+                    return soundeo_download_file_http(download_url, cookies_path, dest_dir, key, track_page_url=track_url)
             except Exception:
                 pass
             # Fallback: find <a> with AIFF/WAV text or hotkey A then parse page
@@ -2254,7 +2424,7 @@ def soundeo_download_aiff(
                             if href.startswith(("http://", "https://")):
                                 slog.info("download_aiff: crawler found %s link href=%s", link_text, href[:80])
                                 _graceful_quit(driver)
-                                return soundeo_download_file_http(href, cookies_path, dest_dir, key)
+                                return soundeo_download_file_http(href, cookies_path, dest_dir, key, track_page_url=track_url)
                     except Exception:
                         pass
             except Exception:
@@ -2280,10 +2450,14 @@ def soundeo_download_aiff(
                     if "logout" in raw.lower() or "login" in raw.lower():
                         continue
                     _graceful_quit(driver)
-                    return soundeo_download_file_http(url, cookies_path, dest_dir, key)
+                    return soundeo_download_file_http(url, cookies_path, dest_dir, key, track_page_url=track_url)
         finally:
             _graceful_quit(driver)
     except Exception as e:
+        from selenium.common.exceptions import TimeoutException
+        if isinstance(e, TimeoutException):
+            slog.info("download_aiff: crawler page load timed out key=%s", key[:50] if key else "")
+            return {"ok": False, "error": "Page load timed out. Try again or check your connection."}
         slog.info("download_aiff: crawler error %s key=%s", e, key[:50] if key else "")
         return {"ok": False, "error": str(e)}
     return {"ok": False, "error": "Could not get download link"}

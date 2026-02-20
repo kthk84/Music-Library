@@ -1176,6 +1176,8 @@ function scrubAudio(event, index) {
 // --- Shazam to Soundeo Sync ---
 
 const SHAZAM_COMPARE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
+/** Max duration for inline progress polls (sync single, search single/global); prevents leak if server hangs. */
+const SHAZAM_INLINE_POLL_MAX_MS = 30 * 60 * 1000;
 /** Shown when an action is rejected (e.g. another operation running) so the user gets context. */
 const SHAZAM_ACTION_REJECTED_MSG = 'Another operation is already running. Wait for it to finish or click Stop.';
 let shazamComparePollInterval = null;
@@ -1183,6 +1185,36 @@ let shazamFolderInputs = [];
 let shazamProgressInterval = null;
 let shazamDownloadPollInterval = null;
 let shazamProgressRestoreInterval = null;
+
+/** Start progress polling; always clears any existing interval first to avoid stacking (crash/loop). */
+function shazamStartProgressPoll() {
+    if (shazamProgressInterval) {
+        clearInterval(shazamProgressInterval);
+        shazamProgressInterval = null;
+    }
+    shazamProgressInterval = setInterval(shazamPollProgress, 500);
+}
+
+/** Start compare polling; always clears any existing interval first to avoid stacking. */
+function shazamStartComparePoll(start) {
+    if (shazamComparePollInterval) {
+        clearInterval(shazamComparePollInterval);
+        shazamComparePollInterval = null;
+    }
+    const t = start != null ? start : Date.now();
+    setTimeout(function () { shazamComparePoll(t); }, 120);
+    shazamComparePollInterval = setInterval(function () { shazamComparePoll(t); }, 500);
+}
+
+/** Start download progress polling; always clears any existing interval first to avoid stacking. */
+function shazamStartDownloadPoll() {
+    if (shazamDownloadPollInterval) {
+        clearInterval(shazamDownloadPollInterval);
+        shazamDownloadPollInterval = null;
+    }
+    shazamDownloadPollInterval = setInterval(shazamPollDownloadProgress, 500);
+}
+
 /** Latest sync/search progress from server (running, current, total, message, current_key). Used to show spinner in the row being processed. */
 let shazamCurrentProgress = {};
 /** Current star queue from progress API (list of { artist, title, key }). Used to show "Queued 2/5" in track rows. */
@@ -1360,8 +1392,7 @@ async function shazamRescanFolder(idx) {
         }
         if (data.running) {
             shazamShowCompareProgress(true, 0, 0);
-            const start = Date.now();
-            shazamComparePollInterval = setInterval(() => shazamComparePoll(start), 500);
+            shazamStartComparePoll(Date.now());
             return;
         }
         shazamShowCompareProgress(false);
@@ -1587,9 +1618,7 @@ async function shazamCompare() {
         }
         if (data.running) {
             shazamShowCompareProgress(true, 0, 0, 'Starting compare...');
-            const start = Date.now();
-            setTimeout(function () { shazamComparePoll(start); }, 120);
-            shazamComparePollInterval = setInterval(function () { shazamComparePoll(start); }, 500);
+            shazamStartComparePoll(Date.now());
             return;
         }
         shazamShowCompareProgress(false);
@@ -1695,9 +1724,7 @@ async function shazamRescan(compareAfter) {
         }
         if (data.running) {
             shazamShowCompareProgress(true, 0, 0, compareAfter ? 'Starting rescan & compare...' : 'Rescanning folders...');
-            const start = Date.now();
-            setTimeout(function () { shazamComparePoll(start); }, 120);
-            shazamComparePollInterval = setInterval(function () { shazamComparePoll(start); }, 500);
+            shazamStartComparePoll(Date.now());
             return;
         }
         shazamShowCompareProgress(false);
@@ -1768,8 +1795,7 @@ function shazamApplyStatus(data) {
         const tot = sp.total || 0;
         const msg = sp.message || (tot > 0 ? null : 'Discovering files...');
         shazamShowCompareProgress(true, cur, tot, msg || (tot > 0 ? (cur.toLocaleString() + ' / ' + tot.toLocaleString()) : undefined));
-        setTimeout(function () { shazamComparePoll(Date.now()); }, 120);
-        shazamComparePollInterval = setInterval(function () { shazamComparePoll(Date.now()); }, 500);
+        shazamStartComparePoll(Date.now());
     } else if (!data.compare_running) {
         shazamShowCompareProgress(false);
     }
@@ -2565,9 +2591,7 @@ async function shazamUnstarTrack(key, trackUrl, artist, title) {
         shazamApplyQueueState(shazamCurrentStarQueue, shazamCurrentSearchQueue, unstarQueue);
         if (unstarQueue.length > 0 || data.status === 'queued' || data.status === 'started') {
             shazamShowSyncProgress(data.message || 'Unstarring…');
-            if (!shazamProgressInterval) {
-                shazamProgressInterval = setInterval(shazamPollProgress, 500);
-            }
+            shazamStartProgressPoll();
         }
         delete shazamActionPending[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
@@ -2708,9 +2732,7 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
         shazamApplyQueueState(starQueue, shazamCurrentSearchQueue, data.unstar_queue !== undefined ? data.unstar_queue : shazamCurrentUnstarQueue);
         if (starQueue.length >= 0) {
             shazamShowSyncProgress(data.message || 'Starring…');
-            if (!shazamProgressInterval) {
-                shazamProgressInterval = setInterval(shazamPollProgress, 500);
-            }
+            shazamStartProgressPoll();
         }
         delete shazamActionPending[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
@@ -2791,8 +2813,17 @@ async function shazamSyncSingleTrack(key, artist, title) {
             return;
         }
         if (data.status === 'started') {
+            if (shazamProgressInterval) { clearInterval(shazamProgressInterval); shazamProgressInterval = null; }
+            if (shazamProgressRestoreInterval) { clearInterval(shazamProgressRestoreInterval); shazamProgressRestoreInterval = null; }
             shazamShowSyncProgress();
+            const pollStart = Date.now();
             const poll = setInterval(async () => {
+                if (Date.now() - pollStart > SHAZAM_INLINE_POLL_MAX_MS) {
+                    clearInterval(poll);
+                    shazamHideSyncProgress();
+                    shazamCurrentProgress = {};
+                    return;
+                }
                 const pRes = await fetch('/api/shazam-sync/progress');
                 const p = await pRes.json();
                 shazamCurrentProgress = p;
@@ -2952,7 +2983,7 @@ function shazamRenderJobQueue() {
 function shazamEnsureProgressVisibleWhenQueued() {
     if (shazamProgressInterval) return;
     shazamShowSyncProgress('Loading…');
-    shazamProgressInterval = setInterval(shazamPollProgress, 500);
+    shazamStartProgressPoll();
 }
 
 function shazamClearJobQueue() {
@@ -2993,7 +3024,7 @@ async function shazamMaybeStartQueuedJob() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         shazamShowSyncProgress(data.message || 'Searching…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } else if (job.type === 'star_batch') {
         const res = await fetch('/api/shazam-sync/star-batch', {
             method: 'POST',
@@ -3003,7 +3034,7 @@ async function shazamMaybeStartQueuedJob() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         shazamShowSyncProgress(data.message || 'Starring…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } else if (job.type === 'sync_favorites') {
         const res = await fetch('/api/shazam-sync/sync-favorites-from-soundeo', {
             method: 'POST',
@@ -3013,7 +3044,7 @@ async function shazamMaybeStartQueuedJob() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         shazamShowSyncProgress(data.message || 'Syncing favorites from Soundeo…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } else if (job.type === 'run_soundeo') {
         const res = await fetch('/api/shazam-sync/run-soundeo', {
             method: 'POST',
@@ -3023,7 +3054,7 @@ async function shazamMaybeStartQueuedJob() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         shazamShowSyncProgress(data.message || 'Syncing to Soundeo…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } else if (job.type === 'sync_single_track') {
         const res = await fetch('/api/shazam-sync/sync-single-track', {
             method: 'POST',
@@ -3033,15 +3064,14 @@ async function shazamMaybeStartQueuedJob() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         shazamShowSyncProgress(data.message || 'Finding & starring…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } else if (job.type === 'compare') {
         const res = await fetch('/api/shazam-sync/compare', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         if (data.running) {
             shazamShowCompareProgress(true, 0, 0, 'Starting compare…');
-            setTimeout(function () { shazamComparePoll(Date.now()); }, 120);
-            shazamComparePollInterval = setInterval(function () { shazamComparePoll(Date.now()); }, 500);
+            shazamStartComparePoll(Date.now());
         } else if (data.error) {
             shazamLoadStatus();
         }
@@ -3055,8 +3085,7 @@ async function shazamMaybeStartQueuedJob() {
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         if (data.running) {
             shazamShowCompareProgress(true, 0, 0, job.payload.compare_after !== false ? 'Rescan & compare…' : 'Rescanning…');
-            setTimeout(function () { shazamComparePoll(Date.now()); }, 120);
-            shazamComparePollInterval = setInterval(function () { shazamComparePoll(Date.now()); }, 500);
+            shazamStartComparePoll(Date.now());
         } else if (data.error) {
             shazamLoadStatus();
         }
@@ -3069,8 +3098,7 @@ async function shazamMaybeStartQueuedJob() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) { shazamLoadStatus(); return; }
         shazamShowCompareProgress(true, 0, 0, 'Rescanning folder…');
-        setTimeout(function () { shazamComparePoll(Date.now()); }, 120);
-        shazamComparePollInterval = setInterval(function () { shazamComparePoll(Date.now()); }, 500);
+        shazamStartComparePoll(Date.now());
     } else if (job.type === 'fetch_shazam') {
         const res = await fetch('/api/shazam-sync/fetch-shazam', { method: 'POST', headers: { 'Content-Type': 'application/json' } });
         const data = await res.json().catch(() => ({}));
@@ -3112,7 +3140,7 @@ async function shazamStarSelected() {
             return;
         }
         shazamShowSyncProgress(data.message || 'Starring…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } catch (e) { alert('Error: ' + e.message); }
 }
 
@@ -3218,6 +3246,8 @@ function shazamHideSyncProgress() {
     shazamFollowCurrentRow = false;
     const el = document.getElementById('shazamSyncProgress');
     if (el) el.style.display = 'none';
+    const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
+    if (viewLogBtn) viewLogBtn.style.display = 'none';
     const gotoBtn = document.getElementById('shazamProgressGotoBtn');
     if (gotoBtn) gotoBtn.textContent = 'Follow row';
     shazamSetProgressClickable(false);
@@ -3334,6 +3364,7 @@ function shazamPlayContextMenu(ev, btn) {
     if (y < pad) y = pad;
     menu.style.left = x + 'px';
     menu.style.top = y + 'px';
+    document.removeEventListener('click', shazamPlayContextMenuClose);
     setTimeout(function () { document.addEventListener('click', shazamPlayContextMenuClose); }, 0);
 }
 function shazamPlayContextMenuClose() {
@@ -3400,7 +3431,7 @@ async function shazamRunSync() {
             return;
         }
         shazamShowSyncProgress(data.message || 'Syncing to Soundeo…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } catch (e) {
         alert('Error: ' + (e.message || 'Request failed'));
     }
@@ -3426,7 +3457,7 @@ async function shazamSyncFavoritesFromSoundeo() {
             return;
         }
         shazamShowSyncProgress('Syncing favorites from Soundeo…');
-        shazamProgressInterval = setInterval(shazamPollProgress, 500);
+        shazamStartProgressPoll();
     } catch (e) { alert('Error: ' + e.message); }
 }
 
@@ -3525,6 +3556,14 @@ function switchTab(tabId) {
         b.classList.toggle('active', b.dataset.tab === tabId);
         b.setAttribute('aria-selected', b.dataset.tab === tabId ? 'true' : 'false');
     });
+    const batchSection = document.getElementById('shazamBatchJobsSection');
+    if (batchSection) {
+        if (tabId === 'shazam') {
+            shazamUpdateBatchJobsSectionVisibility();
+        } else {
+            batchSection.style.display = 'none';
+        }
+    }
     saveAppStateToStorage({ active_tab: tabId });
 }
 
@@ -3709,11 +3748,43 @@ async function shazamDownloadTrack(key) {
             return;
         }
         shazamShowSyncProgress(data.message || 'Downloading…');
-        shazamDownloadPollInterval = setInterval(shazamPollDownloadProgress, 500);
+        shazamStartDownloadPoll();
     } catch (e) {
         delete shazamActionPending[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
         alert('Error: ' + e.message);
+    }
+}
+
+async function shazamShowDownloadLog() {
+    try {
+        const res = await fetch('/api/shazam-sync/download-log?lines=100');
+        const text = await res.text();
+        const overlay = document.createElement('div');
+        overlay.className = 'modal active';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);display:flex;align-items:center;justify-content:center;z-index:10000;';
+        const box = document.createElement('div');
+        box.className = 'modal-content';
+        box.style.cssText = 'max-width:90vw;max-height:85vh;display:flex;flex-direction:column;';
+        const header = document.createElement('div');
+        header.className = 'modal-header';
+        header.innerHTML = '<h3>Download log (soundeo_download.log)</h3><button type="button" class="modal-close" aria-label="Close">&times;</button>';
+        const body = document.createElement('div');
+        body.className = 'modal-body';
+        body.style.cssText = 'overflow:auto;flex:1;min-height:200px;';
+        const pre = document.createElement('pre');
+        pre.style.cssText = 'margin:0;font-size:12px;white-space:pre-wrap;word-break:break-all;';
+        pre.textContent = text || '(empty)';
+        body.appendChild(pre);
+        box.appendChild(header);
+        box.appendChild(body);
+        overlay.appendChild(box);
+        const close = () => overlay.remove();
+        header.querySelector('.modal-close').onclick = close;
+        overlay.onclick = (e) => { if (e.target === overlay) close(); };
+        document.body.appendChild(overlay);
+    } catch (e) {
+        alert('Could not load log: ' + e.message);
     }
 }
 
@@ -3724,8 +3795,12 @@ function shazamPollDownloadProgress() {
         if (el && dp) {
             if (dp.running) {
                 el.textContent = dp.message || `Downloading ${(dp.done || 0)}/${dp.total || 0}…`;
+                const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
+                if (viewLogBtn) viewLogBtn.style.display = 'none';
             } else {
                 el.textContent = dp.error || dp.message || `Done. ${dp.done || 0} downloaded, ${dp.failed || 0} failed.`;
+                const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
+                if (viewLogBtn) viewLogBtn.style.display = (dp.error ? 'inline-block' : 'none');
                 if (shazamDownloadPollInterval) {
                     clearInterval(shazamDownloadPollInterval);
                     shazamDownloadPollInterval = null;
@@ -3765,7 +3840,7 @@ async function shazamDownloadAllToDownload() {
             return;
         }
         shazamShowSyncProgress(data.message || `Downloading ${keys.length} tracks…`);
-        shazamDownloadPollInterval = setInterval(shazamPollDownloadProgress, 500);
+        shazamStartDownloadPoll();
     } catch (e) {
         alert('Error: ' + e.message);
     }
@@ -3796,9 +3871,20 @@ async function shazamSearchSingleOnSoundeo(key, artist, title) {
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             return;
         }
+        if (shazamProgressInterval) { clearInterval(shazamProgressInterval); shazamProgressInterval = null; }
+        if (shazamProgressRestoreInterval) { clearInterval(shazamProgressRestoreInterval); shazamProgressRestoreInterval = null; }
         shazamShowSyncProgress(data.message || 'Searching…');
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        const pollStart = Date.now();
         const poll = setInterval(async () => {
+            if (Date.now() - pollStart > SHAZAM_INLINE_POLL_MAX_MS) {
+                clearInterval(poll);
+                shazamHideSyncProgress();
+                shazamCurrentProgress = {};
+                delete shazamActionPending[key];
+                if (shazamLastData) shazamRenderTrackList(shazamLastData);
+                return;
+            }
             const pRes = await fetch('/api/shazam-sync/progress');
             const p = await pRes.json();
             shazamCurrentProgress = p;
@@ -3862,8 +3948,17 @@ async function shazamSearchAllOnSoundeo(searchMode) {
             }
             return;
         }
+        if (shazamProgressInterval) { clearInterval(shazamProgressInterval); shazamProgressInterval = null; }
+        if (shazamProgressRestoreInterval) { clearInterval(shazamProgressRestoreInterval); shazamProgressRestoreInterval = null; }
         shazamShowSyncProgress(data.message || 'Searching…');
+        const pollStartSearch = Date.now();
         const poll = setInterval(async () => {
+            if (Date.now() - pollStartSearch > SHAZAM_INLINE_POLL_MAX_MS) {
+                clearInterval(poll);
+                shazamHideSyncProgress();
+                shazamCurrentProgress = {};
+                return;
+            }
             const pRes = await fetch('/api/shazam-sync/progress');
             const p = await pRes.json();
             shazamCurrentProgress = p;
