@@ -37,6 +37,10 @@ See **[docs/STATE_PERSISTENCE.md](docs/STATE_PERSISTENCE.md)** for the full list
 - **Local scanner** (`local_scanner.py`): When multiple local tracks match the same Shazam track (e.g. same normalized key or same canonical title), prefer the one whose title contains "extended" (exact-match map, canon pass, and fuzzy match collection all use `_prefer_extended_track` or equivalent).
 - **Manual check**: Shown only when the synced Soundeo title indicates a non-extended version (e.g. "Original Mix", "Radio Edit") so the user can consider checking for an Extended version; not shown when the link is already Extended.
 
+## Restart required (user communication)
+
+**When you change server-side code (e.g. `app.py`, `soundeo_automation.py`, or any code run by the Flask server), tell the user clearly that they need to restart the app for the change to take effect.** Do not assume they will infer it. Say explicitly something like: “You need to restart the app for this change to take effect” or “Restart the app to pick up this change.”
+
 ## Other
 
 - Soundeo session (cookies) is saved to a path from config; sync and Save Session flow load it so login is remembered.

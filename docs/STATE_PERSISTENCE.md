@@ -21,12 +21,15 @@
 | **Dismissed Manual check** (track keys user dismissed) | `shazam_status_cache.json` → `dismissed_manual_check` | Status, bootstrap; POST `/api/shazam-sync/dismiss-manual-check` |
 | **Soundeo track title** (exact filename/details as on Soundeo per track) | `shazam_status_cache.json` → `soundeo_titles` | Set when sync completes; merged when rebuilding status |
 | **Soundeo track ID** (numeric ID per track for HTTP star/unstar) | `shazam_status_cache.json` → `track_ids` | Set when resolved from URL or by visiting track page; merged when rebuilding/merging status. Backfill: `python3 scripts/backfill_track_ids.py`. Single source of truth: same file only. |
+| **Search/favorite debug log** (what starred state we see on Soundeo when you click Search) | `search_favorite.log` (project root) | Written on each per-row Search and each batch Search when a track is found; logs `get_track_starred_state` (single) or HTTP favorite state (batch) and whether `status.starred` was updated. Use to see why the blue star on Soundeo might not show as favorite in the app. |
 | **Searched but not found** (per-track: Search ran and no link found) | `shazam_status_cache.json` → `not_found` | Set when Search all or per-row Search runs and finds no URL; cleared when a URL is later set. Used for row dot: grey = not yet searched, light orange = searched not found. **UI must update live:** when per-row Search completes with “not found”, the dot must turn from grey to orange without a page refresh (frontend updates `shazamNotFound` and re-renders; do not replace `shazamNotFound` inside `shazamRenderTrackList` or the update is wiped). |
 | **Starred from Soundeo** (source of truth) | Crawl `https://soundeo.com/account/favorites` → merge into `starred`, `urls`, `soundeo_titles` | At start of Run Soundeo sync; also POST `/api/shazam-sync/sync-favorites-from-soundeo` (Sync favorites button) |
 | Skip list (tracks user chose to skip) | `shazam_skip_list.json` | Compare, status, skip API |
 | Shazam track list | `shazam_cache.json` | Fetch, compare, status |
 | Local folder scan | `local_scan_cache.json` | Compare, rescan |
 | Soundeo session (cookies) | `soundeo_cookies.json` (path in config) | Sync run, Save Session flow |
+| **Soundeo download folder** (one of destination folders for AIFF saves) | `config.json` → `soundeo_download_folder` | Bootstrap, settings API; UI: one toggle active per folder |
+| **Download last run** (done/failed/results, no_credits) | `shazam_status_cache.json` → `download_last_run` | Set after each download queue run; status API |
 | Settings (folders, headed mode, etc.) | `config.json` | Bootstrap, settings API |
 
 ## Implementation notes

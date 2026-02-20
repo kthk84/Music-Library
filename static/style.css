@@ -1683,14 +1683,15 @@ button[onclick*="revertLookup"] {
     text-decoration: underline;
 }
 
-/* Skipped rows */
+/* Skipped rows: no strikethrough, more greyed out */
 .shazam-track-table .shazam-row-skipped {
     color: var(--text-tertiary);
     background: var(--bg-secondary);
+    opacity: 0.7;
 }
 
 .shazam-track-table .shazam-row-skipped td {
-    text-decoration: line-through;
+    text-decoration: none;
 }
 
 .shazam-track-table .shazam-row-skipped td.shazam-select-col {
@@ -2120,12 +2121,7 @@ button[onclick*="revertLookup"] {
     border-color: var(--danger);
 }
 .shazam-undo-action {
-    width: auto;
-    padding: 0 6px;
-    font-size: 0.65rem;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
+    /* Same size as other row action buttons (22x22) */
 }
 .shazam-action-spinner {
     display: inline-block;

@@ -31,6 +31,8 @@ DEFAULT_CONFIG = {
     #   Linux:   ~/.config/google-chrome
     "soundeo_chrome_user_data_dir": "",
     "soundeo_chrome_profile_directory": "",
+    # Soundeo download: one of destination_folders where AIFF downloads are saved (only one active).
+    "soundeo_download_folder": "",
 }
 
 
@@ -113,6 +115,20 @@ def get_destination_folders() -> List[str]:
 def get_destination_folders_raw() -> List[str]:
     raw = load_config().get("destination_folders", []) or []
     return [p for p in (str(x).strip() for x in raw if x) if p]
+
+
+def get_soundeo_download_folder() -> str:
+    """Folder path where Soundeo AIFF downloads are saved. Must be one of destination_folders."""
+    path = (load_config().get("soundeo_download_folder") or "").strip()
+    return path
+
+
+def set_soundeo_download_folder(folder_path: str) -> None:
+    """Set the single Soundeo download folder (one of destination_folders). Pass '' to clear."""
+    cfg = load_config()
+    cfg = dict(cfg)
+    cfg["soundeo_download_folder"] = (folder_path or "").strip()
+    save_config(cfg)
 
 
 # --- Soundeo browser: single source of truth ---

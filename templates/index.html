@@ -111,6 +111,11 @@
                         <div id="shazamFolderList" class="folder-list"></div>
                         <button type="button" onclick="shazamAddFolder()" class="btn btn-secondary btn-small">Add folder</button>
                     </div>
+                    <div class="folder-list-row" id="shazamDownloadFolderRow">
+                        <label>Soundeo download folder</label>
+                        <div id="shazamDownloadFolderList" class="folder-list"></div>
+                        <span class="folder-hint">One folder where AIFF downloads are saved. Must be a destination folder above.</span>
+                    </div>
                     <div class="soundeo-session-row">
                         <button type="button" id="shazamSaveSessionBtn" onclick="shazamSaveSession()" class="btn btn-secondary btn-small">Connect Soundeo</button>
                         <button type="button" id="shazamLoggedInBtn" onclick="shazamSessionSaved()" class="btn btn-small" style="display:none;background:var(--accent);color:white;">I have logged in</button>
@@ -140,6 +145,7 @@
                     </div>
                 </div>
                 <div class="toolbar-divider"></div>
+                <button type="button" onclick="shazamDownloadAllToDownload()" class="btn btn-secondary btn-small" title="Download AIFF for all to-download tracks that have a Soundeo link">Download</button>
                 <div class="favorites-dropdown-wrap toolbar-group">
                     <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Sync starred state from Soundeo" aria-haspopup="true" aria-expanded="false">
                         Sync starred <span class="search-dropdown-chevron" aria-hidden="true">▾</span>

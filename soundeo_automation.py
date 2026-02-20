@@ -120,6 +120,7 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
 SOUNDEO_BASE = "https://soundeo.com"
 SOUNDEO_LOGIN = f"{SOUNDEO_BASE}/account/logoreg"
 SOUNDEO_ACCOUNT = f"{SOUNDEO_BASE}/account"  # If user can view this page, they are logged in
+SOUNDEO_PREMIUM_URL = f"{SOUNDEO_BASE}/account/premium"  # Redirect here = no credits left
 TRACK_LIST_URL = f"{SOUNDEO_BASE}/list/tracks"
 FAVORITES_URL = f"{SOUNDEO_BASE}/account/favorites"
 
@@ -207,11 +208,13 @@ def _get_all_cookies_cdp(driver) -> list:
         return []
 
 
-def load_cookies(driver, cookies_path: str) -> bool:
+def load_cookies(driver, cookies_path: str, initial_url: Optional[str] = None) -> bool:
     """
     Load saved cookies into the browser.
-    Navigates to the base site first (not login page) to establish the domain,
+    Navigates to initial_url or SOUNDEO_BASE first to establish the domain,
     then injects cookies with guaranteed expiry so they persist.
+    Pass initial_url=track_url when doing star/unstar so we open the track page
+    instead of the homepage (avoids redirect to /account when logged in).
     """
     cookies_path = os.path.abspath(cookies_path)
     if not os.path.exists(cookies_path):
@@ -222,7 +225,10 @@ def load_cookies(driver, cookies_path: str) -> bool:
         if not cookies or not isinstance(cookies, list):
             return False
         cookies = _dedup_cookies(cookies)
-        driver.get(SOUNDEO_BASE)
+        first_url = (initial_url or "").strip()
+        if not first_url or not first_url.startswith(("https://soundeo.com/", "http://soundeo.com/")):
+            first_url = SOUNDEO_BASE
+        driver.get(first_url)
         time.sleep(2)
         current_domain = "soundeo.com"
         added = 0
@@ -262,31 +268,16 @@ def _is_redirected_to_login(driver) -> bool:
         return True
 
 
-def verify_logged_in(driver) -> bool:
+def check_logged_in(driver) -> bool:
     """
-    Check that the current session is actually logged in to Soundeo.
-    Navigate to https://soundeo.com/account — if the user can view that page (not redirected to login),
-    they are logged in. Call this after load_cookies() and before any action that reads or changes favorites.
+    Check that the current session is logged in by loading the favorites page.
+    No separate account page visit: if we are not redirected to login, we are logged in.
+    Call after load_cookies().
     """
     try:
-        driver.get(SOUNDEO_ACCOUNT)
+        driver.get(FAVORITES_URL)
         time.sleep(1.5)
-        current = (driver.current_url or "").strip().lower()
-        # Logged-out users are typically redirected to login (logoreg, login, etc.)
-        if "logoreg" in current or "/login" in current or "/account/log" in current:
-            return False
-        # Still on /account or a subpath (e.g. /account/favorites) = logged in
-        if "/account" in current and "log" not in current:
-            return True
-        # Fallback: check for login prompt in body
-        try:
-            from selenium.webdriver.common.by import By
-            body = (driver.find_element(By.TAG_NAME, "body").text or "").lower()
-            if body and ("log in" in body or "sign in" in body) and "account" not in body[:800]:
-                return False
-        except Exception:
-            pass
-        return "/account" in current
+        return not _is_redirected_to_login(driver)
     except Exception:
         return False
 
@@ -892,6 +883,11 @@ def get_track_starred_state(driver, track_url: str) -> bool:
 def _soundeo_star_log():
     """Logger for star/unstar (same as app.py soundeo_star); may have no handler if app not loaded first."""
     return logging.getLogger("soundeo_star")
+
+
+def _soundeo_download_log():
+    """Logger for download flow (same as app.py soundeo_download); may have no handler if app not loaded first."""
+    return logging.getLogger("soundeo_download")
 
 
 def unfavorite_track_on_soundeo(
@@ -1517,7 +1513,7 @@ def run_search_tracks(
     except Exception as e:
         return {"error": _chrome_session_error_message(e)}
 
-    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "stopped": False}
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "starred": {}, "stopped": False}
 
     try:
         if not load_cookies(driver, cookies_path):
@@ -1552,12 +1548,22 @@ def run_search_tracks(
                 results["soundeo_titles"][key] = display_text or key
                 if match_score is not None:
                     results["soundeo_match_scores"][key] = round(match_score, 3)
+                starred_val = None
+                try:
+                    starred_val = soundeo_api_get_favorite_state(url, cookies_path)
+                except Exception:
+                    pass
+                if starred_val is not None:
+                    results["starred"][key] = bool(starred_val)
+                    results["starred"][key.lower()] = bool(starred_val)
                 if on_progress:
                     kwargs = {}
                     if display_text:
                         kwargs["soundeo_title"] = display_text
                     if match_score is not None:
                         kwargs["soundeo_match_score"] = round(match_score, 3)
+                    if starred_val is not None:
+                        kwargs["starred"] = bool(starred_val)
                     on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", url, key, **kwargs)
             else:
                 if results["done"] == 0 and _is_redirected_to_login(driver):
@@ -1597,7 +1603,7 @@ def run_search_tracks_http(
     global _sync_stop_requested
     clear_sync_stop_request()
     skip_keys = skip_keys or set()
-    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "stopped": False}
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "starred": {}, "stopped": False}
 
     if not os.path.exists(os.path.abspath(cookies_path)):
         return {"error": "No saved session. Save Soundeo session first in Settings."}
@@ -1639,11 +1645,24 @@ def run_search_tracks_http(
             results["urls"][key] = best_url
             results["soundeo_titles"][key] = best_title or key
             results["soundeo_match_scores"][key] = round(best_score, 3)
+            starred_val = None
+            try:
+                starred_val = soundeo_api_get_favorite_state(best_url, cookies_path)
+            except Exception:
+                pass
+            if starred_val is not None:
+                results["starred"][key] = bool(starred_val)
+                results["starred"][key.lower()] = bool(starred_val)
             if on_progress:
+                kwargs = {
+                    "soundeo_title": best_title or key,
+                    "soundeo_match_score": round(best_score, 3),
+                }
+                if starred_val is not None:
+                    kwargs["starred"] = bool(starred_val)
                 on_progress(
                     i + 1, len(tracks), f"Found: {artist} - {title}", best_url, key,
-                    soundeo_title=best_title or key,
-                    soundeo_match_score=round(best_score, 3),
+                    **kwargs,
                 )
         else:
             results["failed"] += 1
@@ -1680,9 +1699,10 @@ def _get_soundeo_session(cookies_path: str):
     for c in raw_cookies:
         name = c.get("name", "")
         value = c.get("value", "")
-        domain = c.get("domain", "soundeo.com")
+        domain = (c.get("domain") or "soundeo.com").strip().lstrip(".")
+        path = c.get("path") or "/"
         if name and value:
-            session.cookies.set(name, value, domain=domain.lstrip("."))
+            session.cookies.set(name, value, domain=domain or "soundeo.com", path=path)
     return session
 
 
@@ -1693,36 +1713,65 @@ def extract_track_id(url_or_html: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
-def soundeo_api_toggle_favorite(track_id: str, cookies_path: str) -> Dict:
+def soundeo_api_toggle_favorite(
+    track_id: str, cookies_path: str, track_url: Optional[str] = None
+) -> Dict:
     """
     Toggle favorite state via Soundeo HTTP API.  Returns e.g.
     {"ok": True, "result": "favored"} or {"ok": True, "result": "unfavored"}.
-    Logs when response is non-JSON so we can fall back to crawler.
+    Soundeo returns JSON only when Accept: application/json and Referer (track page)
+    are set; otherwise it redirects (302) to homepage and we get HTML. We do not
+    follow redirects so we can detect auth/session issues.
     """
     session = _get_soundeo_session(cookies_path)
     if not session:
         return {"ok": False, "error": "No saved session"}
-    try:
-        resp = session.post(
-            f"{SOUNDEO_BASE}/tracks/favor/{track_id}",
-            data={},
-            timeout=10,
-        )
-        text = (resp.text or "").strip()
+    url = f"{SOUNDEO_BASE}/tracks/favor/{track_id}"
+    referer = (track_url or "").strip()
+    if not referer or not referer.startswith(("https://soundeo.com/", "http://soundeo.com/")):
+        referer = f"{SOUNDEO_BASE}/"
+    # Warm session: GET the track page first so server treats POST as in-context (like browser).
+    if referer and referer != f"{SOUNDEO_BASE}/":
         try:
-            data = resp.json() if text else {}
-        except Exception as parse_err:
-            _soundeo_star_log().info(
-                "toggle_favorite HTTP: non-JSON response status=%s body_len=%s preview=%s",
-                resp.status_code, len(resp.content or b""), (text[:120] if text else "(empty)"),
-            )
-            return {"ok": False, "error": str(parse_err)}
-        if data.get("success"):
-            return {"ok": True, "result": data.get("result", "unknown")}
-        return {"ok": False, "error": data.get("message", "API error")}
-    except Exception as e:
-        _soundeo_star_log().info("toggle_favorite HTTP: exception %s", e)
-        return {"ok": False, "error": str(e)}
+            session.get(referer, timeout=10)
+        except Exception:
+            pass
+    session.headers["Accept"] = "application/json"
+    session.headers["Referer"] = referer
+    session.headers["Origin"] = SOUNDEO_BASE
+    session.headers["X-Requested-With"] = "XMLHttpRequest"
+    try:
+        resp = session.post(url, data={}, timeout=10, allow_redirects=False)
+    finally:
+        session.headers.pop("Accept", None)
+        session.headers.pop("Referer", None)
+        session.headers.pop("Origin", None)
+        session.headers.pop("X-Requested-With", None)
+    if resp.status_code == 302:
+        loc = (resp.headers.get("Location") or "").strip()
+        _soundeo_star_log().info(
+            "toggle_favorite HTTP: 302 redirect to %s (session may be invalid)",
+            loc[:80] if loc else "(empty)",
+        )
+        return {"ok": False, "error": "Session invalid or expired (redirect to login)"}
+    text = (resp.text or "").strip()
+    if (resp.headers.get("Content-Type") or "").lower().find("application/json") == -1:
+        _soundeo_star_log().info(
+            "toggle_favorite HTTP: non-JSON response status=%s body_len=%s preview=%s",
+            resp.status_code, len(resp.content or b""), (text[:120] if text else "(empty)"),
+        )
+        return {"ok": False, "error": "Server returned non-JSON"}
+    try:
+        data = resp.json() if text else {}
+    except Exception as parse_err:
+        _soundeo_star_log().info(
+            "toggle_favorite HTTP: JSON parse error status=%s %s",
+            resp.status_code, parse_err,
+        )
+        return {"ok": False, "error": str(parse_err)}
+    if data.get("success"):
+        return {"ok": True, "result": data.get("result", "unknown")}
+    return {"ok": False, "error": data.get("message", "API error")}
 
 
 def soundeo_api_get_favorite_state(track_url: str, cookies_path: str) -> Optional[bool]:
@@ -1741,23 +1790,30 @@ def soundeo_api_get_favorite_state(track_url: str, cookies_path: str) -> Optiona
         if resp.status_code != 200:
             return None
         text = resp.text or ""
+        # Treat any of these in class as "starred" (match crawler and common site class names)
+        def _class_indicates_starred(cls: str) -> bool:
+            c = (cls or "").lower()
+            return any(
+                x in c for x in ("favored", "favorited", "active", "selected", "on", "filled", "starred", "added")
+            )
+
         # List-style: class="favorites..." then data-track-id (or reverse)
         for _cls, _tid in re.findall(
             r'<button[^>]*class="favorites([^"]*?)"[^>]*data-track-id="(\d+)"',
             text,
         ):
-            return "favored" in _cls
+            return _class_indicates_starred(_cls)
         for _tid, _cls in re.findall(
             r'<button[^>]*data-track-id="(\d+)"[^>]*class="favorites([^"]*?)"[^>]*>',
             text,
         ):
-            return "favored" in _cls
+            return _class_indicates_starred(_cls)
         # Any tag that has both data-track-id and favorite in class (detail page)
         for tag in re.findall(r'<button[^>]*(?:data-track-id="\d+")[^>]*>', text):
             if "favorite" in tag.lower():
-                return "favored" in tag.lower() or "active" in tag.lower()
+                return _class_indicates_starred(tag) or "active" in tag.lower()
         for tag in re.findall(r'<[^>]*(?:class="[^"]*favorite[^"]*")[^>]*data-track-id="\d+"[^>]*>', text, re.I):
-            return "favored" in tag.lower() or "active" in tag.lower()
+            return _class_indicates_starred(tag) or "active" in tag.lower()
     except Exception:
         pass
     return None
@@ -1818,13 +1874,13 @@ def soundeo_api_set_favorite(
             slog.info("set_favorite HTTP: skip toggle (already in desired state)")
             return {"ok": True, "result": "favored" if favored else "unfavored"}
     # Need to change state: toggle once (we know we're out of sync or couldn't read state)
-    r = soundeo_api_toggle_favorite(track_id, cookies_path)
+    r = soundeo_api_toggle_favorite(track_id, cookies_path, track_url=track_url)
     slog.info("set_favorite HTTP: toggle1 ok=%s result=%s error=%s", r.get("ok"), r.get("result"), r.get("error"))
     if not r.get("ok"):
         return r
     if (r.get("result") or "").lower() == ("favored" if favored else "unfavored"):
         return r
-    r2 = soundeo_api_toggle_favorite(track_id, cookies_path)
+    r2 = soundeo_api_toggle_favorite(track_id, cookies_path, track_url=track_url)
     slog.info("set_favorite HTTP: toggle2 ok=%s result=%s", r2.get("ok"), r2.get("result"))
     return r2 if r2.get("ok") else r
 
@@ -1922,7 +1978,9 @@ def soundeo_api_search_and_favorite(
                 best = r
         if best and best_score >= 0.3:
             if not best["favored"]:
-                toggle = soundeo_api_toggle_favorite(best["track_id"], cookies_path)
+                toggle = soundeo_api_toggle_favorite(
+                    best["track_id"], cookies_path, track_url=best.get("href")
+                )
                 if not toggle.get("ok"):
                     return {"ok": False, "error": toggle.get("error", "Toggle failed")}
             return {
@@ -1934,3 +1992,298 @@ def soundeo_api_search_and_favorite(
             }
 
     return {"ok": False, "error": f"Not found: {artist} - {title}"}
+
+
+# ---------------------------------------------------------------------------
+# Soundeo download (AIFF) — HTTP + crawler, premium redirect detection
+# ---------------------------------------------------------------------------
+
+def _safe_filename_from_key(key: str, max_len: int = 200) -> str:
+    """Turn track key (Artist - Title) into a safe filename: remove/replace invalid chars, limit length."""
+    if not key or not key.strip():
+        return "track"
+    s = re.sub(r'[<>:"/\\|?*]', "", key.strip())
+    s = re.sub(r'\s+', " ", s).strip()
+    if len(s) > max_len:
+        s = s[: max_len].rstrip()
+    return s or "track"
+
+
+def _path_with_copy_number(dest_dir: str, filename: str) -> str:
+    """Return path under dest_dir with filename; if file exists, add (1), (2), etc. before extension."""
+    base, ext = os.path.splitext(filename)
+    path = os.path.join(dest_dir, filename)
+    if not os.path.exists(path):
+        return path
+    n = 1
+    while True:
+        path = os.path.join(dest_dir, f"{base} ({n}){ext}")
+        if not os.path.exists(path):
+            return path
+        n += 1
+
+
+def soundeo_get_aiff_download_url_http(track_url: str, cookies_path: str) -> Dict:
+    """
+    GET track page via HTTP and parse for AIFF download URL.
+    Returns {"ok": True, "url": "https://..."} or {"ok": False, "error": "no_credits"|"not_found"|...}.
+    Detects redirect to SOUNDEO_PREMIUM_URL as no_credits.
+    """
+    session = _get_soundeo_session(cookies_path)
+    if not session:
+        return {"ok": False, "error": "No saved session"}
+    try:
+        resp = session.get(track_url.strip(), timeout=15, allow_redirects=True)
+        final_url = (resp.url or "").strip().lower()
+        if "/account/premium" in final_url:
+            return {"ok": False, "error": "no_credits"}
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"Track page returned {resp.status_code}"}
+        text = resp.text or ""
+        # Soundeo AIFF is button.track-download-btn.format-3 with data-track-id and data-track-format="3"
+        # Build URL: /track/download/{track_id}?format=3 (format 3 = AIFF)
+        for m in re.finditer(
+            r'<button[^>]*class="[^"]*track-download-btn[^"]*format-3[^"]*"[^>]*data-track-id="(\d+)"',
+            text, re.I
+        ):
+            tid = m.group(1)
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+        for m in re.finditer(r'data-track-id="(\d+)"[^>]*data-track-format="3"', text):
+            tid = m.group(1)
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+        for m in re.finditer(r'data-track-format="3"[^>]*data-track-id="(\d+)"', text):
+            tid = m.group(1)
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+        # Prefer links that explicitly mention AIFF or WAV in href
+        for pattern in (
+            r'href="([^"]*(?:format=(?:aiff|wav|3)|aiff|/download[^"]*aiff)[^"]*)"',
+            r'href="([^"]*download[^"]*)"',
+            r'data-(?:download-)?url="([^"]+)"',
+        ):
+            wav_url = None
+            for m in re.finditer(pattern, text, re.I):
+                raw = m.group(1).strip()
+                if not raw or "logout" in raw.lower() or "login" in raw.lower():
+                    continue
+                if raw.startswith("/"):
+                    url = f"{SOUNDEO_BASE}{raw}"
+                elif raw.startswith(("http://", "https://")):
+                    url = raw
+                else:
+                    continue
+                if "aiff" in url.lower() or "format=3" in url or "format=aiff" in url.lower():
+                    return {"ok": True, "url": url}
+                if "wav" in url.lower() or "format=wav" in url.lower():
+                    wav_url = url
+            if wav_url:
+                return {"ok": True, "url": wav_url}
+        # Fallback: use track id from URL with format=3 (AIFF)
+        tid = extract_track_id(track_url)
+        if tid:
+            return {"ok": True, "url": f"{SOUNDEO_BASE}/track/download/{tid}?format=3"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "not_found"}
+
+
+def soundeo_download_file_http(
+    download_url: str,
+    cookies_path: str,
+    dest_dir: str,
+    key: str,
+) -> Dict:
+    """
+    Download file from download_url with session cookies; save to dest_dir.
+    Filename from Content-Disposition or URL; if exists, add copy number.
+    Returns {"ok": True, "filepath": "...", "filename": "..."} or {"ok": False, "error": "..."}.
+    """
+    slog = _soundeo_download_log()
+    session = _get_soundeo_session(cookies_path)
+    if not session:
+        return {"ok": False, "error": "No saved session"}
+    dest_dir = os.path.abspath(dest_dir)
+    if not os.path.isdir(dest_dir):
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except Exception as e:
+            return {"ok": False, "error": f"Could not create folder: {e}"}
+    try:
+        slog.info("download_file_http: GET %s key=%s", (download_url or "")[:100], key[:40] if key else "")
+        resp = session.get(download_url, stream=True, timeout=60, allow_redirects=True)
+        final_url = (resp.url or "").strip().lower()
+        slog.info("download_file_http: final_url=%s content-type=%s key=%s", (final_url or "")[:80], (resp.headers.get("Content-Type") or "")[:50], key[:40] if key else "")
+        if "/account/premium" in final_url:
+            slog.info("download_file_http: redirected to premium (no credits) key=%s", key[:50] if key else "")
+            return {"ok": False, "error": "no_credits"}
+        if resp.status_code != 200:
+            slog.info("download_file_http: status=%s key=%s", resp.status_code, key[:50] if key else "")
+            return {"ok": False, "error": f"Download returned {resp.status_code}"}
+        content_type = (resp.headers.get("Content-Type") or "").lower()
+        if "text/html" in content_type:
+            slog.info("download_file_http: response is HTML (no subscription?) key=%s", key[:50] if key else "")
+            return {"ok": False, "error": "no_credits"}
+        # Peek first chunk: if it looks like HTML, do not save — user has no subscription
+        first_chunk = b""
+        for chunk in resp.iter_content(chunk_size=8192):
+            if chunk:
+                first_chunk = chunk
+                break
+        if first_chunk:
+            peek = first_chunk[:1024].lower()
+            if b"<!doctype" in peek or b"<html" in peek or b"<script" in peek or b"upgrade" in peek or b"premium" in peek or b"subscription" in peek:
+                slog.info("download_file_http: response body is HTML/upgrade page (no subscription) key=%s", key[:50] if key else "")
+                return {"ok": False, "error": "no_credits"}
+        # Filename from Content-Disposition or URL; fallback to track key so we don't get "downloads.aiff"
+        filename = None
+        cd = resp.headers.get("Content-Disposition")
+        if cd and "filename=" in cd:
+            m = re.search(r'filename[*]?=(?:UTF-8\'\')?["\']?([^"\';]+)', cd, re.I)
+            if m:
+                filename = m.group(1).strip().strip('"\'')
+        if not filename and download_url:
+            from urllib.parse import unquote, urlparse
+            filename = unquote(os.path.basename(urlparse(download_url).path)) or ""
+        if not filename or not filename.strip():
+            filename = ""
+        base_from_server = (filename and os.path.splitext(filename)[0].strip().lower()) or ""
+        if base_from_server in ("downloads", "download", "track", "file", "aiff") or len(base_from_server) <= 2:
+            filename = (_safe_filename_from_key(key or "") + ".aiff") if (key and key.strip()) else "track.aiff"
+        if not filename or not filename.strip():
+            filename = "track.aiff"
+        if not filename.lower().endswith((".aiff", ".aif")):
+            filename = filename + ".aiff" if not os.path.splitext(filename)[1] else filename
+        filepath = _path_with_copy_number(dest_dir, filename)
+        slog.info("download_file_http: saving to %s key=%s", filepath, key[:50] if key else "")
+        with open(filepath, "wb") as f:
+            if first_chunk:
+                f.write(first_chunk)
+            for chunk in resp.iter_content(chunk_size=65536):
+                if chunk:
+                    f.write(chunk)
+        slog.info("download_file_http: saved %s bytes key=%s", os.path.getsize(filepath), key[:50] if key else "")
+        return {"ok": True, "filepath": filepath, "filename": os.path.basename(filepath)}
+    except Exception as e:
+        slog.info("download_file_http: error %s key=%s", e, key[:50] if key else "")
+        return {"ok": False, "error": str(e)}
+
+
+def soundeo_download_aiff(
+    track_url: str,
+    cookies_path: str,
+    dest_dir: str,
+    key: str,
+    use_crawler: bool = False,
+) -> Dict:
+    """
+    Download AIFF for one track: try HTTP (get URL from page, then download), else crawler.
+    Detects redirect to account/premium as no_credits.
+    Returns {"ok": True, "filepath", "filename"} or {"ok": False, "error": "no_credits"|...}.
+    """
+    slog = _soundeo_download_log()
+    slog.info("download_aiff: key=%s track_url=%s dest_dir=%s", key[:60] if key else "", (track_url or "")[:80], dest_dir or "")
+    dest_dir = (dest_dir or "").strip()
+    if not dest_dir or not os.path.isdir(dest_dir):
+        return {"ok": False, "error": "Download folder not set or invalid"}
+    if not track_url or not track_url.strip().startswith(("https://soundeo.com/", "http://soundeo.com/")):
+        return {"ok": False, "error": "No track URL"}
+    # 1) HTTP: get download URL then stream file
+    if not use_crawler:
+        url_result = soundeo_get_aiff_download_url_http(track_url, cookies_path)
+        if not url_result.get("ok"):
+            err = url_result.get("error", "unknown")
+            if err == "no_credits":
+                slog.info("download_aiff: no_credits (HTTP discovery) key=%s", key[:50] if key else "")
+            return url_result
+        download_url = url_result.get("url", "")
+        if not download_url:
+            return {"ok": False, "error": "Download URL not found"}
+        slog.info("download_aiff: trying download_url=%s key=%s", (download_url or "")[:120], key[:50] if key else "")
+        out = soundeo_download_file_http(download_url, cookies_path, dest_dir, key)
+        if out.get("ok"):
+            return out
+        if out.get("error") == "no_credits":
+            return out
+        slog.info("download_aiff: HTTP download failed, will try crawler: %s", out.get("error"))
+        use_crawler = True
+    # 2) Crawler fallback
+    try:
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.common.keys import Keys
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        driver = _get_driver(headless=True, use_persistent_profile=True)
+        try:
+            if not load_cookies(driver, cookies_path, initial_url=track_url):
+                return {"ok": False, "error": "Could not load cookies"}
+            driver.get(track_url.strip())
+            time.sleep(2)
+            current = (driver.current_url or "").strip().lower()
+            if "/account/premium" in current:
+                slog.info("download_aiff: no_credits (crawler) key=%s", key[:50] if key else "")
+                return {"ok": False, "error": "no_credits"}
+            # Soundeo AIFF button: button.track-download-btn.format-3 with data-track-id, data-track-format="3"
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, "button.track-download-btn.format-3")
+                tid = (btn.get_attribute("data-track-id") or "").strip()
+                if tid and tid.isdigit():
+                    download_url = f"{SOUNDEO_BASE}/track/download/{tid}?format=3"
+                    slog.info("download_aiff: crawler found AIFF button data-track-id=%s url=%s", tid, download_url[:80])
+                    _graceful_quit(driver)
+                    return soundeo_download_file_http(download_url, cookies_path, dest_dir, key)
+            except Exception:
+                pass
+            try:
+                btn = driver.find_element(By.CSS_SELECTOR, "button[data-track-format='3']")
+                tid = (btn.get_attribute("data-track-id") or "").strip()
+                if tid and tid.isdigit():
+                    download_url = f"{SOUNDEO_BASE}/track/download/{tid}?format=3"
+                    slog.info("download_aiff: crawler found button data-track-format=3 id=%s", tid)
+                    _graceful_quit(driver)
+                    return soundeo_download_file_http(download_url, cookies_path, dest_dir, key)
+            except Exception:
+                pass
+            # Fallback: find <a> with AIFF/WAV text or hotkey A then parse page
+            try:
+                for link_text in ("AIFF", "WAV"):
+                    try:
+                        el = driver.find_element(By.XPATH, "//a[contains(translate(., 'abcdefghijklmnopqrstuvwxyz', 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'), '%s')]" % link_text)
+                        href = (el.get_attribute("href") or "").strip()
+                        if href and ("download" in href.lower() or "aiff" in href.lower() or "wav" in href.lower() or "/track/" in href):
+                            if href.startswith("/"):
+                                href = f"{SOUNDEO_BASE}{href}"
+                            if href.startswith(("http://", "https://")):
+                                slog.info("download_aiff: crawler found %s link href=%s", link_text, href[:80])
+                                _graceful_quit(driver)
+                                return soundeo_download_file_http(href, cookies_path, dest_dir, key)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            # Fallback: hotkey A then parse page for any download link
+            body = driver.find_element(By.TAG_NAME, "body")
+            body.send_keys("a")
+            time.sleep(3)
+            current = (driver.current_url or "").strip().lower()
+            if "/account/premium" in current:
+                slog.info("download_aiff: no_credits after hotkey (crawler) key=%s", key[:50] if key else "")
+                return {"ok": False, "error": "no_credits"}
+            html = driver.page_source or ""
+            for pattern in (r'href="([^"]*(?:download|aiff|wav)[^"]*)"', r'data-(?:download-)?url="([^"]+)"'):
+                for m in re.finditer(pattern, html, re.I):
+                    raw = m.group(1).strip()
+                    if raw.startswith("/"):
+                        url = f"{SOUNDEO_BASE}{raw}"
+                    elif raw.startswith(("http://", "https://")):
+                        url = raw
+                    else:
+                        continue
+                    if "logout" in raw.lower() or "login" in raw.lower():
+                        continue
+                    _graceful_quit(driver)
+                    return soundeo_download_file_http(url, cookies_path, dest_dir, key)
+        finally:
+            _graceful_quit(driver)
+    except Exception as e:
+        slog.info("download_aiff: crawler error %s key=%s", e, key[:50] if key else "")
+        return {"ok": False, "error": str(e)}
+    return {"ok": False, "error": "Could not get download link"}

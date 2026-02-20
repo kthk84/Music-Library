@@ -1181,6 +1181,7 @@ const SHAZAM_ACTION_REJECTED_MSG = 'Another operation is already running. Wait f
 let shazamComparePollInterval = null;
 let shazamFolderInputs = [];
 let shazamProgressInterval = null;
+let shazamDownloadPollInterval = null;
 let shazamProgressRestoreInterval = null;
 /** Latest sync/search progress from server (running, current, total, message, current_key). Used to show spinner in the row being processed. */
 let shazamCurrentProgress = {};
@@ -1224,9 +1225,27 @@ async function shazamLoadSettings() {
     }
 }
 
+let shazamLastSettings = null;
 function shazamApplySettings(cfg) {
+    shazamLastSettings = cfg || null;
     shazamFolderInputs = (cfg.destination_folders || []).slice();
     shazamRenderFolderList();
+    const downloadFolder = (cfg.soundeo_download_folder || '').trim();
+    const destFolders = (cfg.destination_folders_raw || cfg.destination_folders || []).filter(Boolean);
+    const downloadListEl = document.getElementById('shazamDownloadFolderList');
+    if (downloadListEl) {
+        if (destFolders.length === 0) {
+            downloadListEl.innerHTML = '<span class="folder-hint">Add destination folders above first.</span>';
+        } else {
+            const currentNorm = downloadFolder.replace(/\/$/, '');
+            downloadListEl.innerHTML = destFolders.map(path => {
+                const norm = path.replace(/\/$/, '');
+                const active = norm === currentNorm;
+                const label = path.split(/[/\\]/).filter(Boolean).pop() || path.slice(0, 40);
+                return `<button type="button" class="btn btn-small ${active ? 'btn-primary' : 'btn-secondary'}" data-download-folder="${(path || '').replace(/"/g, '&quot;')}" onclick="shazamSetDownloadFolder(this)" title="${(path || '').replace(/"/g, '&quot;')}">${active ? '✓ ' : ''}${label}${label.length >= (path || '').length ? '' : '…'}</button>`;
+            }).join(' ');
+        }
+    }
     const statusEl = document.getElementById('soundeoSessionStatus');
     const pathEl = document.getElementById('soundeoSessionPath');
     const btn = document.getElementById('shazamSaveSessionBtn');
@@ -1267,6 +1286,22 @@ function shazamRenderFolderList() {
     el.innerHTML = rows.map((path, i) =>
         `<div class="folder-list-item"><input type="text" value="${(path || '').replace(/"/g, '&quot;')}" placeholder="${i === 0 && !path ? 'Paste folder path or click Add Folder' : ''}" data-idx="${i}" onchange="shazamFolderChanged(this)" />${path ? `<button onclick="shazamRescanFolder(${i})" class="btn btn-small" title="Rescan this folder only">Rescan</button>` : ''}<button onclick="shazamRemoveFolder(${i})" class="btn btn-small" title="Remove folder" ${rows.length === 1 && !path ? 'style="visibility:hidden"' : ''}>✕</button></div>`
     ).join('');
+}
+
+async function shazamSetDownloadFolder(btn) {
+    const path = (btn.dataset.downloadFolder || '').trim();
+    const current = (shazamLastSettings && shazamLastSettings.soundeo_download_folder) ? (shazamLastSettings.soundeo_download_folder || '').replace(/\/$/, '') : '';
+    const newPath = (path.replace(/\/$/, '') === current) ? '' : path;
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ soundeo_download_folder: newPath })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok)
+            shazamApplySettings(data);
+    } catch (e) { console.error(e); }
 }
 
 function shazamFolderChanged(input) {
@@ -2208,12 +2243,15 @@ function shazamRenderTrackList(data) {
             }
         } else {
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
+            const downloadInactive = (row.status === 'have' || row.status === 'skipped' || !url) ? inactive : '';
+            const downloadTitle = row.status === 'have' ? 'Have locally (download not needed)' : row.status === 'skipped' ? 'Skipped' : !url ? 'No Soundeo link' : 'Download AIFF';
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>`;
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-star-action${starToggleInactive}" data-action="${starToggleAction}" data-key="${safeAttr(key)}"${starToggleDataAttrs} data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="${escapeHtml(starToggleTitle)}">${starToggleSvg}</button>`;
             if (isDismissed) {
                 actionsCell += `<button type="button" class="shazam-row-action-btn shazam-clear-dismissed" data-action="clear_dismissed" data-key="${safeAttr(key)}" title="Reset to: have locally, not starred on Soundeo (removes strikethrough, link visible again)">Remove strikethrough</button>`;
             }
             if (isSkipped) {
-                actionsCell += `<button type="button" class="shazam-row-action-btn shazam-undo-action" onclick="shazamUnskipRow(this)" title="Undo skip">Undo</button>`;
+                actionsCell += `<button type="button" class="shazam-row-action-btn shazam-undo-action" onclick="shazamUnskipRow(this)" title="Undo skip"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 12L18 8v8L6 12z"/></svg></button>`;
             } else {
                 actionsCell += `<button type="button" class="shazam-row-action-btn shazam-skip-action${skipInactive}" data-action="skip" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Skip (hide locally)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="6" y2="18"/><line x1="10" y1="6" x2="10" y2="18"/><polygon points="14 8 14 16 20 12"/></svg></button>`;
             }
@@ -2714,6 +2752,7 @@ async function shazamSkipSingleTrack(artist, title) {
         const data = await res.json().catch(() => ({}));
         if (res.ok) {
             delete shazamActionPending[key];
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
             return;
         }
         reverted = true;
@@ -3646,9 +3685,91 @@ document.addEventListener('DOMContentLoaded', () => {
             shazamSearchSingleOnSoundeo(btn.dataset.key, btn.dataset.artist, btn.dataset.title);
         } else if (action === 'star') {
             shazamStarTrack(btn.dataset.key, btn.dataset.trackUrl, btn.dataset.artist, btn.dataset.title);
+        } else if (action === 'download') {
+            shazamDownloadTrack(btn.dataset.key);
         }
     });
 });
+
+async function shazamDownloadTrack(key) {
+    if (shazamActionPending[key]) return;
+    shazamActionPending[key] = true;
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    try {
+        const res = await fetch('/api/shazam-sync/download-track', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key: key || '' })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+            alert(data.error || 'Download failed');
+            delete shazamActionPending[key];
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            return;
+        }
+        shazamShowSyncProgress(data.message || 'Downloading…');
+        shazamDownloadPollInterval = setInterval(shazamPollDownloadProgress, 500);
+    } catch (e) {
+        delete shazamActionPending[key];
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        alert('Error: ' + e.message);
+    }
+}
+
+function shazamPollDownloadProgress() {
+    fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
+        const dp = data.download_progress;
+        const el = document.getElementById('shazamProgress');
+        if (el && dp) {
+            if (dp.running) {
+                el.textContent = dp.message || `Downloading ${(dp.done || 0)}/${dp.total || 0}…`;
+            } else {
+                el.textContent = dp.error || dp.message || `Done. ${dp.done || 0} downloaded, ${dp.failed || 0} failed.`;
+                if (shazamDownloadPollInterval) {
+                    clearInterval(shazamDownloadPollInterval);
+                    shazamDownloadPollInterval = null;
+                }
+                if (dp.current_key) delete shazamActionPending[dp.current_key];
+                shazamLoadStatus();
+                setTimeout(shazamHideSyncProgress, 2500);
+            }
+        }
+        if (dp && !dp.running && shazamDownloadPollInterval) {
+            clearInterval(shazamDownloadPollInterval);
+            shazamDownloadPollInterval = null;
+        }
+    }).catch(() => {});
+}
+
+async function shazamDownloadAllToDownload() {
+    const toDl = (shazamLastData && shazamLastData.to_download) ? shazamLastData.to_download : [];
+    const urls = (shazamLastData && shazamLastData.urls) ? shazamLastData.urls : {};
+    const keys = toDl.filter(t => {
+        const k = (t.artist || '') + ' - ' + (t.title || '');
+        return urls[k] || urls[k.toLowerCase()];
+    }).map(t => (t.artist || '') + ' - ' + (t.title || ''));
+    if (keys.length === 0) {
+        alert('No tracks to download (all to-download tracks need a Soundeo link).');
+        return;
+    }
+    try {
+        const res = await fetch('/api/shazam-sync/download-queue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys: keys })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+            alert(data.error || 'Download failed');
+            return;
+        }
+        shazamShowSyncProgress(data.message || `Downloading ${keys.length} tracks…`);
+        shazamDownloadPollInterval = setInterval(shazamPollDownloadProgress, 500);
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+}
 
 async function shazamSearchSingleOnSoundeo(key, artist, title) {
     if (shazamActionPending[key]) return;
@@ -3781,6 +3902,10 @@ async function shazamSearchAllOnSoundeo(searchMode) {
                         }
                     });
                 }
+                if (p.starred && typeof p.starred === 'object') {
+                    Object.assign(shazamStarred, p.starred);
+                    shazamLastData.starred = { ...(shazamLastData.starred || {}), ...p.starred };
+                }
                 if (p.not_found) {
                     Object.assign(shazamNotFound, p.not_found);
                     // Merge into data so render sees cumulative not_found (live orange dots) without refresh
@@ -3810,6 +3935,10 @@ async function shazamSearchAllOnSoundeo(searchMode) {
                 if (p.mode === 'search_global') {
                     if (p.not_found) Object.assign(shazamNotFound, p.not_found);
                     if (p.urls) Object.assign(shazamTrackUrls, p.urls);
+                    if (p.starred && typeof p.starred === 'object') {
+                        Object.assign(shazamStarred, p.starred);
+                        if (shazamLastData) shazamLastData.starred = { ...(shazamLastData.starred || {}), ...p.starred };
+                    }
                     if (p.soundeo_titles) Object.assign(shazamSoundeoTitles, p.soundeo_titles);
                     if (p.soundeo_match_scores && shazamLastData) {
                         shazamLastData.soundeo_match_scores = { ...(shazamLastData.soundeo_match_scores || {}), ...p.soundeo_match_scores };

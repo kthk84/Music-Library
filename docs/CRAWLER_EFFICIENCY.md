@@ -13,7 +13,7 @@
    - If key is in `already_starred`: do **not** open the track page; use search result URL only (avoids any star click).
    - If not in `already_starred`: open track detail page → if star button is **blue** (already favorited) do **not** click; if not blue, click to favorite.
 
-Relevant code: `soundeo_automation.py` — `verify_logged_in()`, `crawl_favorites_page()`, `run_favorite_tracks()`, `find_and_favorite_track()`, `_is_favorited_state()`.
+Relevant code: `soundeo_automation.py` — `check_logged_in()`, `crawl_favorites_page()`, `run_favorite_tracks()`, `find_and_favorite_track()`, `_is_favorited_state()`.
 
 ---
 
@@ -23,9 +23,11 @@ Relevant code: `soundeo_automation.py` — `verify_logged_in()`, `crawl_favorite
 
 - **load_cookies:** Only one `driver.get(SOUNDEO_BASE)` then add cookies; no second reload.
 
-- **Favorites flows:** `run_favorite_tracks` and `crawl_soundeo_favorites` no longer call `verify_logged_in`; they go straight to `crawl_favorites_page`. On page 1, `crawl_favorites_page` checks `_is_redirected_to_login(driver)` and returns `{"error": "not_logged_in", "favorites": []}`; callers return the same user-facing session-expired error.
+- **Favorites flows:** `run_favorite_tracks` and `crawl_soundeo_favorites` do not call a separate login check; they go straight to `crawl_favorites_page`. On page 1, `crawl_favorites_page` checks `_is_redirected_to_login(driver)` and returns `{"error": "not_logged_in", "favorites": []}`; callers return the same user-facing session-expired error.
 
-- **Search flow:** `run_search_tracks` no longer calls `verify_logged_in`. `find_track_on_soundeo` and `find_and_favorite_track` check redirect after the first `driver.get(...)` and return `None` if redirected; `run_search_tracks` treats first-failure plus redirect as session expired and returns that error.
+- **Search flow:** `run_search_tracks`, single-row Sync, and single-row Search do not visit an account page first. `find_track_on_soundeo` and `find_and_favorite_track` check redirect after the first `driver.get(...)` and return `None` if redirected; callers infer "session expired" from `_is_redirected_to_login(driver)` when the result is None.
+
+- **Explicit login check:** The "Check if logged in" and save-session verification use `check_logged_in(driver)`, which loads the favorites page and infers login from redirect (no account page).
 
 - Helper: `_is_redirected_to_login(driver)` (logoreg, /login, /account/log in `current_url`).
 

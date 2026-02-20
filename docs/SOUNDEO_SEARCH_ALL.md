@@ -18,7 +18,7 @@
 3. **soundeo_automation:**
    - Starts Chrome (headed or headless from Settings → “Headed mode”).
    - Loads cookies from the path in config (same as “Save session”).
-   - Verifies you’re logged in (`verify_logged_in()`).
+   - Does not visit account page; login is inferred from the first search page (redirect → session expired).
    - For each track: `find_track_on_soundeo(driver, artist, title)`:
      - Builds search queries (e.g. `"Artist Title"`, `"Title Artist"`, `"Artist"`, `"Title"`).
      - For each query: `driver.get(https://soundeo.com/list/tracks?searchFilter=...&availableFilter=1)`.
