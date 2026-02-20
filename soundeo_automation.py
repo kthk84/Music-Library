@@ -5,26 +5,40 @@ Config via config_shazam.get_soundeo_browser_config() (mode "attach" | "launch")
 """
 import os
 import re
-
+import logging
 import json
 import time
 import threading
 import urllib.parse
-from typing import List, Dict, Optional, Callable
+from typing import List, Dict, Optional, Callable, Tuple
 
 _ONE_YEAR = 365 * 24 * 60 * 60
 
 
-def _clean_profile_dir(profile_path: str) -> None:
-    """Remove stale lock files and corrupted marker files from a Chrome profile directory."""
-    if not profile_path or not os.path.isdir(profile_path):
-        return
-    for name in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
-        p = os.path.join(profile_path, name)
-        try:
-            os.remove(p)
-        except OSError:
-            pass
+# Lock/marker files Chrome leaves behind when killed; removing them reduces "Something went wrong when opening your profile".
+_PROFILE_LOCK_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
+
+
+def _clean_profile_dir(profile_path: str, profile_subdir: Optional[str] = None) -> None:
+    """Remove stale lock files from Chrome user-data-dir (and optional profile subdir) so launches don't show profile error dialog."""
+    for dir_path in (profile_path,):
+        if not dir_path or not os.path.isdir(dir_path):
+            continue
+        for name in _PROFILE_LOCK_FILES:
+            p = os.path.join(dir_path, name)
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    if profile_subdir:
+        sub_path = os.path.join(profile_path, profile_subdir)
+        if os.path.isdir(sub_path):
+            for name in _PROFILE_LOCK_FILES:
+                p = os.path.join(sub_path, name)
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
 
 
 def _reset_profile_dir(profile_path: str) -> None:
@@ -63,23 +77,27 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
 
     user_data_dir = cfg.get("user_data_dir", "")
 
+    profile_directory = cfg.get("profile_directory")
+
     def _build_opts():
         o = Options()
         if use_persistent_profile and user_data_dir:
             o.add_argument("--user-data-dir=" + user_data_dir)
-            profile_dir = cfg.get("profile_directory")
-            if profile_dir:
-                o.add_argument("--profile-directory=" + profile_dir)
+            if profile_directory:
+                o.add_argument("--profile-directory=" + profile_directory)
         if headless:
             o.add_argument("--headless=new")
         o.add_argument("--window-size=1280,900")
         o.add_argument("--disable-gpu")
         o.add_argument("--no-sandbox")
+        # Suppress "Something went wrong when opening your profile" when profile was previously killed
+        o.add_argument("--noerrdialogs")
+        o.add_argument("--no-first-run")
         o.add_experimental_option("excludeSwitches", ["enable-automation"])
         o.add_argument("--disable-blink-features=AutomationControlled")
         return o
 
-    _clean_profile_dir(user_data_dir)
+    _clean_profile_dir(user_data_dir, profile_directory)
 
     try:
         service = Service(ChromeDriverManager().install())
@@ -328,6 +346,8 @@ def _search_queries(artist: str, title: str) -> List[str]:
 
     Adds artist-order-normalized variants so "KASIA, Khainz & Mariz" can
     match Soundeo results like "Khainz, Mariz, KASIA (ofc) - Stop Go".
+    Adds dot-stripped artist variant so "R.E.Zarin" is also tried as
+    "REZarin" (Soundeo search works with rezarin+androme).
     """
     a, t = (artist or "").strip(), (title or "").strip()
     seen = set()
@@ -339,6 +359,11 @@ def _search_queries(artist: str, title: str) -> List[str]:
             queries.append(q)
 
     if a and t:
+        # Try dot-stripped artist first (e.g. "REZarin Androme") — Soundeo search often matches better without dots
+        a_no_dots = a.replace(".", "")
+        if a_no_dots != a:
+            _add(f"{a_no_dots} {t}")
+            _add(f"{t} {a_no_dots}")
         _add(f"{a} {t}")
         _add(f"{t} {a}")
         tokens = _artist_tokens_for_search(a)
@@ -408,6 +433,12 @@ def _best_match_score(track: Dict, link_text: str, target_artist: str, target_ti
         r_title = _strip_parens_suffix(text)
 
     artist_score = similarity_score(t_artist, r_artist) if t_artist and r_artist else 0.0
+    # Normalize dots so "R.E.Zarin" matches "REZarin" (Soundeo result)
+    if t_artist and r_artist and artist_score < 0.9:
+        t_artist_nd = t_artist.replace(".", "").lower()
+        r_artist_nd = r_artist.replace(".", "").lower()
+        if t_artist_nd == r_artist_nd or similarity_score(t_artist_nd, r_artist_nd) >= 0.9:
+            artist_score = max(artist_score, 0.95)
     title_score = similarity_score(t_title, r_title) if t_title else 0.0
     # Also compare normalized titles (strip all parens) so "You Got Worked (feat. X) (Stripped Remix)" matches "You Got Worked (Stripped Remix)"
     t_core = _strip_all_parens(t_title) if t_title else ""
@@ -481,42 +512,52 @@ def find_track_on_soundeo(
     overall_best_href = None
     overall_best_text = None
 
+    from selenium.webdriver.common.by import By
+
     for q in queries:
-        encoded = urllib.parse.quote(q)
-        url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
-        if on_progress:
-            on_progress(f"Searching: {q}")
-        driver.get(url)
-        time.sleep(1.5)
-
-        from selenium.webdriver.common.by import By
         try:
-            links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
-        except Exception:
-            links = []
-
-        if not links:
-            time.sleep(delay)
-            continue
-
-        for lnk in links[:15]:
+            encoded = urllib.parse.quote(q)
+            if on_progress:
+                on_progress(f"Searching: {q}")
+            url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
+            driver.get(url)
+            time.sleep(1.5)
             try:
-                txt = (lnk.text or "").strip()
-                if not txt or len(txt) < 3:
-                    continue
-                score = _best_match_score({}, txt, artist, title) + _extended_preference_bonus(txt)
-                if score > overall_best_score:
-                    overall_best_score = score
-                    overall_best_link = lnk
-                    overall_best_text = txt
-                    try:
-                        overall_best_href = lnk.get_attribute("href")
-                    except Exception:
-                        overall_best_href = None
+                links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
             except Exception:
-                pass
+                links = []
+            if not links:
+                driver.get(f"{SOUNDEO_BASE}/search?q={encoded}")
+                time.sleep(1.5)
+                try:
+                    links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
+                except Exception:
+                    links = []
+            if not links:
+                time.sleep(delay)
+                continue
 
-        time.sleep(delay)
+            for lnk in links[:15]:
+                try:
+                    txt = (lnk.text or "").strip()
+                    if not txt or len(txt) < 3:
+                        continue
+                    score = _best_match_score({}, txt, artist, title) + _extended_preference_bonus(txt)
+                    if score > overall_best_score:
+                        overall_best_score = score
+                        overall_best_link = lnk
+                        overall_best_text = txt
+                        try:
+                            overall_best_href = lnk.get_attribute("href")
+                        except Exception:
+                            overall_best_href = None
+                except Exception:
+                    pass
+
+            time.sleep(delay)
+        except Exception as e:
+            logging.warning("find_track_on_soundeo: query %r failed, trying next: %s", q, e)
+            time.sleep(delay)
 
     if overall_best_href and overall_best_score >= _MATCH_THRESHOLD:
         return (overall_best_href, overall_best_text or "", overall_best_score)
@@ -544,42 +585,52 @@ def find_and_favorite_track(
     overall_best_href = None
     overall_best_text = None
 
+    from selenium.webdriver.common.by import By
+
     for q in queries:
-        encoded = urllib.parse.quote(q)
-        url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
-        if on_progress:
-            on_progress(f"Searching: {q}")
-        driver.get(url)
-        time.sleep(1.5)
-
-        from selenium.webdriver.common.by import By
         try:
-            links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
-        except Exception:
-            links = []
-
-        if not links:
-            time.sleep(delay)
-            continue
-
-        for lnk in links[:15]:
+            encoded = urllib.parse.quote(q)
+            if on_progress:
+                on_progress(f"Searching: {q}")
+            url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
+            driver.get(url)
+            time.sleep(1.5)
             try:
-                txt = (lnk.text or "").strip()
-                if not txt or len(txt) < 3:
-                    continue
-                score = _best_match_score({}, txt, artist, title) + _extended_preference_bonus(txt)
-                if score > overall_best_score:
-                    overall_best_score = score
-                    overall_best_link = lnk
-                    overall_best_text = txt
-                    try:
-                        overall_best_href = lnk.get_attribute("href")
-                    except Exception:
-                        overall_best_href = None
+                links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
             except Exception:
-                pass
+                links = []
+            if not links:
+                driver.get(f"{SOUNDEO_BASE}/search?q={encoded}")
+                time.sleep(1.5)
+                try:
+                    links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
+                except Exception:
+                    links = []
+            if not links:
+                time.sleep(delay)
+                continue
 
-        time.sleep(delay)
+            for lnk in links[:15]:
+                try:
+                    txt = (lnk.text or "").strip()
+                    if not txt or len(txt) < 3:
+                        continue
+                    score = _best_match_score({}, txt, artist, title) + _extended_preference_bonus(txt)
+                    if score > overall_best_score:
+                        overall_best_score = score
+                        overall_best_link = lnk
+                        overall_best_text = txt
+                        try:
+                            overall_best_href = lnk.get_attribute("href")
+                        except Exception:
+                            overall_best_href = None
+                except Exception:
+                    pass
+
+            time.sleep(delay)
+        except Exception as e:
+            logging.warning("find_and_favorite_track: query %r failed, trying next: %s", q, e)
+            time.sleep(delay)
 
     if overall_best_link and overall_best_href and overall_best_score >= _MATCH_THRESHOLD:
         href = overall_best_href
@@ -648,12 +699,36 @@ def find_and_favorite_track(
 
 
 def _is_favorited_state(driver, btn) -> bool:
-    """True if button/element indicates already favorited (e.g. blue/active). Used to avoid un-favoriting in sync and to detect state for unfavorite action."""
+    """True if button/element indicates already favorited. On Soundeo: blue = starred, grey = not starred."""
     if not btn:
         return False
     try:
+        # Soundeo: starred = blue, not starred = grey. Use color as primary signal.
+        try:
+            color_result = driver.execute_script("""
+                var el = arguments[0];
+                var svg = el.tagName === 'svg' ? el : (el.querySelector && el.querySelector('svg'));
+                var node = (svg && svg.querySelector('path')) ? svg.querySelector('path') : el;
+                var s = window.getComputedStyle(node);
+                var c = (s.fill || s.color || '').trim();
+                if (!c || c === 'none' || c === 'transparent') c = (el.fill || el.color || '').trim() || (s.fill || s.color);
+                if (!c) return 'unknown';
+                var m = c.match(/rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+                if (!m) return c.indexOf('blue') !== -1 ? 'blue' : 'unknown';
+                var r = parseInt(m[1],10), g = parseInt(m[2],10), b = parseInt(m[3],10);
+                if (b > r && b > g && r < 180) return 'blue';
+                if (Math.abs(r-g) < 40 && Math.abs(g-b) < 40 && Math.abs(r-b) < 40) return 'grey';
+                return 'unknown';
+            """, btn)
+            if color_result == "blue":
+                return True
+            if color_result == "grey":
+                return False
+        except Exception:
+            pass
         cls = (btn.get_attribute("class") or "").lower()
-        if any(x in cls for x in ("active", "favorited", "starred", "selected", "on", "added")):
+        words = set(re.split(r"[^a-z0-9]+", cls))
+        if words & {"active", "favorited", "starred", "selected", "on", "added", "filled"}:
             return True
         if (btn.get_attribute("aria-pressed") or "").lower() == "true":
             return True
@@ -667,18 +742,29 @@ def _is_favorited_state(driver, btn) -> bool:
                 return True
         except Exception:
             pass
+        try:
+            has_fill = driver.execute_script("""
+                var el = arguments[0];
+                var svg = el.tagName === 'svg' ? el : (el.querySelector && el.querySelector('svg'));
+                if (!svg) return false;
+                var path = svg.querySelector('path');
+                if (!path) return false;
+                var fill = (path.getAttribute('fill') || window.getComputedStyle(path).fill || '').toLowerCase();
+                return !!(fill && fill !== 'none' && fill !== 'transparent');
+            """, btn)
+            if has_fill:
+                return True
+        except Exception:
+            pass
     except Exception:
         pass
     return False
 
 
-def unfavorite_track_on_soundeo(
-    driver,
-    track_url: str,
-) -> bool:
+def get_track_starred_state(driver, track_url: str) -> bool:
     """
-    Open a Soundeo track URL and unfavorite it (click the favorite button when it is in favorited state).
-    Caller must have loaded cookies and have driver on a Soundeo page. Returns True if unfavorite succeeded.
+    Open a Soundeo track URL and return True if the track is currently favorited/starred (read-only, no click).
+    Caller must have loaded cookies. Use when we already have the track URL and only need star state.
     """
     from selenium.webdriver.common.by import By
     from selenium.webdriver.support.ui import WebDriverWait
@@ -688,7 +774,131 @@ def unfavorite_track_on_soundeo(
         return False
     try:
         driver.get(track_url.strip())
+        # Wait for favorite control to appear (Soundeo may load it dynamically)
+        try:
+            WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "[class*='favorite'], [class*='Favorite'], button[data-track-id], [aria-label*='avorite']"))
+            )
+        except Exception:
+            pass
+        time.sleep(1.5)
+        # On detail page there is one star for this track; player bar may have another (other track). Prefer main-content star only.
+        try:
+            is_starred_js = driver.execute_script("""
+                var sel = "[class*='favorite'], [class*='Favorite'], button[data-track-id], [aria-label*='avorite'], [title*='avorite']";
+                var nodes = document.querySelectorAll(sel);
+                function isInPlayer(el) {
+                    var p = el;
+                    while (p) {
+                        var c = (p.className || '') + ' ' + (p.id || '');
+                        if (/player|playbar|now-playing|mini-player|fixed.*bottom|bottom.*bar/i.test(c)) return true;
+                        var s = window.getComputedStyle(p);
+                        if (s.position === 'fixed' && (s.bottom === '0px' || parseFloat(s.bottom) < 100)) return true;
+                        p = p.parentElement;
+                    }
+                    return false;
+                }
+                function isBlueOrGrey(el) {
+                    var svg = el.tagName === 'svg' ? el : el.querySelector('svg');
+                    var node = (svg && svg.querySelector('path')) ? svg.querySelector('path') : el;
+                    var s = window.getComputedStyle(node);
+                    var c = (s.fill || s.color || '').trim();
+                    if (!c || c === 'none' || c === 'transparent') return null;
+                    var m = c.match(/rgba?\\s*\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/);
+                    if (!m) return c.indexOf('blue') !== -1 ? 'blue' : null;
+                    var r = parseInt(m[1],10), g = parseInt(m[2],10), b = parseInt(m[3],10);
+                    if (b > r && b > g && r < 180) return 'blue';
+                    if (Math.abs(r-g) < 40 && Math.abs(g-b) < 40 && Math.abs(r-b) < 40) return 'grey';
+                    return null;
+                }
+                var mainCandidates = [], playerCandidates = [];
+                for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    if (!el.offsetParent) continue;
+                    if (isInPlayer(el)) { playerCandidates.push(el); continue; }
+                    mainCandidates.push(el);
+                }
+                var toCheck = mainCandidates.length ? mainCandidates : playerCandidates;
+                if (toCheck.length === 0) return false;
+                var mainStar = toCheck[0];
+                for (var j = 0; j < toCheck.length; j++) {
+                    if (toCheck[j].getBoundingClientRect().top < mainStar.getBoundingClientRect().top)
+                        mainStar = toCheck[j];
+                }
+                var colorState = isBlueOrGrey(mainStar);
+                if (colorState === 'blue') return true;
+                if (colorState === 'grey') return false;
+                var cls = (mainStar.className || '').toLowerCase();
+                if (/\\b(active|favorited|starred|selected|on|added|filled)\\b/.test(cls)) return true;
+                if ((mainStar.getAttribute('aria-pressed') || '').toLowerCase() === 'true') return true;
+                if ((mainStar.getAttribute('data-favorited') || mainStar.getAttribute('data-active') || '').toLowerCase().match(/true|1/)) return true;
+                var svg = mainStar.tagName === 'svg' ? mainStar : mainStar.querySelector('svg');
+                if (svg) {
+                    var path = svg.querySelector('path');
+                    if (path) {
+                        var fill = (path.getAttribute('fill') || getComputedStyle(path).fill || '').toLowerCase();
+                        if (fill && fill !== 'none' && fill !== 'transparent') return true;
+                    }
+                }
+                return false;
+            """)
+            if is_starred_js:
+                return True
+        except Exception:
+            pass
+        # Python fallback: multiple selectors, _is_favorited_state (blue/grey per element)
+        for selector in (
+            "button.favorites",
+            "button.favorite",
+            "button[class*='favorite']",
+            "[class*='favorite']",
+            "button[data-track-id]",
+            "a[class*='favorite']",
+            "[aria-label*='avorite']",
+            "[data-testid*='avor']",
+            "button[title*='avorite']",
+        ):
+            try:
+                buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                for btn in buttons:
+                    if not btn or not btn.is_displayed():
+                        continue
+                    if _is_favorited_state(driver, btn):
+                        return True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def _soundeo_star_log():
+    """Logger for star/unstar (same as app.py soundeo_star); may have no handler if app not loaded first."""
+    return logging.getLogger("soundeo_star")
+
+
+def unfavorite_track_on_soundeo(
+    driver,
+    track_url: str,
+) -> bool:
+    """
+    Open a Soundeo track URL and unfavorite it (click the favorite button when it is in favorited state).
+    Caller must have loaded cookies and have driver on a Soundeo page. Returns True if unfavorite succeeded.
+    Tries all matching buttons (main content + player bar, etc.) and clicks the first that is favorited.
+    """
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support.ui import WebDriverWait
+    from selenium.webdriver.support import expected_conditions as EC
+
+    slog = _soundeo_star_log()
+    if not track_url or not track_url.strip().startswith(("https://soundeo.com/", "http://soundeo.com/")):
+        slog.info("unfavorite_crawler: invalid url, skip")
+        return False
+    try:
+        slog.info("unfavorite_crawler: opening url=%s", track_url[:80])
+        driver.get(track_url.strip())
         time.sleep(2)
+        main_button = None  # first single "button.favorites" for fallback when detection fails
         for selector in (
             "button.favorites",
             "button.favorite",
@@ -696,21 +906,46 @@ def unfavorite_track_on_soundeo(
             "button[data-track-id]",
         ):
             try:
-                btn = WebDriverWait(driver, 5).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-                if btn and btn.is_displayed() and _is_favorited_state(driver, btn):
-                    driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
-                    time.sleep(0.3)
-                    btn.click()
-                    time.sleep(0.8)
-                    return True
-            except Exception:
-                pass
+                WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.CSS_SELECTOR, selector)))
+                buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                if selector == "button.favorites" and len(buttons) == 1 and buttons[0].is_displayed():
+                    main_button = buttons[0]
+                slog.info("unfavorite_crawler: selector=%s found %d buttons", selector, len(buttons))
+                for i, btn in enumerate(buttons):
+                    if not btn or not btn.is_displayed():
+                        continue
+                    try:
+                        favored = _is_favorited_state(driver, btn)
+                        slog.info("unfavorite_crawler: button[%d] is_displayed=True is_favorited=%s", i, favored)
+                        if favored:
+                            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                            time.sleep(0.3)
+                            btn.click()
+                            time.sleep(0.8)
+                            slog.info("unfavorite_crawler: clicked button[%d], done", i)
+                            return True
+                    except Exception as e:
+                        slog.info("unfavorite_crawler: button[%d] check/click error: %s", i, e)
+                        continue
+            except Exception as e:
+                slog.info("unfavorite_crawler: selector=%s wait/find error: %s", selector, e)
+        if main_button is not None:
+            slog.info("unfavorite_crawler: no button reported favorited; clicking single main button (toggle fallback)")
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", main_button)
+                time.sleep(0.3)
+                main_button.click()
+                time.sleep(0.8)
+                slog.info("unfavorite_crawler: toggle fallback click done")
+                return True
+            except Exception as e:
+                slog.warning("unfavorite_crawler: toggle fallback click failed: %s", e)
+        else:
+            slog.warning("unfavorite_crawler: no favorited button found on page")
         # Do not use F-key fallback here: F toggles favorite state. Pressing F without
         # confirming the track is favorited could accidentally favorite instead of unfavorite.
-    except Exception:
-        pass
+    except Exception as e:
+        slog.warning("unfavorite_crawler: exception: %s", e)
     return False
 
 
@@ -1074,6 +1309,11 @@ def request_sync_stop() -> None:
 def clear_sync_stop_request() -> None:
     global _sync_stop_requested
     _sync_stop_requested = False
+
+
+def is_sync_stop_requested() -> bool:
+    """Return whether the running sync was asked to stop."""
+    return _sync_stop_requested
 
 
 # Event for save-session flow: set when user has logged in
@@ -1442,6 +1682,7 @@ def soundeo_api_toggle_favorite(track_id: str, cookies_path: str) -> Dict:
     """
     Toggle favorite state via Soundeo HTTP API.  Returns e.g.
     {"ok": True, "result": "favored"} or {"ok": True, "result": "unfavored"}.
+    Logs when response is non-JSON so we can fall back to crawler.
     """
     session = _get_soundeo_session(cookies_path)
     if not session:
@@ -1452,18 +1693,104 @@ def soundeo_api_toggle_favorite(track_id: str, cookies_path: str) -> Dict:
             data={},
             timeout=10,
         )
-        data = resp.json()
+        text = (resp.text or "").strip()
+        try:
+            data = resp.json() if text else {}
+        except Exception as parse_err:
+            _soundeo_star_log().info(
+                "toggle_favorite HTTP: non-JSON response status=%s body_len=%s preview=%s",
+                resp.status_code, len(resp.content or b""), (text[:120] if text else "(empty)"),
+            )
+            return {"ok": False, "error": str(parse_err)}
         if data.get("success"):
             return {"ok": True, "result": data.get("result", "unknown")}
         return {"ok": False, "error": data.get("message", "API error")}
     except Exception as e:
+        _soundeo_star_log().info("toggle_favorite HTTP: exception %s", e)
         return {"ok": False, "error": str(e)}
+
+
+def soundeo_api_get_favorite_state(track_url: str, cookies_path: str) -> Optional[bool]:
+    """
+    GET the track page and parse HTML to read current favorite state on Soundeo.
+    Returns True if favored, False if not favored, None if we couldn't determine.
+    Handles detail page: attribute order may differ from list pages.
+    """
+    if not track_url or not track_url.strip().startswith(("https://soundeo.com/", "http://soundeo.com/")):
+        return None
+    session = _get_soundeo_session(cookies_path)
+    if not session:
+        return None
+    try:
+        resp = session.get(track_url.strip(), timeout=10)
+        if resp.status_code != 200:
+            return None
+        text = resp.text or ""
+        # List-style: class="favorites..." then data-track-id (or reverse)
+        for _cls, _tid in re.findall(
+            r'<button[^>]*class="favorites([^"]*?)"[^>]*data-track-id="(\d+)"',
+            text,
+        ):
+            return "favored" in _cls
+        for _tid, _cls in re.findall(
+            r'<button[^>]*data-track-id="(\d+)"[^>]*class="favorites([^"]*?)"[^>]*>',
+            text,
+        ):
+            return "favored" in _cls
+        # Any tag that has both data-track-id and favorite in class (detail page)
+        for tag in re.findall(r'<button[^>]*(?:data-track-id="\d+")[^>]*>', text):
+            if "favorite" in tag.lower():
+                return "favored" in tag.lower() or "active" in tag.lower()
+        for tag in re.findall(r'<[^>]*(?:class="[^"]*favorite[^"]*")[^>]*data-track-id="\d+"[^>]*>', text, re.I):
+            return "favored" in tag.lower() or "active" in tag.lower()
+    except Exception:
+        pass
+    return None
+
+
+def soundeo_api_set_favorite(
+    track_id: str, cookies_path: str, favored: bool, track_url: Optional[str] = None
+) -> Dict:
+    """
+    Set favorite state on Soundeo. First checks actual state on Soundeo (if track_url given),
+    then toggles only when current state != desired.
+    favored=True -> ensure track is favored; favored=False -> ensure track is unfavored.
+    Returns {"ok": True, "result": "favored"|"unfavored"} or {"ok": False, "error": "..."}.
+    """
+    slog = _soundeo_star_log()
+    if track_url:
+        current = soundeo_api_get_favorite_state(track_url, cookies_path)
+        slog.info("set_favorite HTTP: get_favorite_state=%s (desired favored=%s)", current, favored)
+        if current is not None and current == favored:
+            slog.info("set_favorite HTTP: skip toggle (already in desired state)")
+            return {"ok": True, "result": "favored" if favored else "unfavored"}
+    # Need to change state: toggle once (we know we're out of sync or couldn't read state)
+    r = soundeo_api_toggle_favorite(track_id, cookies_path)
+    slog.info("set_favorite HTTP: toggle1 ok=%s result=%s error=%s", r.get("ok"), r.get("result"), r.get("error"))
+    if not r.get("ok"):
+        return r
+    if (r.get("result") or "").lower() == ("favored" if favored else "unfavored"):
+        return r
+    r2 = soundeo_api_toggle_favorite(track_id, cookies_path)
+    slog.info("set_favorite HTTP: toggle2 ok=%s result=%s", r2.get("ok"), r2.get("result"))
+    return r2 if r2.get("ok") else r
+
+
+def _parse_track_links_from_html(html: str) -> List[Tuple[str, str]]:
+    """Parse track links from Soundeo HTML. Returns list of (href, link_text)."""
+    import re
+    import html as htmllib
+    links = re.findall(
+        r'<a[^>]+href="(/track/[^"]+)"[^>]*>([^<]+)</a>', html
+    )
+    return [(href, htmllib.unescape(txt).strip()) for href, txt in links]
 
 
 def soundeo_api_search(query: str, cookies_path: str) -> List[Dict]:
     """
     Search Soundeo via HTTP and return parsed results.
     Each result: {"track_id", "title", "href", "favored": bool}.
+    Tries /list/tracks first, then /search?q= (same as browser search) if no results.
     """
     import re
     import html as htmllib
@@ -1472,38 +1799,50 @@ def soundeo_api_search(query: str, cookies_path: str) -> List[Dict]:
     if not session:
         return []
     encoded = urllib.parse.quote(query)
-    url = f"{SOUNDEO_BASE}/list/tracks?searchFilter={encoded}&availableFilter=1"
+
+    def _parse_results(resp_text: str) -> List[Dict]:
+        links = _parse_track_links_from_html(resp_text)
+        fav_map = {}
+        for cls, tid in re.findall(
+            r'<button[^>]*class="favorites([^"]*?)"[^>]*data-track-id="(\d+)"',
+            resp_text,
+        ):
+            fav_map[tid] = "favored" in cls
+        results = []
+        seen_ids = set()
+        for href, txt in links:
+            tid = extract_track_id(href)
+            if not tid or tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+            results.append({
+                "track_id": tid,
+                "title": txt,
+                "href": f"{SOUNDEO_BASE}{href}",
+                "favored": fav_map.get(tid, False),
+            })
+        return results
+
+    # Prefer /list/tracks (track list with filter)
+    url_list = f"{SOUNDEO_BASE}/list/tracks?searchFilter={encoded}&availableFilter=1"
     try:
-        resp = session.get(url, timeout=10)
-        if resp.status_code != 200:
-            return []
+        resp = session.get(url_list, timeout=10)
+        if resp.status_code == 200:
+            results = _parse_results(resp.text)
+            if results:
+                return results
     except Exception:
-        return []
+        pass
 
-    links = re.findall(
-        r'<a[^>]+href="(/track/[^"]+)"[^>]*>([^<]+)</a>', resp.text
-    )
-    fav_map = {}
-    for cls, tid in re.findall(
-        r'<button[^>]*class="favorites([^"]*?)"[^>]*data-track-id="(\d+)"',
-        resp.text,
-    ):
-        fav_map[tid] = "favored" in cls
-
-    results = []
-    seen_ids = set()
-    for href, txt in links:
-        tid = extract_track_id(href)
-        if not tid or tid in seen_ids:
-            continue
-        seen_ids.add(tid)
-        results.append({
-            "track_id": tid,
-            "title": htmllib.unescape(txt).strip(),
-            "href": f"{SOUNDEO_BASE}{href}",
-            "favored": fav_map.get(tid, False),
-        })
-    return results
+    # Fallback: /search?q= (same URL as browser search, e.g. search?q=rezarin+androme)
+    url_search = f"{SOUNDEO_BASE}/search?q={encoded}"
+    try:
+        resp = session.get(url_search, timeout=10)
+        if resp.status_code == 200:
+            return _parse_results(resp.text)
+    except Exception:
+        pass
+    return []
 
 
 def soundeo_api_search_and_favorite(

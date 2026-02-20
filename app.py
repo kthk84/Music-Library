@@ -10,11 +10,31 @@ from mutagen.id3 import ID3, TIT2, TPE1, TALB, TDRC, TCON, APIC
 from mutagen.id3 import ID3NoHeaderError
 import requests
 import hashlib
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import base64
 import logging
+import shlex
 import shutil
 import threading
+
+# Logger for Soundeo star/unstar: file only (no console), so agents can read it and users aren't spammed.
+def _get_soundeo_star_logger():
+    _log = logging.getLogger("soundeo_star")
+    if _log.handlers:
+        return _log
+    _log.setLevel(logging.INFO)
+    _log.propagate = False
+    try:
+        _dir = os.path.dirname(os.path.abspath(__file__))
+        _path = os.path.join(_dir, "soundeo_star.log")
+        _h = logging.FileHandler(_path, encoding="utf-8")
+        _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        _log.addHandler(_h)
+    except Exception:
+        pass  # no file logging; agent can still inspect code
+    return _log
+
+_soundeo_star_log = _get_soundeo_star_logger()
 
 app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max request size
@@ -1068,6 +1088,10 @@ def _run_compare_background():
         app._shazam_sync_status = {'error': 'Compare failed'}
     finally:
         app._shazam_compare_running = False
+        try:
+            _start_next_single_search()
+        except Exception:
+            pass
 
 
 @app.route('/api/shazam-sync/compare', methods=['POST'])
@@ -1083,6 +1107,8 @@ def shazam_sync_compare():
     )
     if getattr(app, '_shazam_compare_running', False):
         return jsonify({'running': True, 'message': 'Compare already in progress'}), 200
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     shazam_tracks = load_shazam_cache()
     if not shazam_tracks:
         try:
@@ -1350,6 +1376,32 @@ def _add_starred_lowercase_aliases(status: Dict) -> Dict:
     return out
 
 
+def _sanitize_have_locally_filepaths(status: Dict) -> Dict:
+    """Ensure have_locally only contains entries whose filepath still exists on disk.
+    Entries with missing files are moved to to_download. Mutates and returns a copy; persists if changed."""
+    from shazam_cache import save_status_cache
+    out = dict(status)
+    have = list(out.get('have_locally') or [])
+    to_dl = list(out.get('to_download') or [])
+    valid = []
+    moved = []
+    for h in have:
+        fp = h.get('filepath') or ''
+        if fp and os.path.exists(fp):
+            valid.append(h)
+        else:
+            # Missing file or no filepath: treat as not having locally
+            moved.append({'artist': h['artist'], 'title': h['title'], **({} if h.get('shazamed_at') is None else {'shazamed_at': h['shazamed_at']})})
+    if not moved:
+        return out
+    out['have_locally'] = valid
+    out['to_download'] = _dedupe_tracks_by_key(to_dl + moved)
+    out['to_download_count'] = len(out['to_download'])
+    app._shazam_sync_status = out
+    save_status_cache(out)
+    return out
+
+
 def _get_best_available_status():
     """Return best available status: in-memory, file, rebuild, or partial. Persists when building fresh.
     urls and not_found (dot state) are ALWAYS derived from the cache file's search_outcomes when present,
@@ -1379,25 +1431,29 @@ def _get_best_available_status():
         return out
 
     if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status and not _status_is_stale(app._shazam_sync_status):
-        out = _apply_dot_state_from_file(dict(app._shazam_sync_status))
+        out = _sanitize_have_locally_filepaths(dict(app._shazam_sync_status))
+        out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
     cached = load_status_cache()
     has_cached_data = cached and (cached.get('shazam_count', 0) > 0 or cached.get('have_locally') or cached.get('to_download'))
     if has_cached_data and not _status_is_stale(cached):
-        app._shazam_sync_status = cached
-        out = _apply_dot_state_from_file(dict(cached))
+        out = _sanitize_have_locally_filepaths(dict(cached))
+        app._shazam_sync_status = out
+        out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
     rebuilt = _rebuild_status_from_caches()
     if rebuilt:
-        app._shazam_sync_status = rebuilt
         save_status_cache(rebuilt)
-        out = _apply_dot_state_from_file(dict(rebuilt))
+        out = _sanitize_have_locally_filepaths(dict(rebuilt))
+        app._shazam_sync_status = out
+        out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
     # Fallback: use cached status even if stale (e.g. Shazam count changed) - better than empty
     if has_cached_data:
         out = dict(cached)
         if _status_is_stale(cached):
             out['message'] = out.get('message') or 'Data may be outdated. Click Fetch Shazam or Compare to refresh.'
+        out = _sanitize_have_locally_filepaths(out)
         app._shazam_sync_status = out
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
@@ -1726,6 +1782,109 @@ def shazam_stream_file():
     return send_file(path, mimetype=mimetype, as_attachment=False, conditional=True)
 
 
+@app.route('/api/shazam-sync/open-file-location', methods=['POST'])
+def shazam_open_file_location():
+    """Open the folder in the system file manager and reveal/select the file when a full path is given.
+    Body: { dir_b64: "base64 dir path" } or { path_b64: "base64 full file path" }. Path must be under a destination folder."""
+    from config_shazam import get_destination_folders_raw
+    allowed = [os.path.abspath(f).rstrip(os.sep) for f in get_destination_folders_raw() if f]
+    if not allowed:
+        return jsonify({'error': 'No destination folders configured'}), 403
+    data = request.get_json(silent=True) or {}
+    dir_b64 = (data.get('dir_b64') or '').strip().replace(' ', '+')
+    path_b64 = (data.get('path_b64') or '').strip().replace(' ', '+')
+    folder = None
+    file_path = None
+    if dir_b64:
+        try:
+            raw = base64.b64decode(dir_b64)
+            folder = os.path.abspath(raw.decode('utf-8'))
+        except Exception:
+            return jsonify({'error': 'Invalid path'}), 400
+    elif path_b64:
+        try:
+            raw = base64.b64decode(path_b64)
+            file_path = os.path.abspath(raw.decode('utf-8'))
+            folder = os.path.dirname(file_path)
+        except Exception:
+            return jsonify({'error': 'Invalid path'}), 400
+    else:
+        return jsonify({'error': 'Missing dir_b64 or path_b64'}), 400
+    if not os.path.isdir(folder):
+        return jsonify({'error': 'Folder not found'}), 404
+    if not any(folder == d or folder.startswith(d + os.sep) or d.startswith(folder + os.sep) for d in allowed):
+        return jsonify({'error': 'Access denied'}), 403
+    if file_path and not any(file_path == d or file_path.startswith(d + os.sep) for d in allowed):
+        return jsonify({'error': 'Access denied'}), 403
+    last_error = None
+    try:
+        if sys.platform == 'darwin':
+            target = file_path if (file_path and os.path.isfile(file_path)) else None
+            if target:
+                target = os.path.normpath(os.path.realpath(target))
+            else:
+                target = os.path.normpath(os.path.realpath(folder))
+            use_reveal = file_path and os.path.isfile(target)
+            # 1) Try /usr/bin/open -R first (detached). Often works when app was started by you from Cursor.
+            open_cmd = '/usr/bin/open' if os.path.isfile('/usr/bin/open') else 'open'
+            args = [open_cmd, '-R', target] if use_reveal else [open_cmd, target]
+            subprocess.Popen(
+                args,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                env=os.environ,
+            )
+            # 2) Also try via login shell (can reach GUI when app was started from IDE)
+            try:
+                shell_cmd = f'{open_cmd} -R {shlex.quote(target)}' if use_reveal else f'{open_cmd} {shlex.quote(target)}'
+                subprocess.Popen(
+                    ['/bin/bash', '-l', '-c', shell_cmd],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    env=os.environ,
+                )
+            except Exception:
+                pass
+            # 3) AppleScript (sometimes only this reaches Finder)
+            if target and (not file_path or os.path.isfile(target)):
+                try:
+                    subprocess.run(
+                        ['osascript', '-e', 'on run argv', '-e', 'set p to item 1 of argv',
+                         '-e', 'tell application "Finder" to activate',
+                         '-e', 'tell application "Finder" to reveal (POSIX file p as alias)',
+                         '-e', 'end run', '--', target],
+                        check=True, timeout=10,
+                        env={**os.environ, 'PATH': os.environ.get('PATH', '/usr/bin:/bin:/usr/sbin:/sbin')},
+                        capture_output=True,
+                        text=True,
+                    )
+                except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+                    last_error = str(e)
+                    if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+                        raw = e.stderr.decode('utf-8', errors='replace') if isinstance(e.stderr, bytes) else e.stderr
+                        if raw and raw.strip():
+                            last_error = raw.strip()
+                    logging.warning('open-file-location: AppleScript failed: %s', last_error)
+        elif sys.platform == 'win32':
+            if file_path and os.path.isfile(file_path):
+                select_arg = '/select,"' + file_path.replace('"', '""') + '"'
+                subprocess.run(['explorer', select_arg], check=True)
+            else:
+                subprocess.run(['explorer', folder], check=True)
+        else:
+            subprocess.run(['xdg-open', folder], check=True)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    out = {'ok': True}
+    if last_error:
+        out['warning'] = last_error
+    return jsonify(out)
+
+
 _soundeo_preview_cache: Dict[str, dict] = {}
 _PREVIEW_CACHE_TTL = 24 * 3600
 
@@ -1839,14 +1998,81 @@ def soundeo_stream_preview():
         return jsonify({'error': 'Failed to fetch preview audio'}), 502
 
 
+def _run_rescan_only_background():
+    """Background thread: scan all folders and save cache only; do not run compare."""
+    from config_shazam import get_destination_folders, get_destination_folders_raw
+    from local_scanner import scan_folders, ScanCancelled
+    from shazam_cache import load_local_scan_cache, save_local_scan_cache
+    try:
+        folder_paths = get_destination_folders()
+        configured = get_destination_folders_raw()
+        if not configured or not folder_paths:
+            app._shazam_sync_status = dict(getattr(app, '_shazam_sync_status') or {})
+            app._shazam_sync_status['message'] = 'No destination folders configured or paths not found.'
+            app._shazam_compare_running = False
+            app._shazam_scan_progress = {}
+            return
+        app._shazam_compare_cancel_requested = False
+        app._shazam_scan_progress = {'scanning': True, 'current': 0, 'total': 0, 'message': 'Discovering files...'}
+
+        def _on_progress(current: int, total: int):
+            msg = 'Discovering files...' if total == 0 else 'Scanning files...'
+            app._shazam_scan_progress = {'scanning': True, 'current': current, 'total': total, 'message': msg}
+
+        def _should_cancel():
+            return getattr(app, '_shazam_compare_cancel_requested', False)
+
+        try:
+            local_tracks = scan_folders(
+                folder_paths,
+                on_progress=_on_progress,
+                should_cancel=_should_cancel,
+                use_filename_only=True,
+            )
+        except ScanCancelled:
+            app._shazam_sync_status = dict(getattr(app, '_shazam_sync_status') or {})
+            app._shazam_sync_status['message'] = 'Rescan cancelled.'
+            app._shazam_scan_progress = {}
+            app._shazam_compare_running = False
+            return
+        save_local_scan_cache(folder_paths, local_tracks)
+        existing = dict(getattr(app, '_shazam_sync_status') or {})
+        existing['message'] = 'Rescan complete. Click Compare to update the list.'
+        existing['local_count'] = len(local_tracks)
+        app._shazam_sync_status = existing
+    except Exception:
+        app._shazam_sync_status = dict(getattr(app, '_shazam_sync_status') or {})
+        app._shazam_sync_status['message'] = 'Rescan failed.'
+    finally:
+        app._shazam_compare_running = False
+        app._shazam_scan_progress = {}
+        try:
+            _start_next_single_search()
+        except Exception:
+            pass
+
+
 @app.route('/api/shazam-sync/rescan', methods=['POST'])
 def shazam_sync_rescan():
-    """Force rescan of all local folders and re-compare."""
+    """Force rescan of all local folders. Optionally run compare after (default: yes). Body: { \"compare_after\": true|false }."""
     import os
     from shazam_cache import LOCAL_SCAN_CACHE_PATH
+    compare_after = True
+    try:
+        data = request.get_json(silent=True) or {}
+        compare_after = data.get('compare_after', True)
+    except Exception:
+        pass
     if os.path.exists(LOCAL_SCAN_CACHE_PATH):
         os.remove(LOCAL_SCAN_CACHE_PATH)
-    return shazam_sync_compare()
+    if compare_after:
+        return shazam_sync_compare()
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
+    app._shazam_compare_running = True
+    thread = threading.Thread(target=_run_rescan_only_background, daemon=True)
+    thread.start()
+    return jsonify({'running': True, 'message': 'Rescanning folders...'})
 
 
 @app.route('/api/shazam-sync/rescan-folder', methods=['POST'])
@@ -1862,8 +2088,8 @@ def shazam_sync_rescan_folder():
     folder_path = (data.get('folder_path') or '').strip()
     if not folder_path or not os.path.isdir(folder_path):
         return jsonify({'error': 'Invalid or missing folder path.'}), 400
-    if getattr(app, '_shazam_compare_running', False):
-        return jsonify({'error': 'Compare already in progress.'}), 400
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
 
     folder_abs = os.path.abspath(folder_path).rstrip(os.sep)
     folder_paths = get_destination_folders_raw()
@@ -1954,6 +2180,10 @@ def shazam_sync_rescan_folder():
             app._shazam_sync_status = {'error': 'Rescan failed'}
         finally:
             app._shazam_compare_running = False
+            try:
+                _start_next_single_search()
+            except Exception:
+                pass
 
     app._shazam_compare_running = True
     thread = threading.Thread(target=_run, daemon=True)
@@ -1963,18 +2193,38 @@ def shazam_sync_rescan_folder():
 
 @app.route('/api/shazam-sync/progress', methods=['GET'])
 def shazam_sync_progress():
-    """Return current automation progress."""
+    """Return current automation progress. Includes single_search_queue when per-track search queue is used."""
     progress = getattr(app, '_shazam_sync_progress', None)
     if not progress:
-        return jsonify({'running': False, 'current': 0, 'total': 0})
-    return jsonify(progress)
+        out = {'running': False, 'current': 0, 'total': 0}
+    else:
+        out = dict(progress)
+    lock = getattr(app, '_shazam_single_search_queue_lock', None)
+    queue = getattr(app, '_shazam_single_search_queue', None)
+    if queue is not None and lock is not None:
+        with lock:
+            out['single_search_queue'] = [{'artist': q.get('artist', ''), 'title': q.get('title', '')} for q in queue]
+    else:
+        out['single_search_queue'] = []
+    return jsonify(out)
+
+
+def _shazam_any_job_running() -> bool:
+    """True if Soundeo automation or compare/rescan is running (so only one batch job at a time)."""
+    if getattr(app, '_shazam_sync_progress', {}).get('running'):
+        return True
+    if getattr(app, '_shazam_compare_running', False):
+        return True
+    return False
 
 
 def _strip_all_parens(key: str) -> str:
-    """Strip everything from the first '(' — aggressive normalizer for cross-matching."""
+    """Remove all (...) and [...] segments, collapse spaces. For cross-matching e.g. 'mOat (UK) - Guard Your Joy (Extended Mix)' -> 'mOat - Guard Your Joy'."""
+    import re
     s = (key or "").strip()
-    if " (" in s:
-        s = s[: s.index(" (")].strip()
+    s = re.sub(r'\s*\([^)]*\)\s*', ' ', s)
+    s = re.sub(r'\s*\[[^\]]*\]\s*', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
     return s or key or ""
 
 
@@ -2001,7 +2251,8 @@ def _merge_crawled_favorites_into_status(status: Dict, favorites: List[Dict], fu
     status.setdefault('soundeo_titles', {})
     status.setdefault('starred', {})
 
-    # Build multi-level lookup: norm → [actual app key, ...]
+    # Build multi-level lookup: norm → [actual app key, ...]. Include dot-stripped variants so
+    # "R.E.Zarin" (Shazam) matches "REZarin" (Soundeo favorites page).
     app_keys_by_norm: Dict[str, list] = {}
     app_keys_by_deep: Dict[str, list] = {}
     for track in (status.get('to_download') or []) + (status.get('have_locally') or []):
@@ -2010,6 +2261,12 @@ def _merge_crawled_favorites_into_status(status: Dict, favorites: List[Dict], fu
         deep = _deep_norm_key(k)
         app_keys_by_norm.setdefault(norm, []).append(k)
         app_keys_by_deep.setdefault(deep, []).append(k)
+        norm_no_dots = norm.replace('.', '')
+        deep_no_dots = deep.replace('.', '')
+        if norm_no_dots != norm:
+            app_keys_by_norm.setdefault(norm_no_dots, []).append(k)
+        if deep_no_dots != deep:
+            app_keys_by_deep.setdefault(deep_no_dots, []).append(k)
 
     def _store(k: str, url: Optional[str], soundeo_title: Optional[str]):
         """Set starred/url/soundeo_title under key and its lowercase."""
@@ -2036,6 +2293,7 @@ def _merge_crawled_favorites_into_status(status: Dict, favorites: List[Dict], fu
         deep = _deep_norm_key(key)
         crawled_norms_lower.add(norm_lower)
         crawled_deep_norms.add(deep)
+        crawled_deep_norms.add(deep.replace('.', ''))
 
         # Store under crawl key (+ lowercase)
         _store(key, url, soundeo_title)
@@ -2053,11 +2311,25 @@ def _merge_crawled_favorites_into_status(status: Dict, favorites: List[Dict], fu
         for app_key in matched_app_keys:
             _store(app_key, url, soundeo_title)
 
-    if full_scan:
-        for key in list(status.get('starred', {})):
-            deep = _deep_norm_key(key)
-            if deep not in crawled_deep_norms:
-                status['starred'][key] = False
+    # Clear starred for any app track not found in this crawl (so we don't show stale "starred" after user unstars on Soundeo).
+    # Do this for every sync, not only full_scan, so limited-range syncs still clear starred for tracks not seen.
+    all_app_keys = set()
+    for track in (status.get('to_download') or []) + (status.get('have_locally') or []):
+        k = f"{track.get('artist', '')} - {track.get('title', '')}"
+        if k.strip():
+            all_app_keys.add(k)
+    for app_key in all_app_keys:
+        norm = _strip_all_parens(app_key).lower()
+        norm_no_dots = norm.replace('.', '')
+        deep = _deep_norm_key(app_key)
+        deep_no_dots = deep.replace('.', '')
+        in_crawl = (
+            norm in crawled_norms_lower or norm_no_dots in crawled_norms_lower
+            or deep in crawled_deep_norms or deep_no_dots in crawled_deep_norms
+        )
+        if not in_crawl:
+            status.setdefault('starred', {})[app_key] = False
+            status['starred'][app_key.lower()] = False
 
 
 def _run_soundeo_automation(tracks: list):
@@ -2205,13 +2477,13 @@ def _run_sync_favorites_from_soundeo():
         verify_list = _build_verify_list(status, [])
 
         # Crawl + cross-check in one browser session
-        app._shazam_sync_progress = {'running': True, 'message': 'Crawling Soundeo favorites...', 'current': 0, 'total': 0}
+        app._shazam_sync_progress = {'running': True, 'message': 'Crawling Soundeo favorites...', 'current': 0, 'total': 0, 'mode': 'sync_favorites'}
         result = crawl_soundeo_favorites(
             cookies_path, headed=headed, on_progress=on_progress,
             max_pages=max_pages, verify_tracks=verify_list,
         )
         if not result.get('ok'):
-            app._shazam_sync_progress = {'running': False, 'error': result.get('error', 'Crawl failed')}
+            app._shazam_sync_progress = {'running': False, 'error': result.get('error', 'Crawl failed'), 'mode': 'sync_favorites'}
             return
         favorites = result.get('favorites') or []
         verified = result.get('verified') or []
@@ -2257,9 +2529,10 @@ def _run_sync_favorites_from_soundeo():
             'message': f'Favorites synced ({", ".join(msg_parts)}).',
             'favorites_count': len(favorites),
             'mutations': len(mutations),
+            'mode': 'sync_favorites',
         }
     except Exception as e:
-        app._shazam_sync_progress = {'running': False, 'error': str(e)}
+        app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'sync_favorites'}
 
 
 def _run_sync_single_track_browser(artist: str, title: str):
@@ -2317,10 +2590,31 @@ def _run_sync_single_track_browser(artist: str, title: str):
         app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'sync_single'}
 
 
+def _start_next_single_search():
+    """If single-search queue has items, pop one and run it in a background thread. Call with _shazam_single_search_queue_lock held only when called from request handler; from worker we acquire the lock."""
+    queue = getattr(app, '_shazam_single_search_queue', None) or []
+    lock = getattr(app, '_shazam_single_search_queue_lock', None)
+    if lock is None:
+        return
+    with lock:
+        queue = getattr(app, '_shazam_single_search_queue', None) or []
+        if not queue:
+            return
+        item = queue.pop(0)
+        app._shazam_single_search_queue = queue
+    artist, title = item.get('artist', ''), item.get('title', '')
+    if not artist and not title:
+        _start_next_single_search()
+        return
+    app._shazam_sync_progress = {'running': True, 'message': f'Searching: {artist} - {title}', 'mode': 'search_single'}
+    thread = threading.Thread(target=_run_search_soundeo_single, args=(artist, title), daemon=True)
+    thread.start()
+
+
 def _run_search_soundeo_single(artist: str, title: str):
     """Background thread: search one track on Soundeo (no favorite), merge url/title into status."""
     from config_shazam import get_soundeo_cookies_path, load_config
-    from soundeo_automation import _get_driver, load_cookies, verify_logged_in, find_track_on_soundeo, _graceful_quit
+    from soundeo_automation import _get_driver, load_cookies, verify_logged_in, find_track_on_soundeo, get_track_starred_state, _graceful_quit
     from shazam_cache import save_status_cache
 
     config = load_config()
@@ -2334,12 +2628,20 @@ def _run_search_soundeo_single(artist: str, title: str):
         if not load_cookies(driver, cookies_path):
             app._shazam_sync_progress = {'running': False, 'error': 'No saved session. Save Soundeo session first.', 'mode': 'search_single'}
             _graceful_quit(driver)
+            _start_next_single_search()
             return
         if not verify_logged_in(driver):
             app._shazam_sync_progress = {'running': False, 'error': 'Soundeo session expired. Save session again.', 'mode': 'search_single'}
             _graceful_quit(driver)
+            _start_next_single_search()
             return
         out = find_track_on_soundeo(driver, artist, title)
+        starred = False
+        if out and out[0]:
+            try:
+                starred = get_track_starred_state(driver, out[0])
+            except Exception:
+                pass
         _graceful_quit(driver)
 
         if out:
@@ -2373,9 +2675,13 @@ def _run_search_soundeo_single(artist: str, title: str):
             save_status_cache(status)
 
         if out:
+            status.setdefault('starred', {})
+            status['starred'][key] = status['starred'][key.lower()] = bool(starred)
+            save_status_cache(status)
             app._shazam_sync_progress = {
                 'running': False, 'done': 1, 'key': key, 'url': out[0],
                 'soundeo_title': (out[1] if len(out) > 1 else '') or key,
+                'starred': starred,
                 'message': f'Found: {artist} - {title}', 'mode': 'search_single',
             }
         else:
@@ -2383,8 +2689,10 @@ def _run_search_soundeo_single(artist: str, title: str):
                 'running': False, 'done': 0, 'failed': 1, 'key': key,
                 'error': 'Not found on Soundeo', 'message': f'Not found: {artist} - {title}', 'mode': 'search_single',
             }
+        _start_next_single_search()
     except Exception as e:
         app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'search_single'}
+        _start_next_single_search()
 
 
 def _run_search_soundeo_global(search_mode: Optional[str] = None):
@@ -2534,8 +2842,8 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
 @app.route('/api/shazam-sync/sync-favorites-from-soundeo', methods=['POST'])
 def shazam_sync_favorites_from_soundeo():
     """Crawl https://soundeo.com/account/favorites and sync starred state into app (source of truth). Runs in background. Body: { time_range: 'all'|'1_month'|'2_months'|'3_months' } to limit pages scanned (uses selected time range)."""
-    if getattr(app, '_shazam_sync_progress', {}).get('running'):
-        return jsonify({'error': 'Another sync is already running.'}), 400
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     time_range = 'all'
     if request.get_data():
         try:
@@ -2544,7 +2852,7 @@ def shazam_sync_favorites_from_soundeo():
         except Exception:
             pass
     app._shazam_sync_favorites_time_range = time_range
-    app._shazam_sync_progress = {'running': True, 'message': 'Starting...', 'current': 0, 'total': 0}
+    app._shazam_sync_progress = {'running': True, 'message': 'Starting...', 'current': 0, 'total': 0, 'mode': 'sync_favorites'}
     thread = threading.Thread(target=_run_sync_favorites_from_soundeo, daemon=True)
     thread.start()
     return jsonify({'status': 'started', 'message': 'Syncing favorites from Soundeo. Poll /api/shazam-sync/progress for status.', 'time_range': time_range})
@@ -2552,9 +2860,11 @@ def shazam_sync_favorites_from_soundeo():
 
 @app.route('/api/shazam-sync/search-soundeo-single', methods=['POST'])
 def shazam_search_soundeo_single():
-    """Search one track on Soundeo (no favorite). Body: { artist, title } or { track_key }. Runs in background. Poll /api/shazam-sync/progress."""
-    if getattr(app, '_shazam_sync_progress', {}).get('running'):
-        return jsonify({'error': 'Another operation is already running.'}), 400
+    """Search one track on Soundeo (no favorite). Body: { artist, title } or { track_key }. Queued if another op is running. Poll /api/shazam-sync/progress."""
+    if not hasattr(app, '_shazam_single_search_queue'):
+        app._shazam_single_search_queue = []
+    if not hasattr(app, '_shazam_single_search_queue_lock'):
+        app._shazam_single_search_queue_lock = threading.Lock()
     try:
         data = request.get_json(silent=True) or {}
         artist = (data.get('artist') or '').strip()
@@ -2567,17 +2877,45 @@ def shazam_search_soundeo_single():
         artist, title = (parts[0] or '').strip(), (parts[1] or '').strip()
     if not artist and not title:
         return jsonify({'error': 'Missing artist/title or track_key'}), 400
-    app._shazam_sync_progress = {'running': True, 'message': f'Starting search: {artist} - {title}…', 'mode': 'search_single'}
-    thread = threading.Thread(target=_run_search_soundeo_single, args=(artist, title), daemon=True)
+    item = {'artist': artist, 'title': title}
+    with app._shazam_single_search_queue_lock:
+        app._shazam_single_search_queue.append(item)
+        queue = list(app._shazam_single_search_queue)
+    running = _shazam_any_job_running()
+    if running:
+        return jsonify({
+            'status': 'queued',
+            'position': len(queue),
+            'message': f'Queued: {artist} - {title}',
+            'single_search_queue': [{'artist': q['artist'], 'title': q['title']} for q in queue],
+        })
+    # Not running: pop the one we just added (it is the first) and start it, unless compare is running
+    with app._shazam_single_search_queue_lock:
+        if not app._shazam_single_search_queue:
+            return jsonify({'status': 'started', 'message': f'Searching: {artist} - {title}', 'single_search_queue': []})
+        next_item = app._shazam_single_search_queue.pop(0)
+        queue_after = list(app._shazam_single_search_queue)
+        if getattr(app, '_shazam_compare_running', False):
+            app._shazam_single_search_queue.insert(0, next_item)
+            return jsonify({
+                'status': 'queued',
+                'position': len(app._shazam_single_search_queue),
+                'message': f'Queued: {next_item["artist"]} - {next_item["title"]} (compare/rescan in progress)',
+                'single_search_queue': [{'artist': q['artist'], 'title': q['title']} for q in app._shazam_single_search_queue],
+            })
+        app._shazam_single_search_queue = queue_after
+    a, t = next_item['artist'], next_item['title']
+    app._shazam_sync_progress = {'running': True, 'message': f'Searching: {a} - {t}', 'mode': 'search_single'}
+    thread = threading.Thread(target=_run_search_soundeo_single, args=(a, t), daemon=True)
     thread.start()
-    return jsonify({'status': 'started', 'message': f'Searching Soundeo for: {artist} - {title}'})
+    return jsonify({'status': 'started', 'message': f'Searching Soundeo for: {a} - {t}', 'single_search_queue': [{'artist': q['artist'], 'title': q['title']} for q in queue_after]})
 
 
 @app.route('/api/shazam-sync/search-soundeo-global', methods=['POST'])
 def shazam_search_soundeo_global():
     """Search all (global). Body: { search_mode: 'unfound'|'new' } — unfound = orange-dot only, new = grey-dot only; omit = both. Runs in background. Poll /api/shazam-sync/progress."""
-    if getattr(app, '_shazam_sync_progress', {}).get('running'):
-        return jsonify({'error': 'Another operation is already running.'}), 400
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     search_mode = None
     if request.get_data():
         try:
@@ -2615,8 +2953,8 @@ def _filter_tracks_by_time_range(tracks: list, time_range: Optional[str]) -> lis
 @app.route('/api/shazam-sync/run-soundeo', methods=['POST'])
 def shazam_sync_run_soundeo():
     """Start background Soundeo automation. Uses selected tracks from body, else to_download filtered by time_range."""
-    if getattr(app, '_shazam_sync_progress', {}).get('running'):
-        return jsonify({'error': 'Sync already running.'}), 400
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     tracks = None
     time_range = 'all'
     if request.get_data():
@@ -2720,8 +3058,8 @@ def shazam_sync_dismiss_track():
     """Dismiss a track: unstar on Soundeo via API + mark as dismissed locally.
     Body: { key: "Artist - Title", track_url: "https://soundeo.com/track/..." }"""
     from config_shazam import get_soundeo_cookies_path
-    from soundeo_automation import extract_track_id, soundeo_api_toggle_favorite
-    from shazam_cache import save_status_cache
+    from soundeo_automation import extract_track_id, soundeo_api_set_favorite
+    from shazam_cache import save_status_cache, load_status_cache
 
     try:
         data = request.get_json(silent=True) or {}
@@ -2732,17 +3070,43 @@ def shazam_sync_dismiss_track():
     if not key:
         return jsonify({'error': 'Missing track key'}), 400
 
-    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
     if not track_url:
-        track_url = (status.get('urls') or {}).get(key, '')
+        track_url = _status_url_for_key(status, key)
 
     soundeo_result = None
+    cookies_path = get_soundeo_cookies_path()
     track_id = extract_track_id(track_url) if track_url else None
     if track_id:
-        cookies_path = get_soundeo_cookies_path()
-        soundeo_result = soundeo_api_toggle_favorite(track_id, cookies_path)
-        if soundeo_result.get('ok') and soundeo_result.get('result') != 'unfavored':
-            soundeo_api_toggle_favorite(track_id, cookies_path)
+        _soundeo_star_log.info("Soundeo dismiss: trying HTTP set_favorite favored=False for key=%s", key[:60] if key else "")
+        soundeo_result = soundeo_api_set_favorite(track_id, cookies_path, favored=False, track_url=track_url or None)
+        if soundeo_result and soundeo_result.get('ok'):
+            _soundeo_star_log.info("Soundeo dismiss: HTTP succeeded")
+        else:
+            _soundeo_star_log.info("Soundeo dismiss: HTTP failed (%s), trying crawler", (soundeo_result or {}).get('error', 'unknown'))
+    if track_url and not (soundeo_result and soundeo_result.get('ok')):
+        from config_shazam import load_config
+        from soundeo_automation import _get_driver, load_cookies, verify_logged_in, unfavorite_track_on_soundeo, _graceful_quit
+        config = load_config()
+        headed = config.get('headed_mode', True)
+        driver = None
+        try:
+            driver = _get_driver(headless=not headed, use_persistent_profile=True)
+            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
+                if unfavorite_track_on_soundeo(driver, track_url):
+                    soundeo_result = {'ok': True, 'result': 'unfavored'}
+                    _soundeo_star_log.info("Soundeo dismiss: crawler succeeded")
+                else:
+                    _soundeo_star_log.warning("Soundeo dismiss: crawler failed")
+            else:
+                _soundeo_star_log.warning("Soundeo dismiss: crawler skipped (cookies/login failed)")
+        except Exception as e:
+            _soundeo_star_log.warning("Soundeo dismiss: crawler error: %s", e)
+        finally:
+            _graceful_quit(driver)
+
+    if soundeo_result and soundeo_result.get('ok') and track_url and cookies_path:
+        _verify_soundeo_favorite_state(track_url, cookies_path, expected_favored=False, key=key)
 
     status.setdefault('dismissed', {})
     status['dismissed'][key] = True
@@ -2758,13 +3122,140 @@ def shazam_sync_dismiss_track():
     })
 
 
+@app.route('/api/shazam-sync/unstar-track', methods=['POST'])
+def shazam_sync_unstar_track():
+    """Unstar a track on Soundeo only. Does not set dismissed — link stays visible, no strikethrough.
+    Body: { key, track_url? }."""
+    from config_shazam import get_soundeo_cookies_path
+    from soundeo_automation import extract_track_id, soundeo_api_set_favorite
+    from shazam_cache import save_status_cache, load_status_cache
+
+    try:
+        data = request.get_json(silent=True) or {}
+        key = (data.get('key') or '').strip()
+        track_url = (data.get('track_url') or '').strip()
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not key:
+        return jsonify({'error': 'Missing track key'}), 400
+
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
+    if not track_url:
+        track_url = _status_url_for_key(status, key)
+        _soundeo_star_log.info("Soundeo unstar: track_url from cache=%s (key=%s)", track_url[:80] if track_url else "(empty)", key[:50] if key else "")
+    else:
+        _soundeo_star_log.info("Soundeo unstar: track_url from request=%s", track_url[:80])
+
+    soundeo_result = None
+    cookies_path = get_soundeo_cookies_path()
+    track_id = extract_track_id(track_url) if track_url else None
+    _soundeo_star_log.info("Soundeo unstar: track_id=%s cookies_path=%s", track_id, bool(cookies_path))
+    if track_id:
+        _soundeo_star_log.info("Soundeo unstar: trying HTTP set_favorite favored=False for key=%s", key[:60] if key else "")
+        soundeo_result = soundeo_api_set_favorite(track_id, cookies_path, favored=False, track_url=track_url or None)
+        if soundeo_result and soundeo_result.get('ok'):
+            _soundeo_star_log.info("Soundeo unstar: HTTP succeeded")
+        else:
+            _soundeo_star_log.info("Soundeo unstar: HTTP failed (%s), trying crawler", (soundeo_result or {}).get('error', 'unknown'))
+    else:
+        _soundeo_star_log.warning("Soundeo unstar: no track_id, skipping HTTP")
+    if track_url and not (soundeo_result and soundeo_result.get('ok')):
+        from config_shazam import load_config
+        from soundeo_automation import _get_driver, load_cookies, verify_logged_in, unfavorite_track_on_soundeo, _graceful_quit
+        config = load_config()
+        headed = config.get('headed_mode', True)
+        driver = None
+        try:
+            driver = _get_driver(headless=not headed, use_persistent_profile=True)
+            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
+                if unfavorite_track_on_soundeo(driver, track_url):
+                    soundeo_result = {'ok': True, 'result': 'unfavored'}
+                    _soundeo_star_log.info("Soundeo unstar: crawler succeeded")
+                else:
+                    _soundeo_star_log.warning("Soundeo unstar: crawler failed")
+            else:
+                _soundeo_star_log.warning("Soundeo unstar: crawler skipped (cookies/login failed)")
+        except Exception as e:
+            _soundeo_star_log.warning("Soundeo unstar: crawler error: %s", e)
+        finally:
+            _graceful_quit(driver)
+
+    soundeo_ok = bool(soundeo_result and soundeo_result.get('ok'))
+    _soundeo_star_log.info("Soundeo unstar: result soundeo_ok=%s (key=%s)", soundeo_ok, key[:50] if key else "")
+    if soundeo_result and soundeo_result.get('ok') and track_url and cookies_path:
+        _verify_soundeo_favorite_state(track_url, cookies_path, expected_favored=False, key=key)
+
+    status.setdefault('starred', {})
+    status['starred'][key] = False
+    status['starred'][key.lower()] = False
+    app._shazam_sync_status = status
+    save_status_cache(status)
+
+    return jsonify({
+        'ok': True,
+        'key': key,
+        'soundeo_ok': soundeo_ok,
+    })
+
+
+@app.route('/api/shazam-sync/clear-dismissed', methods=['POST'])
+def shazam_sync_clear_dismissed():
+    """Clear dismissed state for a track so the link shows again (no strikethrough). Does not change starred on Soundeo.
+    Body: { key }."""
+    from shazam_cache import save_status_cache
+
+    try:
+        data = request.get_json(silent=True) or {}
+        key = (data.get('key') or '').strip()
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not key:
+        return jsonify({'error': 'Missing track key'}), 400
+
+    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    dismissed = dict(status.get('dismissed') or {})
+    dismissed.pop(key, None)
+    dismissed.pop(key.lower(), None)
+    status['dismissed'] = dismissed
+    app._shazam_sync_status = status
+    save_status_cache(status)
+
+    return jsonify({'ok': True, 'key': key})
+
+
 def _status_url_for_key(status: Dict, key: str) -> str:
-    """Resolve track URL from status urls using key and common variants (e.g. lowercase)."""
+    """Resolve track URL from status urls using key and common variants (match frontend lookup)."""
     urls = status.get('urls') or {}
-    for k in (key, key.lower(), key.replace(' - ', ' – ')):
+    key_lower = key.lower()
+    key_endash = key.replace(' - ', ' – ')
+    key_norm = key.split(' (')[0].strip() if ' (' in key else key
+    key_norm_lower = key_norm.lower()
+    for k in (key, key_lower, key_endash, key_norm, key_norm_lower):
         if k in urls and urls[k]:
             return (urls[k] or '').strip()
     return ''
+
+
+def _verify_soundeo_favorite_state(
+    track_url: str, cookies_path: str, expected_favored: bool, key: str = ""
+) -> None:
+    """After a star/unstar, verify state on Soundeo and log. expected_favored=True means we expect starred."""
+    if not track_url or not cookies_path:
+        return
+    try:
+        from soundeo_automation import soundeo_api_get_favorite_state
+        state = soundeo_api_get_favorite_state(track_url, cookies_path)
+        if state is None:
+            _soundeo_star_log.info("Soundeo: could not verify state on site for %s", key or track_url[:60])
+        elif state == expected_favored:
+            _soundeo_star_log.info("Soundeo: verified on site favored=%s for %s", state, key or track_url[:60])
+        else:
+            _soundeo_star_log.warning(
+                "Soundeo: state mismatch: expected favored=%s, got %s for %s",
+                expected_favored, state, key or track_url[:60],
+            )
+    except Exception as e:
+        _soundeo_star_log.warning("Soundeo: verification failed: %s", e)
 
 
 @app.route('/api/shazam-sync/undismiss-track', methods=['POST'])
@@ -2773,7 +3264,7 @@ def shazam_sync_undismiss_track():
     Body: { key, track_url?, artist?, title? }"""
     from config_shazam import get_soundeo_cookies_path, load_config
     from soundeo_automation import (
-        extract_track_id, soundeo_api_toggle_favorite,
+        extract_track_id, soundeo_api_set_favorite,
         soundeo_api_search_and_favorite,
         _get_driver, load_cookies, verify_logged_in, favorite_track_by_url, _graceful_quit,
     )
@@ -2798,16 +3289,35 @@ def shazam_sync_undismiss_track():
     soundeo_ok = False
     new_url = track_url
 
-    # 1) Try HTTP API when we have a track ID
+    # 1) HTTP first when we have a track URL/ID
     track_id = extract_track_id(track_url) if track_url else None
     if track_id:
-        result = soundeo_api_toggle_favorite(track_id, cookies_path)
-        if result.get('ok') and result.get('result') == 'favored':
+        _soundeo_star_log.info("Soundeo undismiss: trying HTTP set_favorite favored=True for key=%s", key[:60] if key else "")
+        result = soundeo_api_set_favorite(track_id, cookies_path, favored=True, track_url=track_url or None)
+        if result.get('ok') and (result.get('result') or '').lower() == 'favored':
             soundeo_ok = True
-        elif result.get('ok') and result.get('result') != 'favored':
-            result2 = soundeo_api_toggle_favorite(track_id, cookies_path)
-            if result2.get('ok') and result2.get('result') == 'favored':
-                soundeo_ok = True
+            _soundeo_star_log.info("Soundeo undismiss: HTTP succeeded")
+        else:
+            _soundeo_star_log.info("Soundeo undismiss: HTTP failed (%s), trying crawler", (result or {}).get('error', 'unknown'))
+    # 2) Crawler fallback when we have URL but HTTP didn't succeed
+    if not soundeo_ok and track_url:
+        config = load_config()
+        headed = config.get('headed_mode', True)
+        driver = None
+        try:
+            driver = _get_driver(headless=not headed, use_persistent_profile=True)
+            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
+                soundeo_ok = favorite_track_by_url(driver, track_url)
+                if soundeo_ok:
+                    _soundeo_star_log.info("Soundeo undismiss: crawler succeeded")
+                else:
+                    _soundeo_star_log.warning("Soundeo undismiss: crawler failed")
+            else:
+                _soundeo_star_log.warning("Soundeo undismiss: crawler skipped (cookies/login failed)")
+        except Exception as e:
+            _soundeo_star_log.warning("Soundeo undismiss: crawler error: %s", e)
+        finally:
+            _graceful_quit(driver)
     if not soundeo_ok and artist and title and not track_url:
         result = soundeo_api_search_and_favorite(artist, title, cookies_path)
         if result.get('ok'):
@@ -2817,21 +3327,7 @@ def shazam_sync_undismiss_track():
             if result.get('display_text'):
                 status.setdefault('soundeo_titles', {})[key] = result['display_text']
 
-    # 2) Browser fallback when we have URL but API didn't star (e.g. session/cookies issue)
-    if not soundeo_ok and track_url:
-        config = load_config()
-        headed = config.get('headed_mode', True)
-        driver = None
-        try:
-            driver = _get_driver(headless=not headed, use_persistent_profile=True)
-            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
-                soundeo_ok = favorite_track_by_url(driver, track_url)
-        except Exception:
-            pass
-        finally:
-            _graceful_quit(driver)
-
-    # 3) Browser find-and-favorite when we have artist/title but no URL or API failed
+    # 3) Browser find-and-favorite when we have artist/title but no URL or both above failed
     if not soundeo_ok and artist and title:
         config = load_config()
         headed = config.get('headed_mode', True)
@@ -2852,6 +3348,11 @@ def shazam_sync_undismiss_track():
         finally:
             _graceful_quit(driver)
 
+    if soundeo_ok and cookies_path:
+        verify_url = new_url or track_url
+        if verify_url:
+            _verify_soundeo_favorite_state(verify_url, cookies_path, expected_favored=True, key=key)
+
     dismissed = status.get('dismissed') or {}
     dismissed.pop(key, None)
     status['dismissed'] = dismissed
@@ -2868,16 +3369,164 @@ def shazam_sync_undismiss_track():
     })
 
 
+def _star_one_track_impl(key: str, track_url: str, artist: str, title: str) -> Tuple[bool, str]:
+    """Star one track on Soundeo. Uses app._shazam_sync_status; updates it and saves cache. Returns (success, new_url)."""
+    from config_shazam import get_soundeo_cookies_path, load_config
+    from soundeo_automation import (
+        extract_track_id, soundeo_api_set_favorite,
+        soundeo_api_search_and_favorite,
+        _get_driver, load_cookies, verify_logged_in, favorite_track_by_url, _graceful_quit,
+    )
+    from shazam_cache import save_status_cache
+
+    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    if not track_url:
+        track_url = (status.get('urls') or {}).get(key, '')
+    cookies_path = get_soundeo_cookies_path()
+    config = load_config()
+    headed = config.get('headed_mode', True)
+    soundeo_ok = False
+    new_url = track_url
+
+    # HTTP first when we have a track URL/ID
+    track_id = extract_track_id(track_url) if track_url else None
+    if track_id:
+        _soundeo_star_log.info("Soundeo star: trying HTTP set_favorite favored=True for key=%s", key[:60] if key else "")
+        result = soundeo_api_set_favorite(track_id, cookies_path, favored=True, track_url=track_url or None)
+        if result.get('ok') and (result.get('result') or '').lower() == 'favored':
+            soundeo_ok = True
+            _soundeo_star_log.info("Soundeo star: HTTP succeeded")
+        else:
+            _soundeo_star_log.info("Soundeo star: HTTP failed (%s), trying crawler", (result or {}).get('error', 'unknown'))
+    # Crawler fallback when we have URL but HTTP didn't succeed
+    if not soundeo_ok and track_url:
+        driver = None
+        try:
+            driver = _get_driver(headless=not headed, use_persistent_profile=True)
+            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
+                soundeo_ok = favorite_track_by_url(driver, track_url)
+                if soundeo_ok:
+                    _soundeo_star_log.info("Soundeo star: crawler succeeded")
+                else:
+                    _soundeo_star_log.warning("Soundeo star: crawler failed")
+            else:
+                _soundeo_star_log.warning("Soundeo star: crawler skipped (cookies/login failed)")
+        except Exception as e:
+            _soundeo_star_log.warning("Soundeo star: crawler error: %s", e)
+        finally:
+            _graceful_quit(driver)
+
+    if not soundeo_ok and artist and title and not track_url:
+        result = soundeo_api_search_and_favorite(artist, title, cookies_path)
+        if result.get('ok'):
+            soundeo_ok = True
+            new_url = result.get('url', '')
+            status.setdefault('urls', {})[key] = new_url
+            if result.get('display_text'):
+                status.setdefault('soundeo_titles', {})[key] = result['display_text']
+
+    if not soundeo_ok and artist and title:
+        driver = None
+        try:
+            from soundeo_automation import find_and_favorite_track
+            driver = _get_driver(headless=not headed, use_persistent_profile=True)
+            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
+                out = find_and_favorite_track(driver, artist, title, already_starred=set())
+                if out:
+                    soundeo_ok = True
+                    new_url = out[0] if isinstance(out, tuple) else out
+                    status.setdefault('urls', {})[key] = new_url
+                    if isinstance(out, tuple) and len(out) > 1 and out[1]:
+                        status.setdefault('soundeo_titles', {})[key] = out[1]
+        except Exception:
+            pass
+        finally:
+            _graceful_quit(driver)
+
+    if soundeo_ok and cookies_path:
+        verify_url = new_url or track_url
+        if verify_url:
+            _verify_soundeo_favorite_state(verify_url, cookies_path, expected_favored=True, key=key)
+
+    status.setdefault('starred', {})
+    status['starred'][key] = True
+    status['starred'][key.lower()] = True
+    app._shazam_sync_status = status
+    save_status_cache(status)
+    return soundeo_ok, (new_url or track_url)
+
+
+def _run_star_batch_background(tracks: List[Dict]) -> None:
+    """Background thread: star each track, update progress, respect stop request."""
+    from soundeo_automation import clear_sync_stop_request, is_sync_stop_requested
+
+    clear_sync_stop_request()
+    total = len(tracks)
+    done = 0
+    failed = 0
+    for i, t in enumerate(tracks):
+        if is_sync_stop_requested():
+            app._shazam_sync_progress = {
+                'running': False, 'stopped': True, 'done': done, 'failed': failed,
+                'message': f'Stopped. Starred {done}, failed {failed}.',
+            }
+            return
+        key = (t.get('key') or '').strip() or f"{t.get('artist', '')} - {t.get('title', '')}"
+        artist = (t.get('artist') or '').strip()
+        title = (t.get('title') or '').strip()
+        track_url = (t.get('track_url') or '').strip()
+        app._shazam_sync_progress = {
+            'running': True, 'mode': 'star_batch', 'current': i + 1, 'total': total,
+            'current_key': key, 'message': f'Starring {i + 1}/{total}: {artist} - {title}',
+        }
+        try:
+            ok, _ = _star_one_track_impl(key, track_url, artist, title)
+            if ok:
+                done += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+    app._shazam_sync_progress = {
+        'running': False, 'done': done, 'failed': failed,
+        'message': f'Done. Starred {done}, failed {failed}.',
+    }
+
+
+@app.route('/api/shazam-sync/star-batch', methods=['POST'])
+def shazam_sync_star_batch():
+    """Star multiple tracks on Soundeo (tracks must have URL). Runs in background. Poll /api/shazam-sync/progress. Body: { tracks: [{ key?, track_url?, artist, title }, ...] }."""
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
+    try:
+        data = request.get_json(silent=True) or {}
+        tracks = data.get('tracks') or []
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not tracks:
+        return jsonify({'error': 'No tracks to star. Select tracks with a Soundeo link first.'}), 400
+    status = getattr(app, '_shazam_sync_status', None) or {}
+    urls = status.get('urls') or {}
+    out = []
+    for t in tracks:
+        key = (t.get('key') or '').strip() or f"{t.get('artist', '')} - {t.get('title', '')}"
+        url = (t.get('track_url') or '').strip() or urls.get(key, '') or urls.get(key.lower(), '')
+        if not url:
+            continue
+        out.append({'key': key, 'track_url': url, 'artist': (t.get('artist') or '').strip(), 'title': (t.get('title') or '').strip()})
+    if not out:
+        return jsonify({'error': 'None of the selected tracks have a Soundeo link. Run Search first.'}), 400
+    app._shazam_sync_progress = {'running': True, 'mode': 'star_batch', 'current': 0, 'total': len(out), 'message': f'Starring 0/{len(out)}…'}
+    thread = threading.Thread(target=_run_star_batch_background, args=(out,), daemon=True)
+    thread.start()
+    return jsonify({'status': 'started', 'total': len(out), 'message': f'Starring {len(out)} track(s). Poll /api/shazam-sync/progress.'})
+
+
 @app.route('/api/shazam-sync/star-track', methods=['POST'])
 def shazam_sync_star_track():
     """Just star: add track to Soundeo favorites when we already have the URL. Tries API first, then browser fallback.
     Body: { key, track_url?, artist?, title? }. track_url can be omitted if status has urls[key]."""
     from config_shazam import get_soundeo_cookies_path
-    from soundeo_automation import (
-        extract_track_id, soundeo_api_toggle_favorite,
-        soundeo_api_search_and_favorite,
-        _get_driver, load_cookies, verify_logged_in, favorite_track_by_url, _graceful_quit,
-    )
     from shazam_cache import save_status_cache
 
     try:
@@ -2897,73 +3546,7 @@ def shazam_sync_star_track():
     if not track_url and not (artist and title):
         return jsonify({'error': 'No track URL and no artist/title. Run Search on Soundeo first to get a link.'}), 400
 
-    from config_shazam import load_config
-    cookies_path = get_soundeo_cookies_path()
-    config = load_config()
-    headed = config.get('headed_mode', True)
-    soundeo_ok = False
-    new_url = track_url
-
-    # 1) Try API when we have a track URL
-    track_id = extract_track_id(track_url) if track_url else None
-    if track_id:
-        result = soundeo_api_toggle_favorite(track_id, cookies_path)
-        if result.get('ok'):
-            if result.get('result') == 'favored':
-                soundeo_ok = True
-            else:
-                # Toggle again to set favored
-                result2 = soundeo_api_toggle_favorite(track_id, cookies_path)
-                if result2.get('ok') and result2.get('result') == 'favored':
-                    soundeo_ok = True
-
-    # 2) If no URL but have artist/title: try HTTP search-and-favorite
-    if not soundeo_ok and artist and title and not track_url:
-        result = soundeo_api_search_and_favorite(artist, title, cookies_path)
-        if result.get('ok'):
-            soundeo_ok = True
-            new_url = result.get('url', '')
-            status.setdefault('urls', {})[key] = new_url
-            if result.get('display_text'):
-                status.setdefault('soundeo_titles', {})[key] = result['display_text']
-
-    # 3) Browser fallback when we have URL
-    if not soundeo_ok and track_url:
-        driver = None
-        try:
-            driver = _get_driver(headless=not headed, use_persistent_profile=True)
-            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
-                soundeo_ok = favorite_track_by_url(driver, track_url)
-        except Exception:
-            pass
-        finally:
-            _graceful_quit(driver)
-
-    # 4) Browser fallback when we have artist/title but no URL (find and star)
-    if not soundeo_ok and artist and title:
-        driver = None
-        try:
-            from soundeo_automation import find_and_favorite_track
-            driver = _get_driver(headless=not headed, use_persistent_profile=True)
-            if load_cookies(driver, cookies_path) and verify_logged_in(driver):
-                out = find_and_favorite_track(driver, artist, title, already_starred=set())
-                if out:
-                    soundeo_ok = True
-                    new_url = out[0] if isinstance(out, tuple) else out
-                    status.setdefault('urls', {})[key] = new_url
-                    if isinstance(out, tuple) and len(out) > 1 and out[1]:
-                        status.setdefault('soundeo_titles', {})[key] = out[1]
-        except Exception:
-            pass
-        finally:
-            _graceful_quit(driver)
-
-    status.setdefault('starred', {})
-    status['starred'][key] = True
-    status['starred'][key.lower()] = True
-    app._shazam_sync_status = status
-    save_status_cache(status)
-
+    soundeo_ok, new_url = _star_one_track_impl(key, track_url, artist, title)
     return jsonify({
         'ok': True,
         'key': key,
@@ -2975,8 +3558,8 @@ def shazam_sync_star_track():
 @app.route('/api/shazam-sync/sync-single-track', methods=['POST'])
 def shazam_sync_single_track():
     """Find and star a single track on Soundeo (browser, same as Run Soundeo). Runs in background. Poll /api/shazam-sync/progress. Body: { key, artist, title }"""
-    if getattr(app, '_shazam_sync_progress', {}).get('running'):
-        return jsonify({'error': 'Another operation is already running.'}), 400
+    if _shazam_any_job_running():
+        return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     try:
         data = request.get_json(silent=True) or {}
         key = (data.get('key') or '').strip()
