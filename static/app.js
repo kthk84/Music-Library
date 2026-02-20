@@ -2286,22 +2286,28 @@ function shazamRenderTrackList(data) {
         const skipInactive = isDismissed || !isTodl ? inactive : '';
         // Single star/unstar: unstarred (or dismissed) → star outline (star or undismiss); starred → filled star → unstar only (no dismiss)
         const starToggleAction = isDismissed ? 'undismiss' : (starred ? 'unstar' : 'star');
-        const starToggleInactive = (starToggleAction === 'star' && (isSkipped || !isSynced)) ? inactive : '';
-        const starToggleTitle = isDismissed ? 'Undo dismiss (re-star on Soundeo)' : (starred ? 'Remove from Soundeo favorites (unstar)' : (isSkipped ? 'Skipped' : !isSynced ? 'Find link first (Search)' : 'Add to Soundeo favorites'));
+        const starToggleInactive = (starToggleAction === 'star' && !isSynced) ? inactive : '';
+        const starToggleTitle = isDismissed ? 'Undo dismiss (re-star on Soundeo)' : (starred ? 'Remove from Soundeo favorites (unstar)' : (!isSynced ? 'Find link first (Search)' : 'Add to Soundeo favorites'));
         const starToggleSvg = (starred && !isDismissed) ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>' : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
         const starToggleDataAttrs = (starToggleAction === 'star') ? ` data-track-url="${safeAttr(url || '')}"` : ` data-url="${safeAttr(url || '')}"`;
         const starBtnContent = isPending ? '<span class="shazam-btn-spinner" title="Processing…"></span>' : starToggleSvg;
         const starBtnDisabled = isPending ? ' disabled' : '';
 
-        let actionsCell = '<td class="shazam-actions-col"><span class="shazam-queue-slot">';
+        let actionsCell = '<td class="shazam-actions-col">';
         if (inAnyQueue) {
             var parts = [];
-            if (inStarQueue) parts.push('Star ' + starQueuePos + '/' + starQueueTotal);
-            if (inSearchQueue) parts.push('Search ' + searchQueuePos + '/' + searchQueueTotal);
-            if (inUnstarQueue) parts.push('Unstar ' + unstarQueuePos + '/' + unstarQueueTotal);
-            if (inDownloadQueue) parts.push('Download ' + downloadQueuePos + '/' + downloadQueueTotal);
-            var queueLabel = parts.length > 1 ? parts.join(', ') : (inStarQueue ? ('Star queued ' + starQueuePos + '/' + starQueueTotal) : (inSearchQueue ? ('Search queued ' + searchQueuePos + '/' + searchQueueTotal) : (inUnstarQueue ? ('Unstar queued ' + unstarQueuePos + '/' + unstarQueueTotal) : ('Download queued ' + downloadQueuePos + '/' + downloadQueueTotal))));
-            actionsCell += '<span class="shazam-queue-label">' + escapeHtml(queueLabel) + '</span>';
+            if (inStarQueue) parts.push(starQueuePos + '/' + starQueueTotal);
+            if (inSearchQueue) parts.push(searchQueuePos + '/' + searchQueueTotal);
+            if (inUnstarQueue) parts.push(unstarQueuePos + '/' + unstarQueueTotal);
+            if (inDownloadQueue) parts.push(downloadQueuePos + '/' + downloadQueueTotal);
+            var queueShort = parts.length > 1 ? parts.join(' ') : (inStarQueue ? ('★ ' + starQueuePos + '/' + starQueueTotal) : (inSearchQueue ? ('⌕ ' + searchQueuePos + '/' + searchQueueTotal) : (inUnstarQueue ? ('☆ ' + unstarQueuePos + '/' + unstarQueueTotal) : ('↓ ' + downloadQueuePos + '/' + downloadQueueTotal))));
+            var titleParts = [];
+            if (inStarQueue) titleParts.push('Star ' + starQueuePos + '/' + starQueueTotal);
+            if (inSearchQueue) titleParts.push('Search ' + searchQueuePos + '/' + searchQueueTotal);
+            if (inUnstarQueue) titleParts.push('Unstar ' + unstarQueuePos + '/' + unstarQueueTotal);
+            if (inDownloadQueue) titleParts.push('Download ' + downloadQueuePos + '/' + downloadQueueTotal);
+            var queueTitle = titleParts.join(', ');
+            actionsCell += '<span class="shazam-queue-replacement" title="' + escapeHtml(queueTitle) + '"><span class="shazam-queue-label">' + escapeHtml(queueShort) + '</span>';
             if (inStarQueue) {
                 actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="star" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from star queue">\u00d7</button>';
             }
@@ -2314,9 +2320,8 @@ function shazamRenderTrackList(data) {
             if (inDownloadQueue) {
                 actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="download" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from download queue">\u00d7</button>';
             }
-        }
-        actionsCell += '</span>';
-        if (!inAnyQueue) {
+            actionsCell += '</span>';
+        } else {
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
             const downloadInactive = (row.status === 'have' || row.status === 'skipped' || !url) ? inactive : '';
             const downloadTitle = row.status === 'have' ? 'Have locally (download not needed)' : row.status === 'skipped' ? 'Skipped' : !url ? 'No Soundeo link' : 'Download AIFF';
