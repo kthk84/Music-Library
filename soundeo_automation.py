@@ -1089,6 +1089,7 @@ def run_save_session_flow(
 ) -> Dict:
     """
     Open browser to Soundeo login page so user can log in, then save cookies when done_event is set.
+    Uses persistent browser profile so login state is remembered.
     """
     global _save_session_last_error
     _save_session_last_error = None

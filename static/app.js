@@ -1352,6 +1352,21 @@ async function shazamSaveSettings() {
     }
 }
 
+async function shazamCheckBrowser() {
+    try {
+        const res = await fetch('/api/soundeo/browser-check');
+        const data = await res.json();
+        if (data.ok) {
+            alert('Browser check OK.\nMode: ' + (data.mode || 'launch') + '\n' + (data.message || ''));
+        } else {
+            const msg = [data.error || 'Unknown error', data.hint ? '\n\n' + data.hint : ''].join('');
+            alert('Browser check failed:\n\n' + msg);
+        }
+    } catch (e) {
+        alert('Check failed: ' + e.message);
+    }
+}
+
 async function shazamSaveSession() {
     const statusEl = document.getElementById('soundeoSessionStatus');
     const saveBtn = document.getElementById('shazamSaveSessionBtn');
@@ -1363,7 +1378,8 @@ async function shazamSaveSession() {
         if (data.error) {
             if (statusEl) statusEl.textContent = 'Soundeo session: not connected';
             if (saveBtn) saveBtn.disabled = false;
-            alert(data.error);
+            const msg = data.detail ? data.error + '\n\n' + data.detail : data.error;
+            alert(msg);
             return;
         }
         if (statusEl) statusEl.textContent = 'Waiting for login…';
@@ -1686,9 +1702,16 @@ function shazamRestoreProgressIfRunning() {
             if (barEl && barEl.style.display === 'flex') return; /* already visible and likely already polling */
             if (shazamProgressRestoreInterval) clearInterval(shazamProgressRestoreInterval);
             const stopBtn = document.getElementById('shazamSyncStopBtn');
-            shazamShowSyncProgress(
-                (p.current != null && p.total != null) ? `${p.current}/${p.total}: ${p.message || ''}` : (p.message || 'Running…')
-            );
+            const total = p.total != null && p.total > 0 ? p.total : null;
+            const cur = p.current != null ? p.current : 0;
+            let initText;
+            if (total != null && p.mode === 'search_global') {
+                const label = p.search_mode === 'unfound' ? 'Unfound' : p.search_mode === 'new' ? 'New' : 'Search';
+                initText = `${label}: ${cur}/${total}${p.message ? ' — ' + p.message : ''}`;
+            } else {
+                initText = (p.current != null && p.total != null) ? `${p.current}/${p.total}: ${p.message || ''}` : (p.message || 'Running…');
+            }
+            shazamShowSyncProgress(initText);
             if (stopBtn) stopBtn.disabled = false;
             shazamProgressRestoreInterval = setInterval(function () {
                 fetch('/api/shazam-sync/progress')
@@ -1699,9 +1722,15 @@ function shazamRestoreProgressIfRunning() {
                         const stopBtn = document.getElementById('shazamSyncStopBtn');
                         if (el) {
                             if (p.running) {
-                                let text = (p.current != null && p.total != null)
-                                    ? `${p.current}/${p.total}: ${p.message || ''}`
-                                    : (p.message || 'Running…');
+                                const tot = p.total != null && p.total > 0 ? p.total : null;
+                                const c = p.current != null ? p.current : 0;
+                                let text;
+                                if (tot != null && p.mode === 'search_global') {
+                                    const label = p.search_mode === 'unfound' ? 'Unfound' : p.search_mode === 'new' ? 'New' : 'Search';
+                                    text = `${label}: ${c}/${tot}${p.message ? ' — ' + p.message : ''}`;
+                                } else {
+                                    text = (p.current != null && p.total != null) ? `${p.current}/${p.total}: ${p.message || ''}` : (p.message || 'Running…');
+                                }
                                 if (p.last_url) {
                                     const urlDisplay = p.last_url.replace(/^https?:\/\//, '');
                                     text += ' — ' + urlDisplay.slice(0, 50) + (urlDisplay.length > 50 ? '…' : '');
@@ -2901,7 +2930,18 @@ async function shazamSearchAllOnSoundeo(searchMode) {
             const el = document.getElementById('shazamProgress');
             if (el) {
                 if (p.running) {
-                    el.textContent = (p.current != null && p.total != null) ? `${p.current}/${p.total}: ${p.message || ''}` : (p.message || 'Searching…');
+                    const total = p.total != null && p.total > 0 ? p.total : null;
+                    const cur = p.current != null ? p.current : 0;
+                    let text;
+                    if (total != null && p.mode === 'search_global') {
+                        const label = p.search_mode === 'unfound' ? 'Unfound' : p.search_mode === 'new' ? 'New' : 'Search';
+                        text = `${label}: ${cur}/${total}${p.message ? ' — ' + p.message : ''}`;
+                    } else if (total != null) {
+                        text = (p.current != null && p.total != null) ? `${p.current}/${p.total}: ${p.message || ''}` : (p.message || 'Searching…');
+                    } else {
+                        text = p.message || 'Searching…';
+                    }
+                    el.textContent = text;
                 } else {
                     el.textContent = p.error ? 'Error: ' + p.error : (p.message || 'Done.');
                 }
@@ -2923,6 +2963,8 @@ async function shazamSearchAllOnSoundeo(searchMode) {
                 shazamCurrentProgress = {};
                 clearInterval(poll);
                 shazamHideSyncProgress();
+                const stopBtn = document.getElementById('shazamSyncStopBtn');
+                if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stop'; }
                 if (p.mode === 'search_global') {
                     if (p.not_found) Object.assign(shazamNotFound, p.not_found);
                     if (p.urls) Object.assign(shazamTrackUrls, p.urls);

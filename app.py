@@ -2441,7 +2441,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
         existing = getattr(app, '_shazam_sync_progress', None) or {}
         prog = {
             'running': True, 'current': current, 'total': total, 'message': msg,
-            'last_url': url, 'mode': 'search_global',
+            'last_url': url, 'mode': 'search_global', 'search_mode': search_mode,
             'urls': dict(existing.get('urls', {})),
             'not_found': dict(existing.get('not_found', {})),
             'soundeo_titles': dict(existing.get('soundeo_titles', {})),
@@ -2476,8 +2476,20 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
         app._shazam_sync_progress = prog
 
     try:
+        total_count = len(tracks)
+        if search_mode == 'unfound':
+            label = 'unfound'
+        elif search_mode == 'new':
+            label = 'new'
+        else:
+            label = 'all'
+        start_msg = f'Searching {label}: 0/{total_count}'
+        if use_http:
+            start_msg = f'Searching {label} (HTTP): 0/{total_count}'
+        elif not headed:
+            start_msg = f'Searching {label} (headless): 0/{total_count}'
         app._shazam_sync_progress = {
-            'running': True, 'message': 'Starting search...', 'current': 0, 'total': len(tracks), 'mode': 'search_global',
+            'running': True, 'message': start_msg, 'current': 0, 'total': total_count, 'mode': 'search_global', 'search_mode': search_mode,
             'urls': {}, 'not_found': {}, 'soundeo_titles': {}, 'soundeo_match_scores': {},
         }
         if use_http:
@@ -2503,11 +2515,13 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
         app._shazam_sync_status = status
         save_status_cache(status)
         # Include not_found/urls/titles/scores in final progress so frontend can update without refetch
+        done_count = result.get('done', 0)
+        failed_count = result.get('failed', 0)
         app._shazam_sync_progress = {
             'running': False,
-            'done': result.get('done', 0), 'failed': result.get('failed', 0),
-            'message': f"Search done: {result.get('done', 0)} found, {result.get('failed', 0)} not found.",
-            'mode': 'search_global',
+            'done': done_count, 'failed': failed_count,
+            'message': f"Search done: {done_count} found, {failed_count} not found (of {total_count}).",
+            'mode': 'search_global', 'search_mode': search_mode, 'total': total_count,
             'not_found': dict(status.get('not_found') or {}),
             'urls': dict(status.get('urls') or {}),
             'soundeo_titles': dict(status.get('soundeo_titles') or {}),
@@ -2573,7 +2587,7 @@ def shazam_search_soundeo_global():
                 search_mode = None
         except Exception:
             pass
-    app._shazam_sync_progress = {'running': True, 'message': 'Starting search…', 'current': 0, 'total': 0, 'mode': 'search_global'}
+    app._shazam_sync_progress = {'running': True, 'message': 'Starting search…', 'current': 0, 'total': None, 'mode': 'search_global', 'search_mode': search_mode}
     thread = threading.Thread(target=_run_search_soundeo_global, args=(search_mode,), daemon=True)
     thread.start()
     return jsonify({'status': 'started', 'message': 'Searching Soundeo. Poll /api/shazam-sync/progress.', 'search_mode': search_mode})
@@ -3307,9 +3321,54 @@ def soundeo_start_save_session():
     err = getattr(_snd, '_save_session_last_error', None)
     if err:
         return jsonify({
-            'error': 'Browser could not start. Close all Chrome windows and try again.'
+            'error': 'Browser could not start.',
+            'detail': err,
         }), 500
     return jsonify({'status': 'started'})
+
+
+@app.route('/api/soundeo/browser-check', methods=['GET'])
+def soundeo_browser_check():
+    """Try to create the Soundeo browser driver (headless). Returns config mode and success or the actual error for diagnosis. 20s timeout."""
+    from config_shazam import get_soundeo_browser_config
+    from soundeo_automation import _get_driver, _graceful_quit
+    _result = []
+
+    def _run():
+        try:
+            d = _get_driver(headless=True, use_persistent_profile=True)
+            _result.append(("ok", d))
+        except Exception as e:
+            _result.append(("err", str(e)))
+
+    cfg = get_soundeo_browser_config()
+    mode = cfg.get("mode", "launch")
+    out = {"mode": mode}
+    if mode == "attach":
+        out["debugger_address"] = cfg.get("debugger_address", "127.0.0.1:9222")
+        out["hint"] = "Attach mode: no new window. Start Chrome with: chrome --remote-debugging-port=9222"
+    else:
+        out["user_data_dir"] = cfg.get("user_data_dir", "")
+        out["hint"] = "Launch mode: Chrome should open. If not, see error below or close other Chrome windows using this profile."
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(timeout=20)
+    if not _result:
+        out["ok"] = False
+        out["error"] = "Timed out after 20s (Chrome may be slow or profile in use). Connect Soundeo now uses a temporary profile — try that; a window should open."
+        return jsonify(out)
+    status, val = _result[0]
+    if status == "err":
+        out["ok"] = False
+        out["error"] = val
+        return jsonify(out)
+    try:
+        _graceful_quit(val)
+    except Exception:
+        pass
+    out["ok"] = True
+    out["message"] = "Browser driver OK (headless test)."
+    return jsonify(out)
 
 
 @app.route('/api/soundeo/session-saved', methods=['POST'])
