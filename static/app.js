@@ -1069,10 +1069,11 @@ function reset() {
 // Loading overlay - safety timeout so it never blocks forever
 let _loadingTimeoutId = null;
 function showLoading(text) {
-    const overlay = document.getElementById('loadingOverlay');
+    var overlay = document.getElementById('loadingOverlay');
     if (!overlay) return;
     if (_loadingTimeoutId) clearTimeout(_loadingTimeoutId);
-    document.getElementById('loadingText').textContent = text || 'Processing...';
+    var loadingText = document.getElementById('loadingText');
+    if (loadingText) loadingText.textContent = text || 'Processing...';
     overlay.classList.add('active');
     _loadingTimeoutId = setTimeout(() => { hideLoading(); _loadingTimeoutId = null; }, 60000);
 }
@@ -1223,6 +1224,8 @@ let shazamCurrentStarQueue = [];
 let shazamCurrentSearchQueue = [];
 /** Current unstar queue from progress API (list of { artist, title, key }). Used to show "Unstar queued 2/5" in track rows. */
 let shazamCurrentUnstarQueue = [];
+/** Download queue (keys). From progress/status download_queue; shown in Download queue bar. */
+let shazamCurrentDownloadQueue = [];
 /** When true, keep scrolling the current processing row to center of viewport on each progress update. Toggled by "Follow row" / "Unfollow row". */
 /** Counter for throttling status fetch during progress poll (fetch status every 2nd poll when batch running). */
 let shazamProgressPollCount = 0;
@@ -1248,6 +1251,7 @@ async function shazamLoadSettings() {
     try {
         const res = await fetch('/api/settings');
         const cfg = await res.json();
+        if (res.ok) hideConnectionBanner();
         shazamApplySettings(cfg);
         return cfg;
     } catch (e) {
@@ -1280,11 +1284,20 @@ function shazamApplySettings(cfg) {
     }
     const statusEl = document.getElementById('soundeoSessionStatus');
     const pathEl = document.getElementById('soundeoSessionPath');
+    const configPathEl = document.getElementById('configPathHint');
     const btn = document.getElementById('shazamSaveSessionBtn');
     const hasSession = !!(cfg.soundeo_cookies_path || cfg.soundeo_cookies_path_resolved);
     if (statusEl) statusEl.textContent = hasSession ? '· connected' : '· not connected';
     if (btn) btn.textContent = hasSession ? 'Reconnect' : 'Connect Soundeo';
     if (pathEl) pathEl.style.display = 'none';
+    if (configPathEl) {
+        if (cfg.config_path) {
+            configPathEl.textContent = 'Config: ' + cfg.config_path;
+            configPathEl.style.display = 'block';
+        } else {
+            configPathEl.style.display = 'none';
+        }
+    }
 }
 
 async function shazamBootstrapLoad() {
@@ -1297,18 +1310,25 @@ async function shazamBootstrapLoad() {
         clearTimeout(timeoutId);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Bootstrap failed');
+        hideConnectionBanner();
         const cfg = data.settings || {};
         const status = data.status || {};
         shazamApplySettings(cfg);
         shazamApplyStatus(status);
     } catch (e) {
         console.error('Bootstrap failed:', e);
-        const msg = e.name === 'AbortError' ? 'Request timed out. Server may be busy.' : (e.message || 'Could not load data.');
+        const msg = e.name === 'AbortError'
+            ? 'Request timed out. Server may be busy.'
+            : (e.message || 'Could not load settings and tracks.');
         if (trackList) trackList.innerHTML =
-            '<p class="shazam-info-msg shazam-warning">' + msg +
-            ' <button type="button" class="btn btn-small" onclick="shazamBootstrapLoad()">Retry</button></p>';
-        shazamLoadSettings();
-        shazamLoadStatus();
+            '<p class="shazam-info-msg shazam-warning">' + escapeHtml(msg) +
+            ' Is the server running? <button type="button" class="btn btn-small" onclick="shazamBootstrapLoad()">Retry</button></p>';
+        shazamLoadSettings().then(function (cfg) {
+            if (cfg && (cfg.destination_folders_raw || cfg.destination_folders || []).length) return;
+            shazamLoadStatus();
+        }).catch(function () {
+            shazamLoadStatus();
+        });
     }
 }
 
@@ -1789,6 +1809,10 @@ function shazamApplyStatus(data) {
         Object.assign(shazamNotFound, data.not_found);
     }
     shazamRenderTrackList(data);
+    if (data.download_queue && Array.isArray(data.download_queue)) {
+        shazamCurrentDownloadQueue = data.download_queue;
+        shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+    }
     if (data.compare_running && !shazamComparePollInterval) {
         const sp = data.scan_progress || {};
         const cur = sp.current || 0;
@@ -1810,6 +1834,10 @@ function shazamRestoreProgressIfRunning() {
             if (!p.running) return;
             shazamCurrentProgress = p;
             shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
+            if (p.download_queue && Array.isArray(p.download_queue)) {
+                shazamCurrentDownloadQueue = p.download_queue;
+                shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+            }
             shazamSetProgressClickable(!!p.current_key);
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             const barEl = document.getElementById('shazamSyncProgress');
@@ -1834,6 +1862,10 @@ function shazamRestoreProgressIfRunning() {
                     .then(p => {
                         shazamCurrentProgress = p;
                         shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
+                        if (p.download_queue && Array.isArray(p.download_queue)) {
+                            shazamCurrentDownloadQueue = p.download_queue;
+                            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+                        }
                         const el = document.getElementById('shazamProgress');
                         const stopBtn = document.getElementById('shazamSyncStopBtn');
                         if (el) {
@@ -2154,16 +2186,23 @@ function shazamRenderTrackList(data) {
             var qk = (q.key || (q.artist + ' - ' + q.title)).trim();
             return qk === key || qk.toLowerCase() === keyLower;
         });
+        const downloadQueueList = shazamCurrentDownloadQueue || [];
+        const downloadQueueIdx = downloadQueueList.findIndex(function (k) {
+            return k === key || (k || '').toLowerCase() === keyLower;
+        });
         const inStarQueue = starQueueIdx >= 0;
         const inSearchQueue = searchQueueIdx >= 0;
         const inUnstarQueue = unstarQueueIdx >= 0;
+        const inDownloadQueue = downloadQueueIdx >= 0;
         const starQueuePos = inStarQueue ? starQueueIdx + 1 : 0;
         const starQueueTotal = (shazamCurrentStarQueue || []).length;
         const searchQueuePos = inSearchQueue ? searchQueueIdx + 1 : 0;
         const searchQueueTotal = (shazamCurrentSearchQueue || []).length;
         const unstarQueuePos = inUnstarQueue ? unstarQueueIdx + 1 : 0;
         const unstarQueueTotal = (shazamCurrentUnstarQueue || []).length;
-        const inAnyQueue = inStarQueue || inSearchQueue || inUnstarQueue;
+        const downloadQueuePos = inDownloadQueue ? downloadQueueIdx + 1 : 0;
+        const downloadQueueTotal = downloadQueueList.length;
+        const inAnyQueue = inStarQueue || inSearchQueue || inUnstarQueue || inDownloadQueue;
         const escapedKey = escapeHtml(key);
         const escapedArtist = escapeHtml(row.artist);
         const escapedTitle = escapeHtml(row.title);
@@ -2256,7 +2295,8 @@ function shazamRenderTrackList(data) {
             if (inStarQueue) parts.push('Star ' + starQueuePos + '/' + starQueueTotal);
             if (inSearchQueue) parts.push('Search ' + searchQueuePos + '/' + searchQueueTotal);
             if (inUnstarQueue) parts.push('Unstar ' + unstarQueuePos + '/' + unstarQueueTotal);
-            var queueLabel = parts.length > 1 ? parts.join(', ') : (inStarQueue ? ('Star queued ' + starQueuePos + '/' + starQueueTotal) : (inSearchQueue ? ('Search queued ' + searchQueuePos + '/' + searchQueueTotal) : ('Unstar queued ' + unstarQueuePos + '/' + unstarQueueTotal)));
+            if (inDownloadQueue) parts.push('Download ' + downloadQueuePos + '/' + downloadQueueTotal);
+            var queueLabel = parts.length > 1 ? parts.join(', ') : (inStarQueue ? ('Star queued ' + starQueuePos + '/' + starQueueTotal) : (inSearchQueue ? ('Search queued ' + searchQueuePos + '/' + searchQueueTotal) : (inUnstarQueue ? ('Unstar queued ' + unstarQueuePos + '/' + unstarQueueTotal) : ('Download queued ' + downloadQueuePos + '/' + downloadQueueTotal))));
             actionsCell += '<span class="shazam-queue-label">' + escapeHtml(queueLabel) + '</span>';
             if (inStarQueue) {
                 actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="star" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from star queue">\u00d7</button>';
@@ -2266,6 +2306,9 @@ function shazamRenderTrackList(data) {
             }
             if (inUnstarQueue) {
                 actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="unstar" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from unstar queue">\u00d7</button>';
+            }
+            if (inDownloadQueue) {
+                actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="download" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from download queue">\u00d7</button>';
             }
         } else {
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
@@ -2311,7 +2354,7 @@ function shazamRenderTrackList(data) {
     });
     html += '</tbody></table>';
     el.innerHTML = html;
-    if (selectionBar) selectionBar.style.display = filtered.some(r => r.status === 'todl') ? 'flex' : 'none';
+    if (selectionBar) selectionBar.style.display = 'none';
     shazamUpdateSelectionCount();
     shazamRestoreSyncProgress(progressCaptured);
 }
@@ -2650,16 +2693,16 @@ async function shazamClearDismissed(key) {
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
 }
 
-/** Remove this track from the star, search, or unstar queue. Updates local queue state and re-renders. */
+/** Remove this track from the star, search, unstar, or download queue. Updates local queue state and re-renders. */
 async function shazamRemoveFromQueue(btn) {
     if (!btn || !btn.dataset) return;
     const queue = (btn.dataset.queue || '').toLowerCase();
     const key = (btn.dataset.key || '').trim();
     const artist = (btn.dataset.artist || '').trim();
     const title = (btn.dataset.title || '').trim();
-    if (queue !== 'star' && queue !== 'search' && queue !== 'unstar') return;
-    const url = queue === 'star' ? '/api/shazam-sync/remove-from-star-queue' : (queue === 'search' ? '/api/shazam-sync/remove-from-search-queue' : '/api/shazam-sync/remove-from-unstar-queue');
-    const body = queue === 'star' ? { key: key || (artist + ' - ' + title) } : (queue === 'search' ? { artist: artist, title: title } : (key ? { key: key } : { artist: artist, title: title }));
+    if (queue !== 'star' && queue !== 'search' && queue !== 'unstar' && queue !== 'download') return;
+    const url = queue === 'star' ? '/api/shazam-sync/remove-from-star-queue' : (queue === 'search' ? '/api/shazam-sync/remove-from-search-queue' : (queue === 'unstar' ? '/api/shazam-sync/remove-from-unstar-queue' : '/api/shazam-sync/remove-from-download-queue'));
+    const body = queue === 'star' ? { key: key || (artist + ' - ' + title) } : (queue === 'search' ? { artist: artist, title: title } : (queue === 'download' ? { key: key || (artist + ' - ' + title) } : (key ? { key: key } : { artist: artist, title: title })));
     try {
         const res = await fetch(url, {
             method: 'POST',
@@ -2669,6 +2712,12 @@ async function shazamRemoveFromQueue(btn) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {
             alert(data.error || 'Failed to remove from queue');
+            return;
+        }
+        if (queue === 'download') {
+            shazamCurrentDownloadQueue = data.download_queue || [];
+            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
             return;
         }
         if (queue === 'star') {
@@ -2872,12 +2921,49 @@ function shazamToggleSelectAll(checkbox) {
 function shazamUpdateSelectionCount() {
     const checked = document.querySelectorAll('.shazam-track-cb:checked');
     const el = document.getElementById('shazamSelectedCount');
+    const selectionBar = document.getElementById('shazamSelectionBar');
     if (el) el.textContent = checked.length + ' selected';
+    if (selectionBar) selectionBar.style.display = checked.length > 0 ? 'flex' : 'none';
 }
 
 function shazamGetSelectedTracks() {
     const checked = document.querySelectorAll('.shazam-track-cb:checked');
     return Array.from(checked).map(cb => shazamToDownloadTracks[parseInt(cb.dataset.idx, 10)]).filter(Boolean);
+}
+
+async function shazamDownloadSelected() {
+    const tracks = shazamGetSelectedTracks();
+    if (!tracks.length) { alert('Select tracks first'); return; }
+    const urls = (shazamLastData && shazamLastData.urls) ? shazamLastData.urls : {};
+    const keys = tracks
+        .map(t => (t.artist || '') + ' - ' + (t.title || ''))
+        .filter(k => urls[k] || urls[k.toLowerCase()]);
+    if (!keys.length) {
+        alert('Selected tracks have no Soundeo link. Search first to get a link.');
+        return;
+    }
+    try {
+        const res = await fetch('/api/shazam-sync/download-queue', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ keys })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+            alert(data.error || 'Download failed');
+            return;
+        }
+        if (data.download_queue && Array.isArray(data.download_queue)) {
+            shazamCurrentDownloadQueue = data.download_queue;
+            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+        }
+        if (data.status === 'started') {
+            shazamShowSyncProgress(data.message || `Downloading ${keys.length} track(s)…`);
+            shazamStartDownloadPoll();
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
 }
 
 async function shazamSkipSelected() {
@@ -3152,7 +3238,7 @@ async function shazamStopSync() {
     } catch (e) { alert('Error: ' + e.message); }
 }
 
-/** Show/hide the batch jobs section (Running + Search queue + Star queue + Queued) so all are visible when applicable. */
+/** Show/hide the batch jobs section (Running + Search queue + Star queue + Unstar + Download queue + Queued) so all are visible when applicable. */
 function shazamUpdateBatchJobsSectionVisibility() {
     const section = document.getElementById('shazamBatchJobsSection');
     if (!section) return;
@@ -3161,11 +3247,13 @@ function shazamUpdateBatchJobsSectionVisibility() {
     const searchQueueBar = document.getElementById('shazamSingleSearchQueueBar');
     const starQueueBar = document.getElementById('shazamStarQueueBar');
     const unstarQueueBar = document.getElementById('shazamUnstarQueueBar');
+    const downloadQueueBar = document.getElementById('shazamDownloadQueueBar');
     const searchQueueVisible = searchQueueBar && searchQueueBar.style.display === 'flex';
     const starQueueVisible = starQueueBar && starQueueBar.style.display === 'flex';
     const unstarQueueVisible = unstarQueueBar && unstarQueueBar.style.display === 'flex';
+    const downloadQueueVisible = downloadQueueBar && downloadQueueBar.style.display === 'flex';
     const jobQueueVisible = shazamJobQueue.length > 0;
-    section.style.display = (progressVisible || searchQueueVisible || starQueueVisible || unstarQueueVisible || jobQueueVisible) ? 'flex' : 'none';
+    section.style.display = (progressVisible || searchQueueVisible || starQueueVisible || unstarQueueVisible || downloadQueueVisible || jobQueueVisible) ? 'flex' : 'none';
 }
 
 /** Set current queue state (globals + banners) so row "Queued 2/5" and queue bars stay in sync. */
@@ -3227,6 +3315,23 @@ function shazamRenderUnstarQueue(queue) {
         list.innerHTML = queue.map(function (q) {
             const label = (q.artist && q.title) ? (q.artist + ' – ' + q.title) : (q.artist || q.title || q.key || '…');
             return '<span class="shazam-job-queue-item">' + escapeHtml(label) + '</span>';
+        }).join('');
+    }
+    shazamUpdateBatchJobsSectionVisibility();
+}
+
+/** Render the download queue. queue = [ 'Artist - Title', ... ] (keys). */
+function shazamRenderDownloadQueue(queue) {
+    const bar = document.getElementById('shazamDownloadQueueBar');
+    const list = document.getElementById('shazamDownloadQueueList');
+    if (!bar || !list) return;
+    if (!queue || queue.length === 0) {
+        bar.style.display = 'none';
+        list.innerHTML = '';
+    } else {
+        bar.style.display = 'flex';
+        list.innerHTML = queue.map(function (key) {
+            return '<span class="shazam-job-queue-item">' + escapeHtml(key || '…') + '</span>';
         }).join('');
     }
     shazamUpdateBatchJobsSectionVisibility();
@@ -3465,8 +3570,12 @@ function shazamPollProgress() {
     fetch('/api/shazam-sync/progress').then(r => r.json()).then(p => {
         shazamCurrentProgress = p;
         shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
-        // Re-render track list whenever queue state changes so row-level "Star/Search/Unstar queued X/Y" and × stay in sync
-        if (shazamLastData && ((p.star_queue || []).length > 0 || (p.single_search_queue || []).length > 0 || (p.unstar_queue || []).length > 0)) {
+        if (p.download_queue && Array.isArray(p.download_queue)) {
+            shazamCurrentDownloadQueue = p.download_queue;
+            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+        }
+        // Re-render track list whenever queue state changes so row-level "Star/Search/Unstar/Download queued X/Y" and × stay in sync
+        if (shazamLastData && ((p.star_queue || []).length > 0 || (p.single_search_queue || []).length > 0 || (p.unstar_queue || []).length > 0 || (p.download_queue || []).length > 0)) {
             shazamRenderTrackList(shazamLastData);
         }
         const el = document.getElementById('shazamProgress');
@@ -3515,6 +3624,16 @@ function shazamPollProgress() {
         }
         if (p.urls) {
             Object.assign(shazamTrackUrls, p.urls);
+        }
+        // When no sync/search running but download queue has items, start the download worker (e.g. after Search finishes)
+        const dp = p.download_progress;
+        if (!p.running && (p.download_queue || []).length > 0 && !(dp && dp.running)) {
+            fetch('/api/shazam-sync/download-start-next', { method: 'POST' }).then(r => r.json()).then(function (d) {
+                if (d.started) {
+                    shazamShowSyncProgress('Downloading…');
+                    shazamStartDownloadPoll();
+                }
+            }).catch(function () {});
         }
         if (p.starred) {
             Object.assign(shazamStarred, p.starred);
@@ -3567,64 +3686,91 @@ function switchTab(tabId) {
     saveAppStateToStorage({ active_tab: tabId });
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    restoreAppState();
-    const savedTab = loadAppStateFromStorage().active_tab;
-    if (savedTab === 'shazam' || savedTab === 'mp3') {
-        switchTab(savedTab);
-    }
-    document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
-    });
-    const folderInput = document.getElementById('folderPath');
-    if (folderInput) {
-        folderInput.addEventListener('blur', () => {
-            const path = (folderInput.value || '').trim();
-            saveAppStateToStorage({ last_folder_path: path });
-        });
-    }
-    shazamBootstrapLoad();
-    const favoritesDropdownWrap = document.querySelector('.favorites-dropdown-wrap');
-    const favoritesDropdownBtn = document.getElementById('shazamFavoritesDropdownBtn');
-    const favoritesDropdownMenu = document.getElementById('shazamFavoritesDropdownMenu');
-    if (favoritesDropdownBtn && favoritesDropdownMenu) {
-        favoritesDropdownBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const open = favoritesDropdownWrap.classList.toggle('open');
-            favoritesDropdownBtn.setAttribute('aria-expanded', open);
-        });
-        favoritesDropdownMenu.querySelectorAll('.search-dropdown-item[data-scan-range]').forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.stopPropagation();
-                favoritesDropdownWrap.classList.remove('open');
-                favoritesDropdownBtn.setAttribute('aria-expanded', 'false');
-                shazamScanRange = item.dataset.scanRange || 'all';
-                shazamSyncFavoritesFromSoundeo();
+function showConnectionBanner() {
+    const el = document.getElementById('connectionBanner');
+    if (el) el.style.display = 'block';
+}
+
+function hideConnectionBanner() {
+    const el = document.getElementById('connectionBanner');
+    if (el) el.style.display = 'none';
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    try {
+        if (window.location.protocol === 'file:') {
+            showConnectionBanner();
+        } else {
+            fetch('/api/app-state', { method: 'GET' }).then(function (res) {
+                if (res.ok) hideConnectionBanner();
+                else showConnectionBanner();
+            }).catch(function () {
+                showConnectionBanner();
             });
-        });
-    }
-    const rescanDropdownWrap = document.querySelector('.rescan-dropdown-wrap');
-    const rescanDropdownBtn = document.getElementById('shazamRescanDropdownBtn');
-    const rescanDropdownMenu = document.getElementById('shazamRescanDropdownMenu');
-    if (rescanDropdownBtn && rescanDropdownMenu) {
-        rescanDropdownBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const open = rescanDropdownWrap.classList.toggle('open');
-            rescanDropdownBtn.setAttribute('aria-expanded', open);
-        });
-        rescanDropdownMenu.querySelectorAll('.search-dropdown-item[data-rescan-mode]').forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.stopPropagation();
-                rescanDropdownWrap.classList.remove('open');
-                rescanDropdownBtn.setAttribute('aria-expanded', 'false');
-                const mode = item.dataset.rescanMode;
-                if (mode === 'match_only') {
-                    shazamCompare();
-                } else {
-                    shazamRescan(mode === 'compare');
-                }
+        }
+        restoreAppState();
+        var savedTab = loadAppStateFromStorage().active_tab;
+        var tabToShow = (savedTab === 'shazam' || savedTab === 'mp3') ? savedTab : 'shazam';
+        switchTab(tabToShow);
+        var tabBtns = document.querySelectorAll('.tab-btn');
+        for (var i = 0; i < tabBtns.length; i++) {
+            (function (btn) {
+                btn.addEventListener('click', function () { switchTab(btn.dataset.tab); });
+            })(tabBtns[i]);
+        }
+        var folderInput = document.getElementById('folderPath');
+        if (folderInput) {
+            folderInput.addEventListener('blur', function () {
+                var path = (folderInput.value || '').trim();
+                saveAppStateToStorage({ last_folder_path: path });
             });
-        });
+        }
+        shazamBootstrapLoad();
+        var favoritesDropdownWrap = document.querySelector('.favorites-dropdown-wrap');
+        var favoritesDropdownBtn = document.getElementById('shazamFavoritesDropdownBtn');
+        var favoritesDropdownMenu = document.getElementById('shazamFavoritesDropdownMenu');
+        if (favoritesDropdownBtn && favoritesDropdownMenu) {
+            favoritesDropdownBtn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                if (favoritesDropdownWrap) favoritesDropdownWrap.classList.toggle('open');
+                favoritesDropdownBtn.setAttribute('aria-expanded', (favoritesDropdownWrap && favoritesDropdownWrap.classList.contains('open')) ? 'true' : 'false');
+            });
+            favoritesDropdownMenu.querySelectorAll('.search-dropdown-item[data-scan-range]').forEach(function (item) {
+                item.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    if (favoritesDropdownWrap) favoritesDropdownWrap.classList.remove('open');
+                    favoritesDropdownBtn.setAttribute('aria-expanded', 'false');
+                    shazamScanRange = item.dataset.scanRange || 'all';
+                    shazamSyncFavoritesFromSoundeo();
+                });
+            });
+        }
+        var rescanDropdownWrap = document.querySelector('.rescan-dropdown-wrap');
+        var rescanDropdownBtn = document.getElementById('shazamRescanDropdownBtn');
+        var rescanDropdownMenu = document.getElementById('shazamRescanDropdownMenu');
+        if (rescanDropdownBtn && rescanDropdownMenu) {
+            rescanDropdownBtn.addEventListener('click', function (e) {
+                e.stopPropagation();
+                if (rescanDropdownWrap) rescanDropdownWrap.classList.toggle('open');
+                rescanDropdownBtn.setAttribute('aria-expanded', (rescanDropdownWrap && rescanDropdownWrap.classList.contains('open')) ? 'true' : 'false');
+            });
+            rescanDropdownMenu.querySelectorAll('.search-dropdown-item[data-rescan-mode]').forEach(function (item) {
+                item.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    if (rescanDropdownWrap) rescanDropdownWrap.classList.remove('open');
+                    rescanDropdownBtn.setAttribute('aria-expanded', 'false');
+                    var mode = item.dataset.rescanMode;
+                    if (mode === 'match_only') {
+                        shazamCompare();
+                    } else {
+                        shazamRescan(mode === 'compare');
+                    }
+                });
+            });
+        }
+    } catch (err) {
+        console.error('MP3 Cleaner init error:', err);
+        showConnectionBanner();
     }
     document.querySelectorAll('.shazam-filter-btn[data-status]').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -3663,19 +3809,19 @@ document.addEventListener('DOMContentLoaded', () => {
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
         });
     }
-    const searchDropdownWrap = document.querySelector('.search-dropdown-wrap');
-    const searchDropdownBtn = document.getElementById('shazamSearchDropdownBtn');
-    const searchDropdownMenu = document.getElementById('shazamSearchDropdownMenu');
+    var searchDropdownWrap = document.querySelector('.search-dropdown-wrap');
+    var searchDropdownBtn = document.getElementById('shazamSearchDropdownBtn');
+    var searchDropdownMenu = document.getElementById('shazamSearchDropdownMenu');
     if (searchDropdownBtn && searchDropdownMenu) {
-        searchDropdownBtn.addEventListener('click', (e) => {
+        searchDropdownBtn.addEventListener('click', function (e) {
             e.stopPropagation();
-            const open = searchDropdownWrap.classList.toggle('open');
-            searchDropdownBtn.setAttribute('aria-expanded', open);
+            if (searchDropdownWrap) searchDropdownWrap.classList.toggle('open');
+            searchDropdownBtn.setAttribute('aria-expanded', (searchDropdownWrap && searchDropdownWrap.classList.contains('open')) ? 'true' : 'false');
         });
-        searchDropdownMenu.querySelectorAll('.search-dropdown-item').forEach(item => {
-            item.addEventListener('click', (e) => {
+        searchDropdownMenu.querySelectorAll('.search-dropdown-item').forEach(function (item) {
+            item.addEventListener('click', function (e) {
                 e.stopPropagation();
-                searchDropdownWrap.classList.remove('open');
+                if (searchDropdownWrap) searchDropdownWrap.classList.remove('open');
                 searchDropdownBtn.setAttribute('aria-expanded', 'false');
                 const mode = item.dataset.mode;
                 if (mode) shazamSearchAllOnSoundeo(mode);
@@ -3747,8 +3893,16 @@ async function shazamDownloadTrack(key) {
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             return;
         }
-        shazamShowSyncProgress(data.message || 'Downloading…');
-        shazamStartDownloadPoll();
+        if (data.download_queue && Array.isArray(data.download_queue)) {
+            shazamCurrentDownloadQueue = data.download_queue;
+            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+        }
+        if (data.status === 'started') {
+            shazamShowSyncProgress(data.message || 'Downloading…');
+            shazamStartDownloadPoll();
+        }
+        delete shazamActionPending[key];
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
     } catch (e) {
         delete shazamActionPending[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
@@ -3790,6 +3944,10 @@ async function shazamShowDownloadLog() {
 
 function shazamPollDownloadProgress() {
     fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
+        if (data.download_queue && Array.isArray(data.download_queue)) {
+            shazamCurrentDownloadQueue = data.download_queue;
+            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+        }
         const dp = data.download_progress;
         const el = document.getElementById('shazamProgress');
         if (el && dp) {
@@ -3839,8 +3997,14 @@ async function shazamDownloadAllToDownload() {
             alert(data.error || 'Download failed');
             return;
         }
-        shazamShowSyncProgress(data.message || `Downloading ${keys.length} tracks…`);
-        shazamStartDownloadPoll();
+        if (data.download_queue && Array.isArray(data.download_queue)) {
+            shazamCurrentDownloadQueue = data.download_queue;
+            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+        }
+        if (data.status === 'started') {
+            shazamShowSyncProgress(data.message || `Downloading ${keys.length} tracks…`);
+            shazamStartDownloadPoll();
+        }
     } catch (e) {
         alert('Error: ' + e.message);
     }

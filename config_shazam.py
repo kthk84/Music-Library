@@ -64,6 +64,12 @@ def _migrate_user_to_project_config() -> None:
             pass
 
 
+def get_config_path() -> str:
+    """Return the path to the config file actually used (for UI/debug)."""
+    _migrate_user_to_project_config()
+    return _resolve_config_path()
+
+
 def load_config() -> dict:
     _migrate_user_to_project_config()
     path = _resolve_config_path()

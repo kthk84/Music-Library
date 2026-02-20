@@ -829,11 +829,12 @@ def browse_folder():
 @app.route('/api/shazam-sync/bootstrap', methods=['GET'])
 def shazam_bootstrap():
     """Return settings + status in one call for fast initial load."""
-    from config_shazam import load_config, get_soundeo_cookies_path, get_destination_folders_raw, get_soundeo_download_folder
+    from config_shazam import load_config, get_config_path, get_soundeo_cookies_path, get_destination_folders_raw, get_soundeo_download_folder
     settings = dict(load_config())
     settings['soundeo_cookies_path_resolved'] = get_soundeo_cookies_path()
     settings['destination_folders_raw'] = get_destination_folders_raw()
     settings['soundeo_download_folder'] = get_soundeo_download_folder()
+    settings['config_path'] = get_config_path()
     settings.update(_get_soundeo_chrome_profile_info())
     status = _get_best_available_status()
     status['compare_running'] = getattr(app, '_shazam_compare_running', False)
@@ -862,12 +863,14 @@ def _get_soundeo_chrome_profile_info():
 
 @app.route('/api/settings', methods=['GET'])
 def get_settings():
-    """Return Shazam-Soundeo sync settings."""
-    from config_shazam import load_config, get_destination_folders_raw, get_soundeo_download_folder
+    """Return Shazam-Soundeo sync settings (same shape as bootstrap settings for fallback)."""
+    from config_shazam import load_config, get_config_path, get_soundeo_cookies_path, get_destination_folders_raw, get_soundeo_download_folder
     out = dict(load_config())
-    out.update(_get_soundeo_chrome_profile_info())
+    out['soundeo_cookies_path_resolved'] = get_soundeo_cookies_path()
     out['destination_folders_raw'] = get_destination_folders_raw()
     out['soundeo_download_folder'] = get_soundeo_download_folder()
+    out['config_path'] = get_config_path()
+    out.update(_get_soundeo_chrome_profile_info())
     return jsonify(out)
 
 
@@ -1492,6 +1495,14 @@ def _get_best_available_status():
             out["not_found"] = nf
         return out
 
+    def _apply_dot_state_from_log(out: Dict) -> Dict:
+        """Apply urls/not_found from the given status's search_outcomes (or keep existing). Used when we already have merged partial from file."""
+        out = dict(out)
+        urls, nf = get_urls_and_not_found_from_log(out)
+        out["urls"] = urls
+        out["not_found"] = nf
+        return out
+
     if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status and not _status_is_stale(app._shazam_sync_status):
         out = _sanitize_have_locally_filepaths(dict(app._shazam_sync_status))
         out = _apply_dot_state_from_file(out)
@@ -1581,6 +1592,13 @@ def shazam_sync_status():
     if download_progress:
         out['download_progress'] = download_progress
         out['download_log_path'] = _get_soundeo_download_log_path()
+    # Download queue: pending keys + current (when running) so UI can show "Download queue: ..."
+    download_pending = list(getattr(app, '_shazam_download_pending_queue', None) or [])
+    if download_progress and download_progress.get('running'):
+        current_queue = download_progress.get('queue') or []
+        out['download_queue'] = list(current_queue) + download_pending
+    else:
+        out['download_queue'] = download_pending
     resp = jsonify(out)
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return resp
@@ -2289,6 +2307,12 @@ def shazam_sync_progress():
     download_progress = getattr(app, '_shazam_download_progress', None)
     if download_progress:
         out['download_progress'] = download_progress
+    download_pending = list(getattr(app, '_shazam_download_pending_queue', None) or [])
+    if download_progress and download_progress.get('running'):
+        current_queue = download_progress.get('queue') or []
+        out['download_queue'] = list(current_queue) + download_pending
+    else:
+        out['download_queue'] = download_pending
     return jsonify(out)
 
 
@@ -2444,41 +2468,89 @@ def _run_download_queue_worker():
         if last_failed:
             app._shazam_download_progress['error'] = last_failed.get('error', 'Download failed')
     dlog.info("download_queue: finished done=%s failed=%s", done, failed)
+    # Start next in queue if any (one-by-one)
+    if not no_credits:
+        _shazam_download_start_next()
+
+
+def _shazam_download_pending_append(key: str) -> list:
+    """Append key to download pending queue (dedupe); return current list. Caller holds no lock."""
+    if not hasattr(app, '_shazam_download_pending_queue'):
+        app._shazam_download_pending_queue = []
+    if not hasattr(app, '_shazam_download_queue_lock'):
+        app._shazam_download_queue_lock = threading.Lock()
+    with app._shazam_download_queue_lock:
+        q = getattr(app, '_shazam_download_pending_queue', None) or []
+        if key not in q:
+            q.append(key)
+            app._shazam_download_pending_queue = q
+        return list(app._shazam_download_pending_queue)
+
+
+def _shazam_download_full_queue() -> list:
+    """Return full download queue for API: current (when running) + pending."""
+    progress = getattr(app, '_shazam_download_progress', None)
+    pending = list(getattr(app, '_shazam_download_pending_queue', None) or [])
+    if progress and progress.get('running'):
+        current = list(progress.get('queue') or [])
+        return current + pending
+    return pending
+
+
+def _shazam_download_start_next() -> bool:
+    """If download not running and no other job, pop one from pending and start worker. Returns True if started."""
+    if _shazam_any_job_running():
+        return False
+    lock = getattr(app, '_shazam_download_queue_lock', None)
+    if not lock:
+        return False
+    with lock:
+        pending = getattr(app, '_shazam_download_pending_queue', None) or []
+        if not pending:
+            return False
+        key = pending.pop(0)
+        app._shazam_download_pending_queue = pending
+    if not getattr(app, '_shazam_download_progress', None):
+        app._shazam_download_progress = {}
+    app._shazam_download_progress.update({
+        'running': True, 'queue': [key], 'done': 0, 'failed': 0, 'total': 1,
+        'current_key': key, 'message': f'Downloading: {key[:50]}...', 'results': [],
+    })
+    thread = threading.Thread(target=_run_download_queue_worker, daemon=True)
+    thread.start()
+    return True
 
 
 @app.route('/api/shazam-sync/download-track', methods=['POST'])
 def shazam_sync_download_track():
-    """Download AIFF for one track (per-row). Body: { key: 'Artist - Title' }. Must have Soundeo URL and download folder set."""
-    from config_shazam import get_soundeo_download_folder, get_soundeo_cookies_path
-    from soundeo_automation import soundeo_download_aiff
-    from shazam_cache import load_status_cache, save_status_cache
+    """Download AIFF for one track (per-row). Body: { key: 'Artist - Title' }. Adds to queue; runs one-by-one. Queued if another op is running."""
+    from config_shazam import get_soundeo_download_folder
+    from shazam_cache import load_status_cache
     data = request.get_json() or {}
     key = (data.get('key') or '').strip()
     if not key:
         return jsonify({'error': 'Missing key'}), 400
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
     urls = status.get('urls') or {}
-    track_url = urls.get(key) or urls.get(key.lower())
-    if not track_url:
+    if not (urls.get(key) or urls.get((key or '').lower())):
         return jsonify({'error': 'No Soundeo URL for this track'}), 400
     dest_dir = get_soundeo_download_folder()
     if not dest_dir or not os.path.isdir(dest_dir):
         return jsonify({'error': 'Download folder not set. Choose one in Settings.'}), 400
-    if _shazam_any_job_running():
-        return jsonify({'error': 'Another operation is running.'}), 400
-    cookies_path = get_soundeo_cookies_path()
-    app._shazam_download_progress = {
-        'running': True, 'queue': [key], 'done': 0, 'failed': 0, 'total': 1,
-        'current_key': key, 'message': f'Downloading: {key[:50]}...', 'results': [],
-    }
-    thread = threading.Thread(target=_run_download_queue_worker, daemon=True)
-    thread.start()
-    return jsonify({'running': True, 'message': 'Downloading...'})
+    _shazam_download_pending_append(key)
+    started = _shazam_download_start_next()
+    download_queue = _shazam_download_full_queue()
+    return jsonify({
+        'ok': True,
+        'status': 'started' if started else 'queued',
+        'message': 'Downloading...' if started else f'Download queued ({len(download_queue)} in queue)',
+        'download_queue': download_queue,
+    })
 
 
 @app.route('/api/shazam-sync/download-queue', methods=['POST'])
 def shazam_sync_download_queue():
-    """Queue bulk download (sequential). Body: { keys: ['Artist - Title', ...] }. Only keys with Soundeo URL are queued."""
+    """Queue bulk download (one-by-one). Body: { keys: ['Artist - Title', ...] }. Adds to pending queue; only keys with Soundeo URL."""
     from config_shazam import get_soundeo_download_folder
     from shazam_cache import load_status_cache
     data = request.get_json() or {}
@@ -2488,26 +2560,51 @@ def shazam_sync_download_queue():
     dest_dir = get_soundeo_download_folder()
     if not dest_dir or not os.path.isdir(dest_dir):
         return jsonify({'error': 'Download folder not set. Choose one in Settings.'}), 400
-    if _shazam_any_job_running():
-        return jsonify({'error': 'Another operation is running.'}), 400
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
     urls = status.get('urls') or {}
-    # Deduplicate by key (first occurrence wins) so same track isn't downloaded multiple times
-    seen = set()
-    queue = []
     for k in keys:
-        if (urls.get(k) or urls.get((k or '').lower())) and k not in seen:
-            seen.add(k)
-            queue.append(k)
-    if not queue:
+        if urls.get(k) or urls.get((k or '').lower()):
+            _shazam_download_pending_append(k)
+    download_queue = _shazam_download_full_queue()
+    if not download_queue:
         return jsonify({'error': 'No tracks with Soundeo URL in the list'}), 400
-    app._shazam_download_progress = {
-        'running': True, 'queue': queue, 'done': 0, 'failed': 0, 'total': len(queue),
-        'current_key': queue[0], 'message': f'Downloading 1/{len(queue)}...', 'results': [],
-    }
-    thread = threading.Thread(target=_run_download_queue_worker, daemon=True)
-    thread.start()
-    return jsonify({'running': True, 'total': len(queue), 'message': f'Downloading {len(queue)} tracks...'})
+    started = _shazam_download_start_next()
+    return jsonify({
+        'ok': True,
+        'status': 'started' if started else 'queued',
+        'total': len(download_queue),
+        'message': f'Downloading {len(download_queue)} tracks...' if started else f'Download queued ({len(download_queue)} in queue)',
+        'download_queue': download_queue,
+    })
+
+
+@app.route('/api/shazam-sync/remove-from-download-queue', methods=['POST'])
+def shazam_remove_from_download_queue():
+    """Remove one key from the download pending queue. Body: { key: 'Artist - Title' }. Cannot remove the track currently downloading."""
+    try:
+        data = request.get_json(silent=True) or {}
+        key = (data.get('key') or '').strip()
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not key:
+        return jsonify({'error': 'Missing key'}), 400
+    lock = getattr(app, '_shazam_download_queue_lock', None)
+    if not lock or not hasattr(app, '_shazam_download_pending_queue'):
+        return jsonify({'ok': True, 'download_queue': []})
+    key_lower = key.lower()
+    with lock:
+        pending = list(getattr(app, '_shazam_download_pending_queue', None) or [])
+        new_pending = [k for k in pending if k != key and (k or '').lower() != key_lower]
+        app._shazam_download_pending_queue = new_pending
+    download_queue = _shazam_download_full_queue()
+    return jsonify({'ok': True, 'download_queue': download_queue})
+
+
+@app.route('/api/shazam-sync/download-start-next', methods=['POST'])
+def shazam_sync_download_start_next():
+    """Start the next download from the pending queue if no job is running. Called by frontend when e.g. Search finishes and download queue has items."""
+    started = _shazam_download_start_next()
+    return jsonify({'ok': True, 'started': started})
 
 
 @app.route('/api/shazam-sync/download-log', methods=['GET'])

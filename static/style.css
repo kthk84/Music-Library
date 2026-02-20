@@ -90,6 +90,18 @@ body {
     padding: var(--sp-6) var(--sp-4);
 }
 
+.connection-banner {
+    margin-bottom: var(--sp-4);
+    padding: var(--sp-3) var(--sp-4);
+    background: var(--warn-bg);
+    border: 1px solid var(--warn);
+    border-radius: var(--r-md);
+    color: var(--text);
+    font-size: var(--text-sm);
+}
+.connection-banner a { color: var(--accent); font-weight: 500; }
+.connection-banner code { font-size: var(--text-xs); background: var(--bg-tertiary); padding: 2px 6px; border-radius: var(--r-sm); }
+
 /* ========== Header (merged with tabs) ========== */
 header {
     display: flex;
@@ -690,10 +702,11 @@ button[onclick*="revertLookup"] {
     align-items: center;
     flex-direction: column;
     z-index: 1000;
+    pointer-events: none;
 }
-
 .loading-overlay.active {
     display: flex;
+    pointer-events: auto;
 }
 
 .spinner {
@@ -1173,17 +1186,17 @@ button[onclick*="revertLookup"] {
 }
 
 /* Batch jobs: one section for Running + Queued so both are visible together */
-/* Fixed overlay at very top of viewport so it never takes layout space → no page jump when it appears */
+/* Fixed overlay below header so it never takes layout space and does not cover Tags/Sync tabs */
 .shazam-batch-jobs-section {
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
     position: fixed;
-    top: 0;
+    top: 6rem; /* below header + container padding so Tags/Sync tabs stay clickable */
     left: 0;
     right: 0;
     z-index: 100;
-    background: var(--bg-primary);
+    background: var(--bg);
     padding: var(--sp-2) var(--sp-4) var(--sp-1);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
     max-width: 1400px;
@@ -1530,7 +1543,14 @@ button[onclick*="revertLookup"] {
     border-bottom-color: var(--accent);
 }
 
-/* ========== Selection actions (inline with filters) ========== */
+/* ========== Selection actions (row under filter bar) ========== */
+.selection-actions-row {
+    display: flex;
+    align-items: center;
+    padding: var(--sp-2) 0;
+    margin-bottom: var(--sp-2);
+}
+
 .selection-actions {
     display: flex;
     align-items: center;

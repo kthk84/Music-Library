@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MP3 Cleaner</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=5">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=6">
 </head>
 <body>
     <!-- Action progress bar: fixed at viewport top, only visible on Sync tab when there is progress/queue (outside .container so position:fixed is viewport-relative) -->
@@ -28,6 +28,10 @@
             <span class="shazam-job-queue-label">Unstar queue:</span>
             <div id="shazamUnstarQueueList" class="shazam-job-queue-list"></div>
         </div>
+        <div id="shazamDownloadQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+            <span class="shazam-job-queue-label">Download queue:</span>
+            <div id="shazamDownloadQueueList" class="shazam-job-queue-list"></div>
+        </div>
         <div id="shazamJobQueueBar" class="shazam-job-queue-bar" style="display:none;">
             <span class="shazam-job-queue-label">Queued:</span>
             <div id="shazamJobQueueList" class="shazam-job-queue-list"></div>
@@ -50,16 +54,19 @@
     </svg>
 
     <div class="container">
+        <div id="connectionBanner" class="connection-banner" style="display:none;" role="alert">
+            <strong>Not connected to server.</strong> Open this app at <a href="http://127.0.0.1:5002" target="_blank" rel="noopener">http://127.0.0.1:5002</a> and ensure the server is running (<code>python3 app.py</code>). Buttons and tracks will not work until connected.
+        </div>
         <header>
             <h1>MP3 Cleaner</h1>
             <nav class="tab-nav" role="tablist" aria-label="Main sections">
-                <button type="button" id="tab-btn-mp3" class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-panel-mp3" data-tab="mp3">Tags</button>
-                <button type="button" id="tab-btn-shazam" class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-panel-shazam" data-tab="shazam">Sync</button>
+                <button type="button" id="tab-btn-mp3" class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-panel-mp3" data-tab="mp3">Tags</button>
+                <button type="button" id="tab-btn-shazam" class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-panel-shazam" data-tab="shazam">Sync</button>
             </nav>
         </header>
 
         <!-- Tab: MP3 Tags (clean & organize) -->
-        <div id="tab-panel-mp3" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-mp3">
+        <div id="tab-panel-mp3" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-mp3">
         <!-- Step 1: Folder selection -->
         <section id="step1" class="step active">
             <h2>Select folder</h2>
@@ -128,7 +135,7 @@
         </div>
 
         <!-- Tab: Sync -->
-        <div id="tab-panel-shazam" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-shazam">
+        <div id="tab-panel-shazam" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-shazam">
         <section id="shazamSync" class="step active shazam-sync-section">
 
             <details class="settings-panel">
@@ -150,6 +157,7 @@
                         <button type="button" onclick="shazamCheckBrowser()" class="btn btn-small" title="Diagnose why browser may not open">Check browser</button>
                     </div>
                     <p id="soundeoSessionPath" class="folder-hint" style="display:none;"></p>
+                    <p id="configPathHint" class="folder-hint config-path-hint" style="display:none;"></p>
                 </div>
             </details>
 
@@ -173,7 +181,6 @@
                     </div>
                 </div>
                 <div class="toolbar-divider"></div>
-                <button type="button" onclick="shazamDownloadAllToDownload()" class="btn btn-secondary btn-small" title="Download AIFF for all to-download tracks that have a Soundeo link">Download</button>
                 <div class="favorites-dropdown-wrap toolbar-group">
                     <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Sync starred state from Soundeo" aria-haspopup="true" aria-expanded="false">
                         Sync starred <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
@@ -222,11 +229,13 @@
                     <button type="button" class="btn btn-small shazam-filter-time-btn" data-time-range="1_month">Last month</button>
                     <button type="button" class="btn btn-small shazam-filter-time-btn" data-time-range="3_months">Last quarter</button>
                 </div>
-                <div id="shazamSelectionBar" class="selection-actions" style="display:none;">
-                    <span id="shazamSelectedCount">0 selected</span>
-                    <button type="button" onclick="shazamSkipSelected()" class="btn btn-secondary btn-small">Skip</button>
-                    <button type="button" onclick="shazamStarSelected()" class="btn btn-primary btn-small btn-has-icon" title="Star selected tracks on Soundeo (tracks must have a link)"><span class="shazam-btn-icon" aria-hidden="true">★</span>Star</button>
-                </div>
+            </div>
+
+            <div id="shazamSelectionBar" class="selection-actions-row selection-actions" style="display:none;">
+                <span id="shazamSelectedCount">0 selected</span>
+                <button type="button" onclick="shazamDownloadSelected()" class="btn btn-secondary btn-small" title="Download AIFF for selected tracks (must have Soundeo link)">Download</button>
+                <button type="button" onclick="shazamSkipSelected()" class="btn btn-secondary btn-small">Skip</button>
+                <button type="button" onclick="shazamStarSelected()" class="btn btn-primary btn-small btn-has-icon" title="Star selected tracks on Soundeo (tracks must have a link)"><span class="shazam-btn-icon" aria-hidden="true">★</span>Star</button>
             </div>
 
             <div id="shazamTrackList" class="shazam-track-list"></div>
@@ -268,6 +277,17 @@
     <!-- Context menu for play button (Open file location / Open on Soundeo) -->
     <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=10"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=12"></script>
+<script>
+(function() {
+    if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {
+        var el = document.getElementById('connectionBanner');
+        if (el) {
+            el.innerHTML = '<strong>JavaScript failed to load or run.</strong> Open this app at <a href="http://127.0.0.1:5002">http://127.0.0.1:5002</a>, ensure the server is running (<code>python3 app.py</code>), and do a hard refresh (Ctrl+Shift+R / Cmd+Shift+R).';
+            el.style.display = 'block';
+        }
+    }
+})();
+</script>
 </body>
 </html>
