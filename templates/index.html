@@ -7,38 +7,6 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=6">
 </head>
 <body>
-    <!-- Action progress bar: fixed at viewport top, only visible on Sync tab when there is progress/queue (outside .container so position:fixed is viewport-relative) -->
-    <div id="shazamBatchJobsSection" class="shazam-batch-jobs-section" style="display:none;">
-        <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack(event)" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
-            <span class="shazam-running-label">Running:</span>
-            <span id="shazamProgress" class="shazam-progress-text"></span>
-            <button type="button" id="shazamProgressGotoBtn" class="btn btn-small btn-secondary shazam-progress-goto-btn" style="display:none;" onclick="event.stopPropagation(); shazamScrollToCurrentTrack();">Follow row</button>
-            <button type="button" id="shazamDownloadViewLogBtn" class="btn btn-small btn-secondary" style="display:none;" onclick="event.stopPropagation(); shazamShowDownloadLog();" title="View last lines of soundeo_download.log">View log</button>
-            <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-small btn-danger">Stop</button>
-        </div>
-        <div id="shazamSingleSearchQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
-            <span id="shazamSingleQueueBarLabel" class="shazam-job-queue-label">Search queue:</span>
-            <div id="shazamSingleSearchQueueList" class="shazam-job-queue-list"></div>
-        </div>
-        <div id="shazamStarQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
-            <span class="shazam-job-queue-label">Star queue:</span>
-            <div id="shazamStarQueueList" class="shazam-job-queue-list"></div>
-        </div>
-        <div id="shazamUnstarQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
-            <span class="shazam-job-queue-label">Unstar queue:</span>
-            <div id="shazamUnstarQueueList" class="shazam-job-queue-list"></div>
-        </div>
-        <div id="shazamDownloadQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
-            <span class="shazam-job-queue-label">Download queue:</span>
-            <div id="shazamDownloadQueueList" class="shazam-job-queue-list"></div>
-        </div>
-        <div id="shazamJobQueueBar" class="shazam-job-queue-bar" style="display:none;">
-            <span class="shazam-job-queue-label">Queued:</span>
-            <div id="shazamJobQueueList" class="shazam-job-queue-list"></div>
-            <button type="button" id="shazamJobQueueClearBtn" class="btn btn-small btn-secondary" onclick="shazamClearJobQueue()" title="Clear all queued jobs">Clear queue</button>
-        </div>
-    </div>
-
     <!-- Icon definitions (hidden) -->
     <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;">
         <symbol id="icon-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>
@@ -136,6 +104,37 @@
 
         <!-- Tab: Sync -->
         <div id="tab-panel-shazam" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-shazam">
+        <!-- Queue/progress bars: sticky at top of Sync content so they stay above the track list when scrolling -->
+        <div id="shazamBatchJobsSection" class="shazam-batch-jobs-section" style="display:none;">
+            <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack(event)" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
+                <span class="shazam-running-label">Running:</span>
+                <span id="shazamProgress" class="shazam-progress-text"></span>
+                <button type="button" id="shazamProgressGotoBtn" class="btn btn-small btn-secondary shazam-progress-goto-btn" style="display:none;" onclick="event.stopPropagation(); shazamScrollToCurrentTrack();">Follow row</button>
+                <button type="button" id="shazamDownloadViewLogBtn" class="btn btn-small btn-secondary" style="display:none;" onclick="event.stopPropagation(); shazamShowDownloadLog();" title="View last lines of soundeo_download.log">View log</button>
+                <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-danger">Stop</button>
+            </div>
+            <div id="shazamSingleSearchQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+                <span id="shazamSingleQueueBarLabel" class="shazam-job-queue-label">Search queue:</span>
+                <div id="shazamSingleSearchQueueList" class="shazam-job-queue-list"></div>
+            </div>
+            <div id="shazamStarQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+                <span class="shazam-job-queue-label">Star queue:</span>
+                <div id="shazamStarQueueList" class="shazam-job-queue-list"></div>
+            </div>
+            <div id="shazamUnstarQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+                <span class="shazam-job-queue-label">Unstar queue:</span>
+                <div id="shazamUnstarQueueList" class="shazam-job-queue-list"></div>
+            </div>
+            <div id="shazamDownloadQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+                <span class="shazam-job-queue-label">Download queue:</span>
+                <div id="shazamDownloadQueueList" class="shazam-job-queue-list"></div>
+            </div>
+            <div id="shazamJobQueueBar" class="shazam-job-queue-bar" style="display:none;">
+                <span class="shazam-job-queue-label">Queued:</span>
+                <div id="shazamJobQueueList" class="shazam-job-queue-list"></div>
+                <button type="button" id="shazamJobQueueClearBtn" class="btn btn-small btn-secondary" onclick="shazamClearJobQueue()" title="Clear all queued jobs">Clear queue</button>
+            </div>
+        </div>
         <section id="shazamSync" class="step active shazam-sync-section">
 
             <details class="settings-panel">
@@ -277,7 +276,7 @@
     <!-- Context menu for play button (Open file location / Open on Soundeo) -->
     <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=12"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=13"></script>
 <script>
 (function() {
     if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {

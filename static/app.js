@@ -1942,6 +1942,8 @@ function shazamFormatRelativeTime(unixSec) {
 let shazamToDownloadTracks = [];
 let shazamLastData = null;
 let shazamFilterTime = 'all';
+const SHAZAM_FILTER_STATUS_KEY = 'mp3cleaner_shazam_filter_status';
+const SHAZAM_FILTER_STATUS_VALUES = ['all', 'have', 'todl', 'skipped', 'ignored'];
 let shazamFilterStatus = 'all';
 let shazamFilterSearch = '';
 /** Scan Soundeo favorites range: 'all' | '1_month' | '2_months' | '3_months'. Use All time to fix starred state. */
@@ -2136,7 +2138,7 @@ function shazamRenderTrackList(data) {
     const hasSkipped = filtered.some(r => r.status === 'skipped');
     html += '<table class="shazam-track-table"><thead><tr><th></th><th>When</th><th>Artist</th><th>Title</th><th class="shazam-match-col">Match</th>';
     html += '<th></th><th></th><th>Actions</th>';
-    html += '<th class="shazam-select-col">' + (hasTodl ? '<input type="checkbox" id="shazamSelectAll" onchange="shazamToggleSelectAll(this)" title="Select all" />' : '') + '</th>';
+    html += '<th class="shazam-select-col">' + (hasTodl ? '<input type="checkbox" id="shazamSelectAll" onchange="shazamToggleSelectAll(this)" title="Select all" />' : '<span aria-hidden="true" style="display:inline-block;width:18px;height:18px;"></span>') + '</th>';
     html += '</tr></thead><tbody>';
     filtered.forEach((row, i) => {
         const when = shazamFormatRelativeTime(row.shazamed_at);
@@ -2289,7 +2291,7 @@ function shazamRenderTrackList(data) {
         const starToggleSvg = (starred && !isDismissed) ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>' : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
         const starToggleDataAttrs = (starToggleAction === 'star') ? ` data-track-url="${safeAttr(url || '')}"` : ` data-url="${safeAttr(url || '')}"`;
 
-        let actionsCell = '<td class="shazam-actions-col">';
+        let actionsCell = '<td class="shazam-actions-col"><span class="shazam-queue-slot">';
         if (inAnyQueue) {
             var parts = [];
             if (inStarQueue) parts.push('Star ' + starQueuePos + '/' + starQueueTotal);
@@ -2310,7 +2312,9 @@ function shazamRenderTrackList(data) {
             if (inDownloadQueue) {
                 actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="download" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from download queue">\u00d7</button>';
             }
-        } else {
+        }
+        actionsCell += '</span>';
+        if (!inAnyQueue) {
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
             const downloadInactive = (row.status === 'have' || row.status === 'skipped' || !url) ? inactive : '';
             const downloadTitle = row.status === 'have' ? 'Have locally (download not needed)' : row.status === 'skipped' ? 'Skipped' : !url ? 'No Soundeo link' : 'Download AIFF';
@@ -3772,11 +3776,25 @@ document.addEventListener('DOMContentLoaded', function () {
         console.error('MP3 Cleaner init error:', err);
         showConnectionBanner();
     }
+    (function () {
+        try {
+            const saved = localStorage.getItem(SHAZAM_FILTER_STATUS_KEY);
+            if (saved && SHAZAM_FILTER_STATUS_VALUES.includes(saved)) {
+                shazamFilterStatus = saved;
+                document.querySelectorAll('.shazam-filter-btn[data-status]').forEach(b => {
+                    b.classList.toggle('active', b.dataset.status === saved);
+                });
+            }
+        } catch (e) { /* ignore */ }
+    })();
     document.querySelectorAll('.shazam-filter-btn[data-status]').forEach(btn => {
         btn.addEventListener('click', () => {
             document.querySelectorAll('.shazam-filter-btn[data-status]').forEach(b => b.classList.remove('active'));
             btn.classList.add('active');
             shazamFilterStatus = btn.dataset.status;
+            try {
+                localStorage.setItem(SHAZAM_FILTER_STATUS_KEY, shazamFilterStatus);
+            } catch (e) { /* ignore */ }
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
         });
     });
@@ -3898,7 +3916,11 @@ async function shazamDownloadTrack(key) {
             shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
         }
         if (data.status === 'started') {
-            shazamShowSyncProgress(data.message || 'Downloading…');
+            var msg = data.message || 'Downloading…';
+            if (shazamCurrentDownloadQueue.length > 0) {
+                msg = 'Downloading 1/' + shazamCurrentDownloadQueue.length + (data.message ? ': ' + data.message : '…');
+            }
+            shazamShowSyncProgress(msg);
             shazamStartDownloadPoll();
         }
         delete shazamActionPending[key];
@@ -3951,8 +3973,12 @@ function shazamPollDownloadProgress() {
         const dp = data.download_progress;
         const el = document.getElementById('shazamProgress');
         if (el && dp) {
+            var queueLen = (data.download_queue && data.download_queue.length) ? data.download_queue.length : (dp.total || 0);
             if (dp.running) {
-                el.textContent = dp.message || `Downloading ${(dp.done || 0)}/${dp.total || 0}…`;
+                var total = Math.max(queueLen || 0, dp.total || 0) || 1;
+                var current = (dp.done || 0) + 1;
+                var trackSuffix = (dp.current_key ? ': ' + (dp.current_key.length > 50 ? dp.current_key.slice(0, 50) + '…' : dp.current_key) : '');
+                el.textContent = 'Downloading ' + current + '/' + total + trackSuffix;
                 const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
                 if (viewLogBtn) viewLogBtn.style.display = 'none';
             } else {

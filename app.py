@@ -2510,11 +2510,21 @@ def _shazam_download_start_next() -> bool:
             return False
         key = pending.pop(0)
         app._shazam_download_pending_queue = pending
+        remaining = len(pending)
+    prev = getattr(app, '_shazam_download_progress', None) or {}
+    # Full batch size: this item + remaining in queue
+    batch_total = 1 + remaining
+    # When continuing after a previous run (e.g. second of two), preserve done/failed and keep total = full batch
+    prev_done = prev.get('done', 0)
+    prev_failed = prev.get('failed', 0)
+    prev_total = prev.get('total', 0)
+    total = max(prev_total, batch_total) if (prev_done or prev_failed) else batch_total
     if not getattr(app, '_shazam_download_progress', None):
         app._shazam_download_progress = {}
+    prev_results = list(prev.get('results') or [])
     app._shazam_download_progress.update({
-        'running': True, 'queue': [key], 'done': 0, 'failed': 0, 'total': 1,
-        'current_key': key, 'message': f'Downloading: {key[:50]}...', 'results': [],
+        'running': True, 'queue': [key], 'done': prev_done, 'failed': prev_failed, 'total': total,
+        'current_key': key, 'message': f'Downloading {prev_done + 1}/{total}: {key[:50]}...', 'results': prev_results,
     })
     thread = threading.Thread(target=_run_download_queue_worker, daemon=True)
     thread.start()
@@ -3554,6 +3564,8 @@ def shazam_sync_dismiss_track():
 
     status.setdefault('dismissed', {})
     status['dismissed'][key] = True
+    if key and key.lower() != key:
+        status['dismissed'][key.lower()] = True
     status.setdefault('starred', {})
     status['starred'][key] = False
     app._shazam_sync_status = status
@@ -3722,7 +3734,7 @@ def shazam_sync_unstar_track():
 def shazam_sync_clear_dismissed():
     """Clear dismissed state for a track so the link shows again (no strikethrough). Does not change starred on Soundeo.
     Body: { key }."""
-    from shazam_cache import save_status_cache
+    from shazam_cache import save_status_cache, load_status_cache
 
     try:
         data = request.get_json(silent=True) or {}
@@ -3732,7 +3744,7 @@ def shazam_sync_clear_dismissed():
     if not key:
         return jsonify({'error': 'Missing track key'}), 400
 
-    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
     dismissed = dict(status.get('dismissed') or {})
     dismissed.pop(key, None)
     dismissed.pop(key.lower(), None)
@@ -3918,8 +3930,10 @@ def shazam_sync_undismiss_track():
         if verify_url:
             _verify_soundeo_favorite_state(verify_url, cookies_path, expected_favored=True, key=key)
 
-    dismissed = status.get('dismissed') or {}
+    dismissed = dict(status.get('dismissed') or {})
     dismissed.pop(key, None)
+    if key:
+        dismissed.pop(key.lower(), None)
     status['dismissed'] = dismissed
     status.setdefault('starred', {})
     status['starred'][key] = True

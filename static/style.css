@@ -1185,23 +1185,18 @@ button[onclick*="revertLookup"] {
     font-size: var(--text-xs);
 }
 
-/* Batch jobs: one section for Running + Queued so both are visible together */
-/* Fixed overlay below header so it never takes layout space and does not cover Tags/Sync tabs */
+/* Batch jobs: one section for Running + Queued; sticky at top of Sync tab so it stays above the track list when scrolling */
 .shazam-batch-jobs-section {
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
-    position: fixed;
-    top: 6rem; /* below header + container padding so Tags/Sync tabs stay clickable */
-    left: 0;
-    right: 0;
+    position: sticky;
+    top: 0;
     z-index: 100;
     background: var(--bg);
     padding: var(--sp-2) var(--sp-4) var(--sp-1);
     box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-    max-width: 1400px;
-    margin-left: auto;
-    margin-right: auto;
+    margin-bottom: var(--sp-2);
     box-sizing: border-box;
 }
 .shazam-single-search-queue-bar {
@@ -2126,6 +2121,11 @@ button[onclick*="revertLookup"] {
     opacity: 0.35;
     cursor: default;
     pointer-events: none;
+}
+.shazam-queue-slot {
+    display: inline-block;
+    min-width: 150px;
+    vertical-align: middle;
 }
 .shazam-queue-label {
     font-size: var(--text-xs);
