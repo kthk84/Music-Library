@@ -1270,6 +1270,8 @@ def _rebuild_status_from_caches():
                 out['not_found'] = dict(old['not_found'])
             if old.get('soundeo_match_scores'):
                 out['soundeo_match_scores'] = dict(old['soundeo_match_scores'])
+            if old.get('track_ids'):
+                out['track_ids'] = dict(old['track_ids'])
         return out
     local_scan = load_local_scan_cache()
     if not local_scan_cache_valid(local_scan, folder_paths):
@@ -1317,6 +1319,8 @@ def _rebuild_status_from_caches():
             out['dismissed'] = dict(old['dismissed'])
         if old.get('not_found'):
             out['not_found'] = dict(old['not_found'])
+        if old.get('track_ids'):
+            out['track_ids'] = dict(old['track_ids'])
     return out
 
 
@@ -1338,6 +1342,8 @@ def _merge_preserved_urls_into_status(status: Dict) -> None:
             status['soundeo_match_scores'] = {**(status.get('soundeo_match_scores') or {}), **old['soundeo_match_scores']}
         if old.get('dismissed'):
             status['dismissed'] = {**(status.get('dismissed') or {}), **old['dismissed']}
+        if old.get('track_ids'):
+            status['track_ids'] = {**(status.get('track_ids') or {}), **old['track_ids']}
         # not_found: replace from file only (single source of truth; never merge in-memory)
         status['not_found'] = dict(old.get('not_found') or {})
 
@@ -3072,7 +3078,7 @@ def shazam_sync_dismiss_track():
     """Dismiss a track: unstar on Soundeo via API + mark as dismissed locally.
     Body: { key: "Artist - Title", track_url: "https://soundeo.com/track/..." }"""
     from config_shazam import get_soundeo_cookies_path
-    from soundeo_automation import extract_track_id, soundeo_api_set_favorite
+    from soundeo_automation import soundeo_api_set_favorite
     from shazam_cache import save_status_cache, load_status_cache
 
     try:
@@ -3090,7 +3096,7 @@ def shazam_sync_dismiss_track():
 
     soundeo_result = None
     cookies_path = get_soundeo_cookies_path()
-    track_id = extract_track_id(track_url) if track_url else None
+    track_id = _resolve_track_id(status, key, track_url or '', cookies_path)
     if track_id:
         _soundeo_star_log.info("Soundeo dismiss: trying HTTP set_favorite favored=False for key=%s", key[:60] if key else "")
         soundeo_result = soundeo_api_set_favorite(track_id, cookies_path, favored=False, track_url=track_url or None)
@@ -3139,7 +3145,7 @@ def shazam_sync_dismiss_track():
 def _unstar_one_track_impl(key: str, track_url: str):
     """Perform unstar on Soundeo for one track; update status cache. Returns (soundeo_ok: bool)."""
     from config_shazam import get_soundeo_cookies_path
-    from soundeo_automation import extract_track_id, soundeo_api_set_favorite
+    from soundeo_automation import soundeo_api_set_favorite
     from shazam_cache import save_status_cache, load_status_cache
 
     status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
@@ -3147,7 +3153,7 @@ def _unstar_one_track_impl(key: str, track_url: str):
         track_url = _status_url_for_key(status, key)
     soundeo_result = None
     cookies_path = get_soundeo_cookies_path()
-    track_id = extract_track_id(track_url) if track_url else None
+    track_id = _resolve_track_id(status, key, track_url or '', cookies_path)
     if track_id:
         soundeo_result = soundeo_api_set_favorite(track_id, cookies_path, favored=False, track_url=track_url or None)
     if track_url and not (soundeo_result and soundeo_result.get('ok')):
@@ -3321,6 +3327,46 @@ def _status_url_for_key(status: Dict, key: str) -> str:
     return ''
 
 
+def _resolve_track_id(status: Dict, key: str, track_url: str, cookies_path: str) -> Optional[str]:
+    """Resolve Soundeo track ID from status cache, URL, or by fetching the track page. Mutates status to store ID when found (single source of truth)."""
+    from soundeo_automation import extract_track_id, get_track_id_from_page
+    key_lower = key.lower() if isinstance(key, str) else ''
+    tid = (status.get('track_ids') or {}).get(key) or (status.get('track_ids') or {}).get(key_lower)
+    if tid:
+        return tid
+    if not track_url:
+        return None
+    tid = extract_track_id(track_url)
+    if tid:
+        status.setdefault('track_ids', {})[key] = tid
+        status['track_ids'][key_lower] = tid
+        return tid
+    tid = get_track_id_from_page(track_url, cookies_path)
+    if tid:
+        status.setdefault('track_ids', {})[key] = tid
+        status['track_ids'][key_lower] = tid
+        return tid
+    return None
+
+
+def _set_url_and_track_id(status: Dict, key: str, url: str, cookies_path: Optional[str] = None) -> None:
+    """Set track URL and resolve/store track ID so we have both (URL for preview/crawler, ID for HTTP). Single source of truth: status cache."""
+    if not url or not key:
+        return
+    status.setdefault('urls', {})
+    status['urls'][key] = status['urls'][key.lower()] = url
+    if not cookies_path:
+        return
+    key_lower = key.lower() if isinstance(key, str) else ''
+    if (status.get('track_ids') or {}).get(key) or (status.get('track_ids') or {}).get(key_lower):
+        return
+    from soundeo_automation import extract_track_id, get_track_id_from_page
+    tid = extract_track_id(url) or get_track_id_from_page(url, cookies_path)
+    if tid:
+        status.setdefault('track_ids', {})[key] = tid
+        status['track_ids'][key_lower] = tid
+
+
 def _verify_soundeo_favorite_state(
     track_url: str, cookies_path: str, expected_favored: bool, key: str = ""
 ) -> None:
@@ -3349,11 +3395,11 @@ def shazam_sync_undismiss_track():
     Body: { key, track_url?, artist?, title? }"""
     from config_shazam import get_soundeo_cookies_path, load_config
     from soundeo_automation import (
-        extract_track_id, soundeo_api_set_favorite,
+        soundeo_api_set_favorite,
         soundeo_api_search_and_favorite,
         _get_driver, load_cookies, verify_logged_in, favorite_track_by_url, _graceful_quit,
     )
-    from shazam_cache import save_status_cache
+    from shazam_cache import save_status_cache, load_status_cache
 
     try:
         data = request.get_json(silent=True) or {}
@@ -3366,7 +3412,7 @@ def shazam_sync_undismiss_track():
     if not key:
         return jsonify({'error': 'Missing track key'}), 400
 
-    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
     if not track_url:
         track_url = _status_url_for_key(status, key)
 
@@ -3374,8 +3420,8 @@ def shazam_sync_undismiss_track():
     soundeo_ok = False
     new_url = track_url
 
-    # 1) HTTP first when we have a track URL/ID
-    track_id = extract_track_id(track_url) if track_url else None
+    # 1) HTTP first when we have a track URL/ID (from status cache, URL, or page fetch)
+    track_id = _resolve_track_id(status, key, track_url or '', cookies_path)
     if track_id:
         _soundeo_star_log.info("Soundeo undismiss: trying HTTP set_favorite favored=True for key=%s", key[:60] if key else "")
         result = soundeo_api_set_favorite(track_id, cookies_path, favored=True, track_url=track_url or None)
@@ -3458,23 +3504,23 @@ def _star_one_track_impl(key: str, track_url: str, artist: str, title: str) -> T
     """Star one track on Soundeo. Uses app._shazam_sync_status; updates it and saves cache. Returns (success, new_url)."""
     from config_shazam import get_soundeo_cookies_path, load_config
     from soundeo_automation import (
-        extract_track_id, soundeo_api_set_favorite,
+        soundeo_api_set_favorite,
         soundeo_api_search_and_favorite,
         _get_driver, load_cookies, verify_logged_in, favorite_track_by_url, _graceful_quit,
     )
-    from shazam_cache import save_status_cache
+    from shazam_cache import save_status_cache, load_status_cache
 
-    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
     if not track_url:
-        track_url = (status.get('urls') or {}).get(key, '')
+        track_url = (status.get('urls') or {}).get(key, '') or _status_url_for_key(status, key)
     cookies_path = get_soundeo_cookies_path()
     config = load_config()
     headed = config.get('headed_mode', True)
     soundeo_ok = False
     new_url = track_url
 
-    # HTTP first when we have a track URL/ID
-    track_id = extract_track_id(track_url) if track_url else None
+    # HTTP first when we have a track ID (from status cache, URL, or page fetch)
+    track_id = _resolve_track_id(status, key, track_url or '', cookies_path)
     if track_id:
         _soundeo_star_log.info("Soundeo star: trying HTTP set_favorite favored=True for key=%s", key[:60] if key else "")
         result = soundeo_api_set_favorite(track_id, cookies_path, favored=True, track_url=track_url or None)

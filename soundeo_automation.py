@@ -10,7 +10,7 @@ import json
 import time
 import threading
 import urllib.parse
-from typing import List, Dict, Optional, Callable, Tuple
+from typing import List, Dict, Optional, Callable, Tuple, Union
 
 _ONE_YEAR = 365 * 24 * 60 * 60
 
@@ -248,11 +248,18 @@ def load_cookies(driver, cookies_path: str) -> bool:
                     pass
         if added == 0:
             return False
-        driver.get(SOUNDEO_BASE)
-        time.sleep(2)
         return True
     except Exception:
         return False
+
+
+def _is_redirected_to_login(driver) -> bool:
+    """True if current page is a login/redirect (logoreg, /login, /account/log)."""
+    try:
+        current = (driver.current_url or "").strip().lower()
+        return "logoreg" in current or "/login" in current or "/account/log" in current
+    except Exception:
+        return True
 
 
 def verify_logged_in(driver) -> bool:
@@ -514,6 +521,7 @@ def find_track_on_soundeo(
 
     from selenium.webdriver.common.by import By
 
+    first_get = True
     for q in queries:
         try:
             encoded = urllib.parse.quote(q)
@@ -522,6 +530,10 @@ def find_track_on_soundeo(
             url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
             driver.get(url)
             time.sleep(1.5)
+            if first_get:
+                first_get = False
+                if _is_redirected_to_login(driver):
+                    return None
             try:
                 links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
             except Exception:
@@ -587,6 +599,7 @@ def find_and_favorite_track(
 
     from selenium.webdriver.common.by import By
 
+    first_get = True
     for q in queries:
         try:
             encoded = urllib.parse.quote(q)
@@ -595,6 +608,10 @@ def find_and_favorite_track(
             url = f"{TRACK_LIST_URL}?searchFilter={encoded}&availableFilter=1"
             driver.get(url)
             time.sleep(1.5)
+            if first_get:
+                first_get = False
+                if _is_redirected_to_login(driver):
+                    return None
             try:
                 links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
             except Exception:
@@ -1063,7 +1080,7 @@ def crawl_favorites_page(
     on_progress: Optional[Callable[[str], None]] = None,
     target_keys: Optional[set] = None,
     max_pages: Optional[int] = None,
-) -> List[Dict]:
+) -> Union[List[Dict], Dict]:
     """
     Crawl https://soundeo.com/account/favorites (source of truth for starred).
     Returns list of {"key": "Artist - Title", "url": track URL, "soundeo_title": exact text from page}.
@@ -1122,12 +1139,8 @@ def crawl_favorites_page(
         except Exception:
             pass
         if page == 1:
-            try:
-                current_url = (driver.current_url or "").strip().lower()
-                if "logoreg" in current_url or "/login" in current_url or "/account/log" in current_url:
-                    break
-            except Exception:
-                pass
+            if _is_redirected_to_login(driver):
+                return {"error": "not_logged_in", "favorites": []}
         try:
             links = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/track/"]')
         except Exception:
@@ -1225,9 +1238,9 @@ def crawl_soundeo_favorites(
     try:
         if not load_cookies(driver, cookies_path):
             return {"ok": False, "error": "No saved session. Save Soundeo session first in Settings."}
-        if not verify_logged_in(driver):
-            return {"ok": False, "error": "Soundeo session expired or you are logged out. Please use Save session to log in again."}
         favorites = crawl_favorites_page(driver, on_progress=on_progress, max_pages=max_pages)
+        if isinstance(favorites, dict) and favorites.get("error") == "not_logged_in":
+            return {"ok": False, "error": "Soundeo session expired. Please reconnect in Settings."}
         if not favorites:
             try:
                 current = (driver.current_url or "").strip().lower()
@@ -1399,8 +1412,6 @@ def run_favorite_tracks(
     try:
         if not load_cookies(driver, cookies_path):
             return {"error": "No saved session. Save Soundeo session first in Settings."}
-        if not verify_logged_in(driver):
-            return {"error": "Soundeo session expired or you are logged out. Please use Save session to log in again."}
 
         if crawl_favorites_first:
             def crawl_prog(msg, page=None):
@@ -1413,9 +1424,12 @@ def run_favorite_tracks(
                 target_keys=target_keys if target_keys else None,
                 max_pages=max_favorites_pages if max_favorites_pages is not None else 30,
             )
-            results["crawled_favorites"] = crawled
+            if isinstance(crawled, dict) and crawled.get("error") == "not_logged_in":
+                return {"error": "Soundeo session expired or you are logged out. Please use Save session to log in again."}
+            crawled_list = crawled if isinstance(crawled, list) else []
+            results["crawled_favorites"] = crawled_list
             already_starred = set()
-            for item in crawled:
+            for item in crawled_list:
                 k = item["key"]
                 already_starred.add(k)
                 already_starred.add(k.lower())
@@ -1508,8 +1522,6 @@ def run_search_tracks(
     try:
         if not load_cookies(driver, cookies_path):
             return {"error": "No saved session. Save Soundeo session first in Settings."}
-        if not verify_logged_in(driver):
-            return {"error": "Soundeo session expired or you are logged out. Please use Save session to log in again."}
 
         for i, t in enumerate(tracks):
             if _sync_stop_requested:
@@ -1548,6 +1560,9 @@ def run_search_tracks(
                         kwargs["soundeo_match_score"] = round(match_score, 3)
                     on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", url, key, **kwargs)
             else:
+                if results["done"] == 0 and _is_redirected_to_login(driver):
+                    results["error"] = "Soundeo session expired or you are logged out. Please use Save session to log in again."
+                    break
                 results["failed"] += 1
                 results["errors"].append(f"Not found: {artist} - {title}")
                 if on_progress:
@@ -1743,6 +1758,44 @@ def soundeo_api_get_favorite_state(track_url: str, cookies_path: str) -> Optiona
                 return "favored" in tag.lower() or "active" in tag.lower()
         for tag in re.findall(r'<[^>]*(?:class="[^"]*favorite[^"]*")[^>]*data-track-id="\d+"[^>]*>', text, re.I):
             return "favored" in tag.lower() or "active" in tag.lower()
+    except Exception:
+        pass
+    return None
+
+
+def get_track_id_from_page(track_url: str, cookies_path: str) -> Optional[str]:
+    """
+    GET the track page and parse HTML for data-track-id. Used when the URL does not
+    contain the ID (e.g. extract_track_id returns None). Single source of truth for
+    IDs is status cache; this is used to backfill or resolve on demand.
+    Returns the numeric track ID string or None.
+    """
+    if not track_url or not track_url.strip().startswith(("https://soundeo.com/", "http://soundeo.com/")):
+        return None
+    tid = extract_track_id(track_url)
+    if tid:
+        return tid
+    session = _get_soundeo_session(cookies_path)
+    if not session:
+        return None
+    try:
+        resp = session.get(track_url.strip(), timeout=10)
+        if resp.status_code != 200:
+            return None
+        text = resp.text or ""
+        for _cls, _tid in re.findall(
+            r'<button[^>]*class="favorites([^"]*?)"[^>]*data-track-id="(\d+)"',
+            text,
+        ):
+            return _tid
+        for _tid, _cls in re.findall(
+            r'<button[^>]*data-track-id="(\d+)"[^>]*class="favorites([^"]*?)"[^>]*>',
+            text,
+        ):
+            return _tid
+        m = re.search(r'data-track-id="(\d+)"', text)
+        if m:
+            return m.group(1)
     except Exception:
         pass
     return None

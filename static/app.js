@@ -2110,8 +2110,10 @@ function shazamRenderTrackList(data) {
         const isCurrentTrack = !!(shazamCurrentProgress.running && currentKey && (currentKey === key || currentKey.toLowerCase() === keyLower));
 
         // Dot colours: have+starred = green, have+not starred = teal; both live-update when star status changes (shazamSetStarredLive + re-render)
+        // Spinner at start of row when this track is being processed (server current_key or request pending); no hourglass in actions – buttons stay visible
+        const showRowSpinner = isCurrentTrack || isPending;
         let statusCell = '';
-        if (isCurrentTrack) {
+        if (showRowSpinner) {
             statusCell = '<td class="status-cell"><span class="status-spinner" title="Processing…"></span></td>';
         } else if (isDismissed) {
             statusCell = '<td class="status-cell"><span class="status-dot status-dismissed" title="Dismissed">\u00d7</span></td>';
@@ -2204,8 +2206,6 @@ function shazamRenderTrackList(data) {
             if (inUnstarQueue) {
                 actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="unstar" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from unstar queue">\u00d7</button>';
             }
-        } else if (isPending) {
-            actionsCell += '<span class="shazam-action-spinner" title="Processing\u2026">&#8987;</span>';
         } else {
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-star-action${starToggleInactive}" data-action="${starToggleAction}" data-key="${safeAttr(key)}"${starToggleDataAttrs} data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="${escapeHtml(starToggleTitle)}">${starToggleSvg}</button>`;

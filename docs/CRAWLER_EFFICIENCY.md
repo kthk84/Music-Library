@@ -1,13 +1,13 @@
 # Crawler efficiency (Soundeo) – improvement ideas
 
-**Status:** Documented for later implementation. Not yet implemented.
+**Status:** Improvement 1 and load_cookies reduction are **implemented**. Improvement 2 remains optional.
 
 ---
 
-## Current flow (Run Soundeo / sync favorites)
+## Current flow (Run Soundeo / sync favorites) – after improvements
 
-1. Open browser, load cookies.
-2. **Verify login:** navigate to `https://soundeo.com/account`; if redirected to login → fail; else continue.
+1. Open browser, load cookies (single base load; no second reload).
+2. **No dedicated verify step:** first real navigation is favorites or search; login is inferred from that page (redirect → "session expired").
 3. **Optionally crawl favorites:** navigate to `https://soundeo.com/account/favorites` (one or more pages), build `already_starred` from track keys found there.
 4. For each track:
    - If key is in `already_starred`: do **not** open the track page; use search result URL only (avoids any star click).
@@ -17,18 +17,17 @@ Relevant code: `soundeo_automation.py` — `verify_logged_in()`, `crawl_favorite
 
 ---
 
-## Improvement 1: Skip dedicated account page (verify login)
+## Improvement 1: Skip dedicated account page (verify login) — DONE
 
-**Idea:** Do not navigate to `/account` only to verify login. Infer login from the **first real navigation** (e.g. favorites list or search).
+**Implemented:** No separate account page; login is inferred from the first real page.
 
-**Why it helps:** Saves one page load at the start of every crawler/sync run.
+- **load_cookies:** Only one `driver.get(SOUNDEO_BASE)` then add cookies; no second reload.
 
-**How:** The same redirect check used in `verify_logged_in()` (e.g. `logoreg`, `/login`, `/account/log` in `current_url`) is already done in `crawl_favorites_page()` on page 1 (lines 774–778). So:
+- **Favorites flows:** `run_favorite_tracks` and `crawl_soundeo_favorites` no longer call `verify_logged_in`; they go straight to `crawl_favorites_page`. On page 1, `crawl_favorites_page` checks `_is_redirected_to_login(driver)` and returns `{"error": "not_logged_in", "favorites": []}`; callers return the same user-facing session-expired error.
 
-- When **crawl_favorites_first=True**: go straight to the first favorites page; if redirected to login, treat as “not logged in” and return the same error.
-- When the first action is search (e.g. no crawl): go to search or track list; if redirected to login, treat as not logged in.
+- **Search flow:** `run_search_tracks` no longer calls `verify_logged_in`. `find_track_on_soundeo` and `find_and_favorite_track` check redirect after the first `driver.get(...)` and return `None` if redirected; `run_search_tracks` treats first-failure plus redirect as session expired and returns that error.
 
-**Implementation notes:** Remove or bypass the initial `verify_logged_in(driver)` call and perform the same URL/redirect check after the first real `driver.get(...)` in the flow. Keep the same user-facing error message (“Session expired or logged out…”).
+- Helper: `_is_redirected_to_login(driver)` (logoreg, /login, /account/log in `current_url`).
 
 ---
 

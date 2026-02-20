@@ -41,3 +41,9 @@ See **[docs/STATE_PERSISTENCE.md](docs/STATE_PERSISTENCE.md)** for the full list
 
 - Soundeo session (cookies) is saved to a path from config; sync and Save Session flow load it so login is remembered.
 - Skip list is persisted in `shazam_skip_list.json` and applied when comparing.
+- **Track IDs for HTTP:** `status['track_ids']` (in `shazam_status_cache.json`) stores Soundeo numeric ID per track so star/unstar/dismiss use HTTP first; crawler is fallback when no ID. Backfill: `python3 scripts/backfill_track_ids.py`. IDs are also resolved on first interaction via `_resolve_track_id`.
+
+## Where we left off (for next session)
+
+- **Queue + row UX (done):** Unstar has full queue state (bar, row “Unstar queued 2/5”, × to remove). Spinner is always shown at the **start** of the row when a track is processing (current or pending); the hourglass in the actions cell was removed so **buttons stay visible** when the spinner is shown.
+- **Possible next steps (not done):** (1) Log why we use crawling vs HTTP (e.g. “skipping HTTP: no track_id from URL” or “HTTP failed: …”) so we can see if HTTP is never tried or failing. (2) Set `track_id` when we first set a track URL (e.g. when Search returns a link) so every new track has both URL and ID without running the backfill script.
