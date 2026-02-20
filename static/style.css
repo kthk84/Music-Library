@@ -1659,15 +1659,15 @@ button[onclick*="revertLookup"] {
 .shazam-track-table .status-cell .status-dot.status-skipped[title]:hover {
     transform: scale(1.15);
 }
-/* Spinner in status cell for the row currently being processed (Search all / Run sync) */
+/* Spinner in status cell for the row currently being processed (star/unstar/search/download) */
 .shazam-track-table .status-cell .status-spinner {
     display: inline-block;
-    width: 14px;
-    height: 14px;
-    border: 2px solid rgba(52, 211, 153, 0.45);
+    width: 16px;
+    height: 16px;
+    border: 2px solid rgba(52, 211, 153, 0.4);
     border-top-color: var(--positive);
     border-radius: 50%;
-    animation: shazam-spin 0.8s linear infinite;
+    animation: shazam-spin 0.7s linear infinite;
     vertical-align: middle;
 }
 /* Legacy row first-cell sizing (keep layout) */
@@ -2152,6 +2152,24 @@ button[onclick*="revertLookup"] {
     font-size: 1rem;
     animation: shazam-spin 1s linear infinite;
     color: var(--positive);
+}
+/* Spinner inside star/unstar (and other) action button while request is pending */
+.shazam-row-action-btn .shazam-btn-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255, 255, 255, 0.35);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: shazam-spin 0.6s linear infinite;
+    vertical-align: middle;
+}
+.shazam-star-action-pending {
+    pointer-events: none;
+    opacity: 0.9;
+}
+.shazam-star-action-pending .shazam-btn-spinner {
+    animation-duration: 2s;
 }
 @keyframes shazam-spin {
     from { transform: rotate(0deg); }

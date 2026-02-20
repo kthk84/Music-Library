@@ -3631,10 +3631,17 @@ def _start_next_single_unstar() -> None:
     with unstar_lock:
         queue = getattr(app, '_shazam_single_unstar_queue', None) or []
         if not queue:
-            app._shazam_sync_progress = {'running': False, 'mode': 'unstar_single'}
+            prog = getattr(app, '_shazam_sync_progress', None) or {}
+            key = prog.get('key') or prog.get('current_key')
+            app._shazam_sync_progress = dict(prog, running=False, mode='unstar_single', key=key)
             return
         item = queue.pop(0)
         app._shazam_single_unstar_queue = queue
+    # Expose completed key with running=False so frontend can clear pending before next worker overwrites
+    prog = getattr(app, '_shazam_sync_progress', None) or {}
+    completed_key = prog.get('key') or prog.get('current_key')
+    if completed_key:
+        app._shazam_sync_progress = dict(prog, running=False, mode='unstar_single', key=completed_key)
     thread = threading.Thread(target=_run_unstar_queue_worker, args=(item,), daemon=True)
     thread.start()
 
@@ -4115,10 +4122,17 @@ def _start_next_single_star() -> None:
     with star_lock:
         star_queue = getattr(app, '_shazam_single_star_queue', None) or []
         if not star_queue:
-            app._shazam_sync_progress = {'running': False, 'mode': 'star_single'}
+            prog = getattr(app, '_shazam_sync_progress', None) or {}
+            key = prog.get('key') or prog.get('current_key')
+            app._shazam_sync_progress = dict(prog, running=False, mode='star_single', key=key)
             return
         item = star_queue.pop(0)
         app._shazam_single_star_queue = star_queue
+    # Expose completed key with running=False so frontend can clear pending before next worker overwrites
+    prog = getattr(app, '_shazam_sync_progress', None) or {}
+    completed_key = prog.get('key') or prog.get('current_key')
+    if completed_key:
+        app._shazam_sync_progress = dict(prog, running=False, mode='star_single', key=completed_key)
     thread = threading.Thread(target=_run_star_queue_worker, args=(item,), daemon=True)
     thread.start()
 
