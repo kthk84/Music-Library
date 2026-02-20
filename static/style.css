@@ -22,6 +22,7 @@
     --status-starred: #8b5cf6;
     --status-not-found: #c9863a;
     --status-not-searched: #d4d4d4;
+    --status-have-local: #5eead4;
     --sp-1: 4px;
     --sp-2: 8px;
     --sp-3: 12px;
@@ -239,6 +240,40 @@ header .tab-nav {
     background: #000000;
     border-color: #000000;
     color: white;
+}
+
+.btn-shazam {
+    background: #0d6efd;
+    color: white;
+    border: 1px solid #0d6efd;
+}
+
+.btn-shazam:hover {
+    background: #0b5ed7;
+    border-color: #0b5ed7;
+    color: white;
+}
+
+.btn-has-icon,
+.btn-shazam {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.btn .shazam-btn-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.125em;
+    height: 1.125em;
+    flex-shrink: 0;
+}
+
+.btn .shazam-btn-icon svg {
+    width: 100%;
+    height: 100%;
+    display: block;
 }
 
 .btn-danger {
@@ -976,7 +1011,9 @@ button[onclick*="revertLookup"] {
 }
 
 /* Search dropdown (unfound / new) */
-.search-dropdown-wrap {
+.search-dropdown-wrap,
+.favorites-dropdown-wrap,
+.rescan-dropdown-wrap {
     position: relative;
 }
 
@@ -1000,7 +1037,9 @@ button[onclick*="revertLookup"] {
     padding: 4px 0;
 }
 
-.search-dropdown-wrap.open .search-dropdown-menu {
+.search-dropdown-wrap.open .search-dropdown-menu,
+.favorites-dropdown-wrap.open .search-dropdown-menu,
+.rescan-dropdown-wrap.open .search-dropdown-menu {
     display: block;
 }
 
@@ -1133,17 +1172,65 @@ button[onclick*="revertLookup"] {
     font-size: var(--text-xs);
 }
 
-/* Sync progress */
+/* Batch jobs: one section for Running + Queued so both are visible together */
+/* Sticky so Running + Search queue + Queued stay visible when scrolling the track list */
+.shazam-batch-jobs-section {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    margin-top: var(--sp-2);
+    margin-bottom: var(--sp-3);
+    position: sticky;
+    top: var(--sp-2);
+    z-index: 10;
+    background: var(--bg-primary);
+    padding-bottom: var(--sp-1);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+}
+.shazam-single-search-queue-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    margin-top: 0;
+    margin-bottom: 0;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+}
+.shazam-single-search-queue-bar .shazam-job-queue-label {
+    flex-shrink: 0;
+}
+
+.shazam-batch-jobs-section .shazam-sync-progress-bar {
+    margin-top: 0;
+    margin-bottom: 0;
+}
+.shazam-batch-jobs-section .shazam-job-queue-bar {
+    margin-top: 0;
+}
+
+.shazam-running-label {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--text);
+}
+
+/* Sync progress (section is sticky, so this stays in view with queue) */
 .shazam-sync-progress-bar {
     display: flex;
     align-items: center;
     gap: var(--sp-3);
     padding: var(--sp-2) var(--sp-3);
-    margin-bottom: var(--sp-3);
+    margin-top: 0;
+    margin-bottom: 0;
     background: var(--bg-secondary);
     border: 1px solid var(--border);
     border-radius: var(--r-md);
     font-size: var(--text-sm);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
 }
 
 .shazam-progress-text {
@@ -1159,6 +1246,94 @@ button[onclick*="revertLookup"] {
 }
 .shazam-sync-progress-bar .shazam-progress-goto-btn {
     flex-shrink: 0;
+}
+
+/* Job queue (running + queued batch jobs) */
+.shazam-job-queue-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-3);
+    margin-top: var(--sp-1);
+    margin-bottom: var(--sp-2);
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+}
+.shazam-job-queue-label {
+    flex-shrink: 0;
+    font-weight: 600;
+    color: var(--text);
+}
+.shazam-job-queue-list {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-2);
+}
+.shazam-job-queue-item {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    padding: 2px 8px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+}
+.shazam-job-queue-item .shazam-job-queue-remove {
+    padding: 0 4px;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--text-tertiary);
+    background: none;
+    border: none;
+    cursor: pointer;
+    border-radius: 2px;
+}
+.shazam-job-queue-item .shazam-job-queue-remove:hover {
+    color: var(--negative);
+    background: var(--negative-bg);
+}
+
+/* Play button context menu (right-click: Open file location / Open on Soundeo) */
+.shazam-play-context-menu {
+    position: fixed;
+    z-index: 10000;
+    min-width: 160px;
+    padding: var(--sp-1);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+.shazam-play-context-menu-item {
+    display: block;
+    width: 100%;
+    padding: var(--sp-2) var(--sp-3);
+    text-align: left;
+    font-size: var(--text-sm);
+    color: var(--text);
+    background: none;
+    border: none;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+}
+.shazam-play-context-menu-item:hover {
+    background: var(--bg-secondary);
+}
+.shazam-play-context-menu-path {
+    padding: var(--sp-2) var(--sp-3);
+    font-size: 11px;
+    color: var(--text-muted, #666);
+    word-break: break-all;
+    max-width: 320px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: var(--sp-1);
+}
+.shazam-play-context-menu-path:empty {
+    display: none;
 }
 
 /* Brief highlight when scrolling to row from progress bar */
@@ -1227,6 +1402,64 @@ button[onclick*="revertLookup"] {
     gap: 2px;
 }
 
+.shazam-search-filter-wrap {
+    flex: 1;
+    min-width: 0;
+    max-width: 280px;
+}
+
+.shazam-track-search-inner {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: 100%;
+}
+
+.shazam-track-search-input {
+    width: 100%;
+    padding: 4px 28px 4px 10px;
+    font-size: var(--text-sm);
+    font-family: var(--font);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg);
+    color: var(--text);
+}
+
+.shazam-track-search-input::placeholder {
+    color: var(--text-tertiary);
+}
+
+.shazam-track-search-input:focus {
+    outline: none;
+    border-color: var(--accent);
+}
+
+.shazam-track-search-clear {
+    position: absolute;
+    right: 6px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-tertiary);
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.shazam-track-search-clear:hover {
+    color: var(--text);
+    background: var(--border);
+}
+
 /* Legacy shazam filters */
 .shazam-filters {
     display: flex;
@@ -1265,6 +1498,13 @@ button[onclick*="revertLookup"] {
 
 .shazam-filter-btn.active {
     color: var(--text);
+    border-bottom-color: var(--accent);
+    background: transparent;
+}
+
+.shazam-filter-time-btn.active {
+    color: var(--text);
+    border-bottom: 2px solid transparent;
     border-bottom-color: var(--accent);
     background: transparent;
 }
@@ -1381,11 +1621,24 @@ button[onclick*="revertLookup"] {
 .shazam-track-table .status-cell .status-dot.status-found {
     background: var(--status-found);
 }
+.shazam-track-table .status-cell .status-dot.status-have {
+    background: var(--status-have-local);
+}
 .shazam-track-table .status-cell .status-dot.status-starred {
     background: var(--status-starred);
 }
 .shazam-track-table .status-cell .status-dot.status-have-starred {
     background: var(--positive);
+}
+/* Hover: show that dots have a tooltip (title) explaining meaning */
+.shazam-track-table .status-cell .status-dot[title]:hover {
+    cursor: help;
+    transform: scale(1.35);
+    box-shadow: 0 0 0 2px var(--bg-primary);
+}
+.shazam-track-table .status-cell .status-dot.status-dismissed[title]:hover,
+.shazam-track-table .status-cell .status-dot.status-skipped[title]:hover {
+    transform: scale(1.15);
 }
 /* Spinner in status cell for the row currently being processed (Search all / Run sync) */
 .shazam-track-table .status-cell .status-spinner {
@@ -1510,7 +1763,7 @@ button[onclick*="revertLookup"] {
 /* Select & Play columns */
 .shazam-track-table .shazam-select-col,
 .shazam-track-table .shazam-play-col {
-    width: 2rem;
+    width: 2.25rem;
     text-align: center;
 }
 
@@ -1535,44 +1788,57 @@ button[onclick*="revertLookup"] {
     font-size: var(--text-xs);
 }
 
-/* Play button: 24px, always visible */
+/* ========== Play buttons (unified premium style) ========== */
+/* Row play buttons: Tags tab + Shazam table — same size and style */
+.play-btn,
 .shazam-play-btn {
-    width: 24px;
-    height: 24px;
+    width: 28px;
+    height: 28px;
+    min-width: 28px;
+    min-height: 28px;
     border-radius: 50%;
     border: 1px solid var(--border-strong);
     background: var(--bg);
     color: var(--text);
     cursor: pointer;
-    font-size: var(--text-xs);
     padding: 0;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: background 0.15s, border-color 0.15s;
+    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: var(--shadow-sm);
 }
-
+.play-btn svg,
+.shazam-play-btn svg {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+}
+.play-btn:hover,
 .shazam-play-btn:hover {
     background: var(--bg-secondary);
     border-color: var(--text-tertiary);
+    box-shadow: var(--shadow-md);
 }
-
+.play-btn.playing,
 .shazam-play-btn.playing {
     background: var(--accent);
     color: white;
     border-color: var(--accent);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
 }
-
+/* Soundeo stream play: dashed circle to distinguish from local file play */
 .shazam-soundeo-play {
     border-style: dashed;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
 }
 .shazam-soundeo-play:hover {
-    border-style: solid;
+    border-style: dashed;
     color: var(--text);
 }
 .shazam-soundeo-play.playing {
     border-style: solid;
+    color: white;
 }
 
 .soundeo-source-title {
@@ -1590,8 +1856,8 @@ button[onclick*="revertLookup"] {
     text-decoration: none;
 }
 .soundeo-source-title a:hover {
-    text-decoration: underline;
-    opacity: 1;
+  text-decoration: underline;
+  opacity: 1;
 }
 
 /* ========== Shazam player bottom bar ========== */
@@ -1614,25 +1880,38 @@ button[onclick*="revertLookup"] {
 .shazam-bar-play-pause {
     width: 40px;
     height: 40px;
+    min-width: 40px;
+    min-height: 40px;
     border-radius: 50%;
     border: 1px solid var(--border-strong);
     background: var(--accent);
     color: white;
-    font-size: 16px;
     padding: 0;
     cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
     flex-shrink: 0;
-    transition: background 0.15s, transform 0.1s;
+    transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+.shazam-bar-play-pause svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
 }
 .shazam-bar-play-pause:hover {
-    filter: brightness(1.1);
+    filter: brightness(1.08);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
 }
 .shazam-bar-play-pause.paused {
     background: var(--bg);
     color: var(--text);
+    box-shadow: var(--shadow-sm);
+}
+.shazam-bar-play-pause.paused:hover {
+    background: var(--bg-secondary);
+    border-color: var(--text-tertiary);
 }
 
 .shazam-bar-track-info {
@@ -1761,10 +2040,18 @@ button[onclick*="revertLookup"] {
     color: var(--text-tertiary) !important;
     opacity: 0.6;
 }
-.shazam-row-dismissed .shazam-actions-col,
-.shazam-row-dismissed .shazam-play-col {
-    text-decoration: none;
+/* Keep status, play, star and actions readable and clickable (no strikethrough on buttons) */
+.shazam-row-dismissed .status-cell,
+.shazam-row-dismissed .shazam-play-col,
+.shazam-row-dismissed .starred-cell,
+.shazam-row-dismissed .shazam-actions-col {
+    text-decoration: none !important;
     opacity: 1;
+    color: var(--text) !important;
+}
+.shazam-row-dismissed .shazam-actions-col .shazam-row-action-btn,
+.shazam-row-dismissed .shazam-actions-col .shazam-clear-dismissed {
+    text-decoration: none !important;
 }
 .status-dot.status-dismissed {
     color: var(--text-tertiary);
@@ -1814,6 +2101,23 @@ button[onclick*="revertLookup"] {
     opacity: 0.35;
     cursor: default;
     pointer-events: none;
+}
+.shazam-queue-label {
+    font-size: var(--text-xs);
+    color: var(--text-tertiary);
+    margin-right: 6px;
+    vertical-align: middle;
+}
+.shazam-remove-queue {
+    width: 20px;
+    height: 20px;
+    font-size: 14px;
+    line-height: 1;
+    color: var(--text-tertiary);
+}
+.shazam-remove-queue:hover {
+    color: var(--danger);
+    border-color: var(--danger);
 }
 .shazam-undo-action {
     width: auto;

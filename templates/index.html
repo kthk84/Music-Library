@@ -128,43 +128,80 @@
 
             <div class="toolbar">
                 <div class="toolbar-group">
-                    <button type="button" onclick="shazamFetchShazam()" class="btn btn-secondary" id="shazamFetchBtn">Fetch</button>
-                    <button type="button" id="shazamCompareBtn" onclick="shazamCompare()" class="btn btn-secondary">Compare</button>
+                    <button type="button" onclick="shazamFetchShazam()" class="btn btn-shazam" id="shazamFetchBtn"><span class="shazam-btn-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></span>Shazam</button>
                     <div class="search-dropdown-wrap toolbar-group">
                         <button type="button" id="shazamSearchDropdownBtn" class="btn btn-secondary" title="Search: unfound (orange) or new (grey) tracks" aria-haspopup="true" aria-expanded="false">
                             Search <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
                         </button>
                         <div class="search-dropdown-menu" id="shazamSearchDropdownMenu" role="menu">
-                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="unfound"><span class="status-dot status-not-found" aria-hidden="true"></span> Search unfound</button>
-                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="new"><span class="status-dot status-no-link" aria-hidden="true"></span> Search new</button>
+                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="new"><span class="status-dot status-no-link" aria-hidden="true"></span> Search New Shazam Entries on Soundeo</button>
+                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="unfound"><span class="status-dot status-not-found" aria-hidden="true"></span> Search Unfound Shazam Entries on Soundeo</button>
                         </div>
                     </div>
-                    <button type="button" id="shazamSyncBtn" onclick="shazamRunSync()" class="btn btn-primary" disabled>Sync</button>
                 </div>
                 <div class="toolbar-divider"></div>
-                <div class="toolbar-group scan-favorites-group">
-                    <span class="toolbar-label">Favorites:</span>
-                    <button type="button" class="btn btn-small shazam-scan-range-btn active" data-scan-range="all">All</button>
-                    <button type="button" class="btn btn-small shazam-scan-range-btn" data-scan-range="1_month">1m</button>
-                    <button type="button" class="btn btn-small shazam-scan-range-btn" data-scan-range="2_months">2m</button>
-                    <button type="button" class="btn btn-small shazam-scan-range-btn" data-scan-range="3_months">3m</button>
+                <div class="favorites-dropdown-wrap toolbar-group">
+                    <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Sync starred state from Soundeo" aria-haspopup="true" aria-expanded="false">
+                        Sync starred <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
+                    </button>
+                    <div class="search-dropdown-menu" id="shazamFavoritesDropdownMenu" role="menu">
+                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="all">All</button>
+                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="1_month">Last month</button>
+                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="2_months">2 months</button>
+                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="3_months">Last quarter</button>
+                    </div>
                 </div>
                 <div class="toolbar-divider"></div>
-                <button type="button" id="shazamRescanBtn" onclick="shazamRescan()" class="btn btn-secondary btn-small">Rescan folders</button>
+                <div class="rescan-dropdown-wrap toolbar-group">
+                    <button type="button" id="shazamRescanDropdownBtn" class="btn btn-secondary btn-small" title="Rescan local folders" aria-haspopup="true" aria-expanded="false">
+                        Rescan <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
+                    </button>
+                    <div class="search-dropdown-menu" id="shazamRescanDropdownMenu" role="menu">
+                        <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="compare">Rescan local and match</button>
+                        <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="only">Rescan local only</button>
+                        <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="match_only">Match only</button>
+                    </div>
+                </div>
                 <div class="toolbar-stats">
                     <span id="shazamCount">0</span> shazam · <span id="shazamLocalCount">0</span> local · <span id="shazamHaveCount">0</span> have · <span id="shazamToDownloadCount">0</span> to DL
                 </div>
             </div>
 
-            <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack(event)" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
-                <span id="shazamProgress" class="shazam-progress-text"></span>
-                <button type="button" id="shazamProgressGotoBtn" class="btn btn-small btn-secondary shazam-progress-goto-btn" style="display:none;" onclick="event.stopPropagation(); shazamScrollToCurrentTrack();">Go to row</button>
-                <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-small btn-danger">Stop</button>
+            <div id="shazamBatchJobsSection" class="shazam-batch-jobs-section" style="display:none;">
+                <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack(event)" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
+                    <span class="shazam-running-label">Running:</span>
+                    <span id="shazamProgress" class="shazam-progress-text"></span>
+                    <button type="button" id="shazamProgressGotoBtn" class="btn btn-small btn-secondary shazam-progress-goto-btn" style="display:none;" onclick="event.stopPropagation(); shazamScrollToCurrentTrack();">Follow row</button>
+                    <button type="button" id="shazamSyncStopBtn" onclick="shazamStopSync()" class="btn btn-small btn-danger">Stop</button>
+                </div>
+                <div id="shazamSingleSearchQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+                    <span id="shazamSingleQueueBarLabel" class="shazam-job-queue-label">Search queue:</span>
+                    <div id="shazamSingleSearchQueueList" class="shazam-job-queue-list"></div>
+                </div>
+                <div id="shazamStarQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+                    <span class="shazam-job-queue-label">Star queue:</span>
+                    <div id="shazamStarQueueList" class="shazam-job-queue-list"></div>
+                </div>
+                <div id="shazamUnstarQueueBar" class="shazam-single-search-queue-bar" style="display:none;">
+                    <span class="shazam-job-queue-label">Unstar queue:</span>
+                    <div id="shazamUnstarQueueList" class="shazam-job-queue-list"></div>
+                </div>
+                <div id="shazamJobQueueBar" class="shazam-job-queue-bar" style="display:none;">
+                    <span class="shazam-job-queue-label">Queued:</span>
+                    <div id="shazamJobQueueList" class="shazam-job-queue-list"></div>
+                    <button type="button" id="shazamJobQueueClearBtn" class="btn btn-small btn-secondary" onclick="shazamClearJobQueue()" title="Clear all queued jobs">Clear queue</button>
+                </div>
             </div>
 
             <div id="shazamFolderWarning" class="shazam-folder-warning" style="display:none;"></div>
 
             <div class="filters-bar">
+                <div class="filter-group shazam-search-filter-wrap">
+                    <span class="shazam-track-search-inner">
+                        <input type="text" id="shazamTrackSearch" class="shazam-track-search-input" placeholder="Filter by artist or title…" aria-label="Filter tracks by artist or title" />
+                        <button type="button" id="shazamTrackSearchClear" class="shazam-track-search-clear" aria-label="Clear search" title="Clear search" style="display: none;">×</button>
+                    </span>
+                </div>
                 <div class="filter-group">
                     <button type="button" class="btn btn-small shazam-filter-btn active" data-status="all">All</button>
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="have">Have</button>
@@ -172,10 +209,15 @@
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="skipped">Skipped</button>
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="ignored">Ignored</button>
                 </div>
+                <div class="filter-group">
+                    <button type="button" class="btn btn-small shazam-filter-time-btn active" data-time-range="all">All</button>
+                    <button type="button" class="btn btn-small shazam-filter-time-btn" data-time-range="1_month">Last month</button>
+                    <button type="button" class="btn btn-small shazam-filter-time-btn" data-time-range="3_months">Last quarter</button>
+                </div>
                 <div id="shazamSelectionBar" class="selection-actions" style="display:none;">
                     <span id="shazamSelectedCount">0 selected</span>
                     <button type="button" onclick="shazamSkipSelected()" class="btn btn-secondary btn-small">Skip</button>
-                    <button type="button" onclick="shazamSyncSelected()" class="btn btn-primary btn-small">Sync</button>
+                    <button type="button" onclick="shazamStarSelected()" class="btn btn-primary btn-small btn-has-icon" title="Star selected tracks on Soundeo (tracks must have a link)"><span class="shazam-btn-icon" aria-hidden="true">★</span>Star</button>
                 </div>
             </div>
 
@@ -201,7 +243,7 @@
 
     <!-- Shazam / Sync playback bar (fixed bottom, shown when playing) -->
     <div id="shazamPlayerBar" class="shazam-player-bar" style="display: none;" role="region" aria-label="Now playing">
-        <button type="button" id="shazamBarPlayPause" class="shazam-bar-play-pause" title="Play / Pause" aria-label="Play / Pause" onclick="shazamPlayerBarPlayPause()">▶</button>
+        <button type="button" id="shazamBarPlayPause" class="shazam-bar-play-pause" title="Play / Pause" aria-label="Play / Pause" onclick="shazamPlayerBarPlayPause()"><svg viewBox="0 0 24 24" fill="currentColor"><use href="#icon-play"/></svg></button>
         <div class="shazam-bar-track-info">
             <span id="shazamBarTrackLabel" class="shazam-bar-track-label">—</span>
         </div>
@@ -214,6 +256,9 @@
         </div>
         <button type="button" id="shazamBarClose" class="shazam-bar-close" title="Stop and close" aria-label="Stop and close" onclick="shazamPlayerBarClose()">×</button>
     </div>
+
+    <!-- Context menu for play button (Open file location / Open on Soundeo) -->
+    <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
 
     <script src="{{ url_for('static', filename='app.js') }}?v=10"></script>
 </body>

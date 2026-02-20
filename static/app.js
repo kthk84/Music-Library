@@ -1184,6 +1184,12 @@ let shazamProgressInterval = null;
 let shazamProgressRestoreInterval = null;
 /** Latest sync/search progress from server (running, current, total, message, current_key). Used to show spinner in the row being processed. */
 let shazamCurrentProgress = {};
+/** Current star queue from progress API (list of { artist, title, key }). Used to show "Queued 2/5" in track rows. */
+let shazamCurrentStarQueue = [];
+/** Current single-search queue from progress API (list of { artist, title }). Used to show "Queued 2/5" in track rows. */
+let shazamCurrentSearchQueue = [];
+/** Current unstar queue from progress API (list of { artist, title, key }). Used to show "Unstar queued 2/5" in track rows. */
+let shazamCurrentUnstarQueue = [];
 /** When true, keep scrolling the current processing row to center of viewport on each progress update. Toggled by "Follow row" / "Unfollow row". */
 /** Counter for throttling status fetch during progress poll (fetch status every 2nd poll when batch running). */
 let shazamProgressPollCount = 0;
@@ -1742,6 +1748,7 @@ function shazamRestoreProgressIfRunning() {
         .then(p => {
             if (!p.running) return;
             shazamCurrentProgress = p;
+            shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
             shazamSetProgressClickable(!!p.current_key);
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             const barEl = document.getElementById('shazamSyncProgress');
@@ -1765,6 +1772,7 @@ function shazamRestoreProgressIfRunning() {
                     .then(r => r.json())
                     .then(p => {
                         shazamCurrentProgress = p;
+                        shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
                         const el = document.getElementById('shazamProgress');
                         const stopBtn = document.getElementById('shazamSyncStopBtn');
                         if (el) {
@@ -1777,10 +1785,12 @@ function shazamRestoreProgressIfRunning() {
                                     text = `${label}: ${c}/${tot}${p.message ? ' — ' + p.message : ''}`;
                                 } else if (p.mode === 'sync_favorites') {
                                     text = p.message || 'Sync favorites…';
+                                } else if (p.mode === 'unstar_single') {
+                                    text = p.message || 'Unstarring…';
                                 } else {
                                     text = (p.current != null && p.total != null) ? `${p.current}/${p.total}: ${p.message || ''}` : (p.message || 'Running…');
                                 }
-                                if (p.last_url) {
+                                if (p.last_url && p.mode !== 'unstar_single') {
                                     const urlDisplay = p.last_url.replace(/^https?:\/\//, '');
                                     text += ' — ' + urlDisplay.slice(0, 50) + (urlDisplay.length > 50 ? '…' : '');
                                 }
@@ -2059,23 +2069,47 @@ function shazamRenderTrackList(data) {
             ? !!(shazamStarred[keyNorm] || shazamStarred[keyNormLower] || shazamStarred[keyDeep])
             : (_lu(shazamStarred, keyNorm, keyNormLower, keyDeep) || _lu(data.starred || {}, keyNorm, keyNormLower, keyDeep));
         const starred = !!(row.status === 'have' ? starredForExact : (starredForExact || starredFromAlias));
-        // Only exact key or keyLower for not_found (paper trail: searched but no link). Include progress so dots update live during batch.
-        const isSearchedNotFound = !!(_lu(shazamNotFound, key, keyLower) || _lu(data.not_found || {}, key, keyLower) || (prog && _lu(prog.not_found || {}, key, keyLower)));
+        // Same key variants as shazamSetNotFoundLive so dot colour (orange vs grey) stays in sync
+        const isSearchedNotFound = !!(_lu(shazamNotFound, key, keyLower, keyNorm, keyNormLower, keyDeep) || _lu(data.not_found || {}, key, keyLower, keyNorm, keyNormLower, keyDeep) || (prog && _lu(prog.not_found || {}, key, keyLower)));
         const soundeoScoreMap = data.soundeo_match_scores || {};
         const soundeoMatchScore = _lu(soundeoScoreMap, key, keyLower, keyNorm, keyNormLower, keyDeep) || (prog && _lu(prog.soundeo_match_scores || {}, key, keyLower, keyNorm, keyNormLower, keyDeep)) || null;
         const score = row.match_score != null ? row.match_score : null;
         const isSynced = !!url;
-        const isDismissed = !!(shazamDismissed[key] || shazamDismissed[keyLower]);
+        // Use same key variants as shazamSetDismissedLive so dot state (colour) and row stay in sync
+        const isDismissed = !!(_lu(shazamDismissed, key, keyLower, keyNorm, keyNormLower, keyDeep));
         const manualCheckDismissed = !!shazamDismissedManualCheck[key];
         const isNonExtendedVersion = soundeoTitle && /\((original\s+mix|radio\s+edit|radio\s+version|short\s+version)\)/i.test(soundeoTitle.trim()) && !/extended/i.test(soundeoTitle.trim());
         const showManualCheck = isTodl && !isDismissed && isSynced && !manualCheckDismissed && isNonExtendedVersion;
         const isPending = !!shazamActionPending[key];
+        // Queue position for row: star queue has key; search queue has artist+title
+        const starQueueIdx = (shazamCurrentStarQueue || []).findIndex(function (q) {
+            var qk = (q.key || (q.artist + ' - ' + q.title)).trim();
+            return qk === key || qk.toLowerCase() === keyLower;
+        });
+        const searchQueueIdx = (shazamCurrentSearchQueue || []).findIndex(function (q) {
+            return (q.artist || '').trim() === row.artist && (q.title || '').trim() === row.title;
+        });
+        const unstarQueueIdx = (shazamCurrentUnstarQueue || []).findIndex(function (q) {
+            var qk = (q.key || (q.artist + ' - ' + q.title)).trim();
+            return qk === key || qk.toLowerCase() === keyLower;
+        });
+        const inStarQueue = starQueueIdx >= 0;
+        const inSearchQueue = searchQueueIdx >= 0;
+        const inUnstarQueue = unstarQueueIdx >= 0;
+        const starQueuePos = inStarQueue ? starQueueIdx + 1 : 0;
+        const starQueueTotal = (shazamCurrentStarQueue || []).length;
+        const searchQueuePos = inSearchQueue ? searchQueueIdx + 1 : 0;
+        const searchQueueTotal = (shazamCurrentSearchQueue || []).length;
+        const unstarQueuePos = inUnstarQueue ? unstarQueueIdx + 1 : 0;
+        const unstarQueueTotal = (shazamCurrentUnstarQueue || []).length;
+        const inAnyQueue = inStarQueue || inSearchQueue || inUnstarQueue;
         const escapedKey = escapeHtml(key);
         const escapedArtist = escapeHtml(row.artist);
         const escapedTitle = escapeHtml(row.title);
         const currentKey = shazamCurrentProgress.current_key;
         const isCurrentTrack = !!(shazamCurrentProgress.running && currentKey && (currentKey === key || currentKey.toLowerCase() === keyLower));
 
+        // Dot colours: have+starred = green, have+not starred = teal; both live-update when star status changes (shazamSetStarredLive + re-render)
         let statusCell = '';
         if (isCurrentTrack) {
             statusCell = '<td class="status-cell"><span class="status-spinner" title="Processing…"></span></td>';
@@ -2154,7 +2188,23 @@ function shazamRenderTrackList(data) {
         const starToggleDataAttrs = (starToggleAction === 'star') ? ` data-track-url="${safeAttr(url || '')}"` : ` data-url="${safeAttr(url || '')}"`;
 
         let actionsCell = '<td class="shazam-actions-col">';
-        if (isPending) {
+        if (inAnyQueue) {
+            var parts = [];
+            if (inStarQueue) parts.push('Star ' + starQueuePos + '/' + starQueueTotal);
+            if (inSearchQueue) parts.push('Search ' + searchQueuePos + '/' + searchQueueTotal);
+            if (inUnstarQueue) parts.push('Unstar ' + unstarQueuePos + '/' + unstarQueueTotal);
+            var queueLabel = parts.length > 1 ? parts.join(', ') : (inStarQueue ? ('Star queued ' + starQueuePos + '/' + starQueueTotal) : (inSearchQueue ? ('Search queued ' + searchQueuePos + '/' + searchQueueTotal) : ('Unstar queued ' + unstarQueuePos + '/' + unstarQueueTotal)));
+            actionsCell += '<span class="shazam-queue-label">' + escapeHtml(queueLabel) + '</span>';
+            if (inStarQueue) {
+                actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="star" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from star queue">\u00d7</button>';
+            }
+            if (inSearchQueue) {
+                actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="search" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from search queue">\u00d7</button>';
+            }
+            if (inUnstarQueue) {
+                actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="unstar" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from unstar queue">\u00d7</button>';
+            }
+        } else if (isPending) {
             actionsCell += '<span class="shazam-action-spinner" title="Processing\u2026">&#8987;</span>';
         } else {
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
@@ -2398,7 +2448,64 @@ async function shazamToggleSoundeoPlay(btn) {
     }
 }
 
-/** Unstar on Soundeo only; link stays visible, no strikethrough. */
+/** Key variants used for row lookup (match render logic). */
+function shazamKeyVariants(key) {
+    if (!key) return [];
+    const keyLower = key.toLowerCase();
+    const keyNorm = key.indexOf(' (') !== -1 ? key.substring(0, key.indexOf(' (')).trim() : key;
+    const keyNormLower = keyNorm.toLowerCase();
+    const keyDeep = (() => { let s = keyNormLower.replace(/ & /g, ', '); const d = s.indexOf(' - '); if (d !== -1) { const arts = s.substring(0, d).split(', ').map(a => a.trim()).filter(Boolean).sort().join(', '); s = arts + ' - ' + s.substring(d + 3); } return s; })();
+    return [key, keyLower, keyNorm, keyNormLower, keyDeep];
+}
+
+/** Set starred state for a key and all display variants so row live-updates. */
+function shazamSetStarredLive(key, value) {
+    var keys = shazamKeyVariants(key);
+    keys.forEach(function (k) { shazamStarred[k] = value; });
+    if (shazamLastData && shazamLastData.starred) {
+        keys.forEach(function (k) { shazamLastData.starred[k] = value; });
+    }
+}
+
+/** Set dismissed state for a key and all display variants so row live-updates. */
+function shazamSetDismissedLive(key, value) {
+    var keys = shazamKeyVariants(key);
+    if (value) {
+        keys.forEach(function (k) { shazamDismissed[k] = true; });
+    } else {
+        keys.forEach(function (k) { delete shazamDismissed[k]; });
+    }
+}
+
+/** Set track URL for a key and all display variants so dot state (found/starred) and row stay in sync. */
+function shazamSetUrlLive(key, url) {
+    if (!key) return;
+    var keys = shazamKeyVariants(key);
+    keys.forEach(function (k) {
+        if (url) shazamTrackUrls[k] = url; else delete shazamTrackUrls[k];
+    });
+    if (shazamLastData && shazamLastData.urls) {
+        keys.forEach(function (k) {
+            if (url) shazamLastData.urls[k] = url; else delete shazamLastData.urls[k];
+        });
+    }
+}
+
+/** Set not_found state for a key and all display variants so dot state (orange vs grey) stays in sync. */
+function shazamSetNotFoundLive(key, value) {
+    if (!key) return;
+    var keys = shazamKeyVariants(key);
+    keys.forEach(function (k) {
+        if (value) shazamNotFound[k] = true; else delete shazamNotFound[k];
+    });
+    if (shazamLastData && shazamLastData.not_found) {
+        keys.forEach(function (k) {
+            if (value) shazamLastData.not_found[k] = true; else delete shazamLastData.not_found[k];
+        });
+    }
+}
+
+/** Unstar on Soundeo only; link stays visible, no strikethrough. Queue-based like star/search. */
 async function shazamUnstarTrack(key, trackUrl, artist, title) {
     if (shazamActionPending[key]) return;
     shazamActionPending[key] = true;
@@ -2407,25 +2514,30 @@ async function shazamUnstarTrack(key, trackUrl, artist, title) {
         const res = await fetch('/api/shazam-sync/unstar-track', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key, track_url: trackUrl }),
+            body: JSON.stringify({ key, track_url: trackUrl, artist: artist || '', title: title || '' }),
         });
         const data = await res.json().catch(() => ({}));
-        if (res.ok && data.ok) {
-            const keyLower = key.toLowerCase();
-            shazamStarred[key] = false;
-            shazamStarred[keyLower] = false;
-            if (shazamLastData && shazamLastData.starred) {
-                shazamLastData.starred[key] = false;
-                shazamLastData.starred[keyLower] = false;
-            }
-        } else if (!res.ok || data.error) {
+        if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
+            delete shazamActionPending[key];
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            return;
         }
+        var unstarQueue = data.unstar_queue || [];
+        shazamApplyQueueState(shazamCurrentStarQueue, shazamCurrentSearchQueue, unstarQueue);
+        if (unstarQueue.length > 0 || data.status === 'queued' || data.status === 'started') {
+            shazamShowSyncProgress(data.message || 'Unstarring…');
+            if (!shazamProgressInterval) {
+                shazamProgressInterval = setInterval(shazamPollProgress, 500);
+            }
+        }
+        delete shazamActionPending[key];
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
     } catch (e) {
         alert('Error: ' + (e.message || 'Request failed'));
+        delete shazamActionPending[key];
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
     }
-    delete shazamActionPending[key];
-    if (shazamLastData) shazamRenderTrackList(shazamLastData);
 }
 
 async function shazamDismissTrack(key, trackUrl, artist, title) {
@@ -2440,8 +2552,8 @@ async function shazamDismissTrack(key, trackUrl, artist, title) {
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
-            shazamDismissed[key] = true;
-            shazamStarred[key] = false;
+            shazamSetDismissedLive(key, true);
+            shazamSetStarredLive(key, false);
         } else if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
         }
@@ -2465,9 +2577,7 @@ async function shazamClearDismissed(key) {
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
-            const keyLower = key.toLowerCase();
-            delete shazamDismissed[key];
-            delete shazamDismissed[keyLower];
+            shazamSetDismissedLive(key, false);
         } else if (!res.ok || data.error) {
             alert(data.error || 'Failed to clear dismissed state');
         }
@@ -2476,6 +2586,41 @@ async function shazamClearDismissed(key) {
     }
     delete shazamActionPending[key];
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
+}
+
+/** Remove this track from the star, search, or unstar queue. Updates local queue state and re-renders. */
+async function shazamRemoveFromQueue(btn) {
+    if (!btn || !btn.dataset) return;
+    const queue = (btn.dataset.queue || '').toLowerCase();
+    const key = (btn.dataset.key || '').trim();
+    const artist = (btn.dataset.artist || '').trim();
+    const title = (btn.dataset.title || '').trim();
+    if (queue !== 'star' && queue !== 'search' && queue !== 'unstar') return;
+    const url = queue === 'star' ? '/api/shazam-sync/remove-from-star-queue' : (queue === 'search' ? '/api/shazam-sync/remove-from-search-queue' : '/api/shazam-sync/remove-from-unstar-queue');
+    const body = queue === 'star' ? { key: key || (artist + ' - ' + title) } : (queue === 'search' ? { artist: artist, title: title } : (key ? { key: key } : { artist: artist, title: title }));
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.error) {
+            alert(data.error || 'Failed to remove from queue');
+            return;
+        }
+        if (queue === 'star') {
+            shazamCurrentStarQueue = data.star_queue || [];
+        } else if (queue === 'search') {
+            shazamCurrentSearchQueue = data.single_search_queue || [];
+        } else {
+            shazamCurrentUnstarQueue = data.unstar_queue || [];
+        }
+        shazamApplyQueueState(shazamCurrentStarQueue, shazamCurrentSearchQueue, shazamCurrentUnstarQueue);
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    } catch (e) {
+        alert('Error: ' + (e.message || 'Request failed'));
+    }
 }
 
 async function shazamUndismissTrack(key, trackUrl, artist, title) {
@@ -2490,10 +2635,9 @@ async function shazamUndismissTrack(key, trackUrl, artist, title) {
         });
         const data = await res.json().catch(() => ({}));
         if (res.ok && data.ok) {
-            delete shazamDismissed[key];
-            shazamStarred[key] = true;
-            if (data.url) shazamTrackUrls[key] = data.url;
-            await shazamLoadStatus();
+            shazamSetDismissedLive(key, false);
+            shazamSetStarredLive(key, true);
+            if (data.url) shazamSetUrlLive(key, data.url);
         } else if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
         }
@@ -2502,6 +2646,7 @@ async function shazamUndismissTrack(key, trackUrl, artist, title) {
     }
     delete shazamActionPending[key];
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    await shazamLoadStatus();
 }
 
 async function shazamStarTrack(key, trackUrl, artist, title) {
@@ -2515,22 +2660,27 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
             body: JSON.stringify({ key, track_url: trackUrl || undefined, artist: artist || '', title: title || '' }),
         });
         const data = await res.json().catch(() => ({}));
-        if (res.ok && data.ok) {
-            shazamStarred[key] = true;
-            shazamStarred[key.toLowerCase()] = true;
-            if (data.url) {
-                shazamTrackUrls[key] = data.url;
-                shazamTrackUrls[key.toLowerCase()] = data.url;
-            }
-            await shazamLoadStatus();
-        } else {
+        if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG || 'Could not star track');
+            delete shazamActionPending[key];
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            return;
         }
+        var starQueue = data.star_queue || [];
+        shazamApplyQueueState(starQueue, shazamCurrentSearchQueue, data.unstar_queue !== undefined ? data.unstar_queue : shazamCurrentUnstarQueue);
+        if (starQueue.length >= 0) {
+            shazamShowSyncProgress(data.message || 'Starring…');
+            if (!shazamProgressInterval) {
+                shazamProgressInterval = setInterval(shazamPollProgress, 500);
+            }
+        }
+        delete shazamActionPending[key];
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
     } catch (e) {
+        delete shazamActionPending[key];
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
         alert('Error: ' + (e.message || 'Request failed'));
     }
-    delete shazamActionPending[key];
-    if (shazamLastData) shazamRenderTrackList(shazamLastData);
 }
 
 async function shazamSkipSingleTrack(artist, title) {
@@ -2593,6 +2743,7 @@ async function shazamSyncSingleTrack(key, artist, title) {
                 if (syncSingleLabel.length > 45) syncSingleLabel = syncSingleLabel.slice(0, 42) + '…';
                 shazamJobQueue.push({ id: ++shazamJobId, type: 'sync_single_track', label: syncSingleLabel, payload: { key: key, artist: artist, title: title } });
                 shazamRenderJobQueue();
+                shazamEnsureProgressVisibleWhenQueued();
             } else {
                 alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
             }
@@ -2616,8 +2767,12 @@ async function shazamSyncSingleTrack(key, artist, title) {
                     shazamHideSyncProgress();
                     if (p.mode === 'sync_single') {
                         if (p.done === 1 && p.url) {
-                            shazamTrackUrls[key] = p.url;
-                            if (p.soundeo_title) shazamSoundeoTitles[key] = p.soundeo_title;
+                            shazamSetUrlLive(key, p.url);
+                            if (p.soundeo_title) {
+                                shazamKeyVariants(key).forEach(function (k) {
+                                    shazamSoundeoTitles[k] = p.soundeo_title;
+                                });
+                            }
                             shazamLoadStatus();
                             shazamQueueSyncFavoritesAfterSearch();
                             shazamMaybeStartQueuedJob();
@@ -2752,6 +2907,13 @@ function shazamRenderJobQueue() {
         if (clearBtn) clearBtn.style.display = 'inline-block';
     }
     shazamUpdateBatchJobsSectionVisibility();
+}
+
+/** When we queue a job because something is already running, show progress section and start polling so "Running:" is visible. */
+function shazamEnsureProgressVisibleWhenQueued() {
+    if (shazamProgressInterval) return;
+    shazamShowSyncProgress('Loading…');
+    shazamProgressInterval = setInterval(shazamPollProgress, 500);
 }
 
 function shazamClearJobQueue() {
@@ -2904,6 +3066,7 @@ async function shazamStarSelected() {
             if (res.status === 400 && (data.error || '').toLowerCase().includes('already running')) {
                 shazamJobQueue.push({ id: ++shazamJobId, type: 'star_batch', label: `Star (${withUrl.length} tracks)`, payload: { tracks: withUrl } });
                 shazamRenderJobQueue();
+                shazamEnsureProgressVisibleWhenQueued();
             } else {
                 alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
             }
@@ -2922,16 +3085,30 @@ async function shazamStopSync() {
     } catch (e) { alert('Error: ' + e.message); }
 }
 
-/** Show/hide the batch jobs section (Running + Search queue + Queued) so all are visible when applicable. */
+/** Show/hide the batch jobs section (Running + Search queue + Star queue + Queued) so all are visible when applicable. */
 function shazamUpdateBatchJobsSectionVisibility() {
     const section = document.getElementById('shazamBatchJobsSection');
     if (!section) return;
     const progressEl = document.getElementById('shazamSyncProgress');
     const progressVisible = progressEl && progressEl.style.display === 'flex';
-    const singleQueueBar = document.getElementById('shazamSingleSearchQueueBar');
-    const singleSearchQueueVisible = singleQueueBar && singleQueueBar.style.display === 'flex';
-    const queueVisible = shazamJobQueue.length > 0;
-    section.style.display = (progressVisible || singleSearchQueueVisible || queueVisible) ? 'flex' : 'none';
+    const searchQueueBar = document.getElementById('shazamSingleSearchQueueBar');
+    const starQueueBar = document.getElementById('shazamStarQueueBar');
+    const unstarQueueBar = document.getElementById('shazamUnstarQueueBar');
+    const searchQueueVisible = searchQueueBar && searchQueueBar.style.display === 'flex';
+    const starQueueVisible = starQueueBar && starQueueBar.style.display === 'flex';
+    const unstarQueueVisible = unstarQueueBar && unstarQueueBar.style.display === 'flex';
+    const jobQueueVisible = shazamJobQueue.length > 0;
+    section.style.display = (progressVisible || searchQueueVisible || starQueueVisible || unstarQueueVisible || jobQueueVisible) ? 'flex' : 'none';
+}
+
+/** Set current queue state (globals + banners) so row "Queued 2/5" and queue bars stay in sync. */
+function shazamApplyQueueState(starQueue, searchQueue, unstarQueue) {
+    shazamCurrentStarQueue = starQueue || [];
+    shazamCurrentSearchQueue = searchQueue || [];
+    shazamCurrentUnstarQueue = unstarQueue !== undefined ? (unstarQueue || []) : shazamCurrentUnstarQueue;
+    shazamRenderStarQueue(shazamCurrentStarQueue);
+    shazamRenderSingleSearchQueue(shazamCurrentSearchQueue);
+    shazamRenderUnstarQueue(shazamCurrentUnstarQueue);
 }
 
 /** Render the per-track search queue (from progress or POST response). queue = [ { artist, title }, ... ] */
@@ -2946,6 +3123,42 @@ function shazamRenderSingleSearchQueue(queue) {
         bar.style.display = 'flex';
         list.innerHTML = queue.map(function (q) {
             const label = (q.artist && q.title) ? (q.artist + ' – ' + q.title) : (q.artist || q.title || '…');
+            return '<span class="shazam-job-queue-item">' + escapeHtml(label) + '</span>';
+        }).join('');
+    }
+    shazamUpdateBatchJobsSectionVisibility();
+}
+
+/** Render the per-track star queue. queue = [ { artist, title, key? }, ... ]. Uses dedicated Star queue bar so Search and Star can both be visible. */
+function shazamRenderStarQueue(queue) {
+    const bar = document.getElementById('shazamStarQueueBar');
+    const list = document.getElementById('shazamStarQueueList');
+    if (!bar || !list) return;
+    if (!queue || queue.length === 0) {
+        bar.style.display = 'none';
+        list.innerHTML = '';
+    } else {
+        bar.style.display = 'flex';
+        list.innerHTML = queue.map(function (q) {
+            const label = (q.artist && q.title) ? (q.artist + ' – ' + q.title) : (q.artist || q.title || q.key || '…');
+            return '<span class="shazam-job-queue-item">' + escapeHtml(label) + '</span>';
+        }).join('');
+    }
+    shazamUpdateBatchJobsSectionVisibility();
+}
+
+/** Render the per-track unstar queue. queue = [ { artist, title, key? }, ... ]. */
+function shazamRenderUnstarQueue(queue) {
+    const bar = document.getElementById('shazamUnstarQueueBar');
+    const list = document.getElementById('shazamUnstarQueueList');
+    if (!bar || !list) return;
+    if (!queue || queue.length === 0) {
+        bar.style.display = 'none';
+        list.innerHTML = '';
+    } else {
+        bar.style.display = 'flex';
+        list.innerHTML = queue.map(function (q) {
+            const label = (q.artist && q.title) ? (q.artist + ' – ' + q.title) : (q.artist || q.title || q.key || '…');
             return '<span class="shazam-job-queue-item">' + escapeHtml(label) + '</span>';
         }).join('');
     }
@@ -2969,8 +3182,9 @@ function shazamHideSyncProgress() {
     const gotoBtn = document.getElementById('shazamProgressGotoBtn');
     if (gotoBtn) gotoBtn.textContent = 'Follow row';
     shazamSetProgressClickable(false);
-    shazamRenderSingleSearchQueue([]);
+    shazamApplyQueueState([], [], []);
     shazamUpdateBatchJobsSectionVisibility();
+    if (shazamLastData) shazamRenderTrackList(shazamLastData);
 }
 
 /** When progress has current_key, show progress bar as clickable (cursor + title + Follow row button). */
@@ -3140,6 +3354,7 @@ async function shazamRunSync() {
             if (res.status === 400 && (data.error || '').toLowerCase().includes('already running')) {
                 shazamJobQueue.push({ id: ++shazamJobId, type: 'run_soundeo', label: 'Run Soundeo', payload: { time_range: timeRange } });
                 shazamRenderJobQueue();
+                shazamEnsureProgressVisibleWhenQueued();
             } else {
                 alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
             }
@@ -3165,6 +3380,7 @@ async function shazamSyncFavoritesFromSoundeo() {
             if (res.status === 400 && (data.error || '').toLowerCase().includes('already running')) {
                 shazamJobQueue.push({ id: ++shazamJobId, type: 'sync_favorites', label: 'Sync favorites', payload: { time_range: timeRange } });
                 shazamRenderJobQueue();
+                shazamEnsureProgressVisibleWhenQueued();
             } else {
                 alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
             }
@@ -3178,6 +3394,11 @@ async function shazamSyncFavoritesFromSoundeo() {
 function shazamPollProgress() {
     fetch('/api/shazam-sync/progress').then(r => r.json()).then(p => {
         shazamCurrentProgress = p;
+        shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
+        // Re-render track list whenever queue state changes so row-level "Star/Search/Unstar queued X/Y" and × stay in sync
+        if (shazamLastData && ((p.star_queue || []).length > 0 || (p.single_search_queue || []).length > 0 || (p.unstar_queue || []).length > 0)) {
+            shazamRenderTrackList(shazamLastData);
+        }
         const el = document.getElementById('shazamProgress');
         const stopBtn = document.getElementById('shazamSyncStopBtn');
         const doneMsg = p.stopped
@@ -3185,19 +3406,26 @@ function shazamPollProgress() {
             : (p.error ? `Error: ${p.error}` : `Done. Favorited: ${p.done || 0}, Failed: ${p.failed || 0}`);
         if (el) {
             if (p.running) {
-                const label = (p.mode === 'star_batch') ? 'Starring' : (p.mode === 'search_global' ? 'Search' : (p.mode === 'sync_favorites' ? 'Sync favorites' : (p.mode === 'sync_single' ? 'Find & star' : 'Syncing')));
-                let text = `${label} ${p.current || 0}/${p.total || 0}${p.message ? ' — ' + p.message : ''}`;
-                if (p.last_url) {
+                const label = (p.mode === 'star_batch' || p.mode === 'star_single') ? 'Starring' : (p.mode === 'unstar_single' ? 'Unstarring' : (p.mode === 'search_global' ? 'Search' : (p.mode === 'sync_favorites' ? 'Sync favorites' : (p.mode === 'sync_single' ? 'Find & star' : 'Syncing'))));
+                let text = (p.mode === 'star_single') ? (p.message || 'Starring…') : (p.mode === 'unstar_single' ? (p.message || 'Unstarring…') : `${label} ${p.current || 0}/${p.total || 0}${p.message ? ' — ' + p.message : ''}`);
+                if (p.mode !== 'star_single' && p.mode !== 'unstar_single' && p.last_url) {
                     const urlDisplay = p.last_url.replace(/^https?:\/\//, '');
                     text += ' — ' + urlDisplay.slice(0, 60) + (urlDisplay.length > 60 ? '…' : '');
                 }
                 el.textContent = text;
             } else {
-                const endMsg = p.mode === 'star_batch'
+                const endMsg = (p.mode === 'star_batch' || p.mode === 'star_single')
                     ? (p.stopped ? `Stopped. Starred: ${p.done || 0}, Failed: ${p.failed || 0}` : (p.error ? `Error: ${p.error}` : `Done. Starred: ${p.done || 0}, Failed: ${p.failed || 0}`))
-                    : (p.mode === 'sync_favorites' ? (p.error ? 'Error: ' + p.error : (p.message || 'Done.')) : doneMsg);
+                    : (p.mode === 'unstar_single' ? (p.error ? 'Error: ' + p.error : (p.message || `Done. Unstarred: ${p.done || 0}`)) : (p.mode === 'sync_favorites' ? (p.error ? 'Error: ' + p.error : (p.message || 'Done.')) : doneMsg));
                 el.textContent = endMsg;
             }
+        }
+        if (!p.running && p.mode === 'star_single' && p.key && (p.starred === true || p.done === 1)) {
+            shazamSetStarredLive(p.key, true);
+            if (p.url) shazamSetUrlLive(p.key, p.url);
+        }
+        if (!p.running && p.mode === 'unstar_single' && p.key) {
+            shazamSetStarredLive(p.key, false);
         }
         shazamSetProgressClickable(p.running && !!p.current_key);
         if (p.running) {
@@ -3221,20 +3449,26 @@ function shazamPollProgress() {
         if (p.starred) {
             Object.assign(shazamStarred, p.starred);
         }
+        var starQueueEmpty = (p.star_queue || []).length === 0;
+        var unstarQueueEmpty = (p.unstar_queue || []).length === 0;
         if (!p.running && shazamProgressInterval) {
-            shazamFollowCurrentRow = false;
-            shazamCurrentProgress = {};
-            shazamProgressPollCount = 0;
-            clearInterval(shazamProgressInterval);
-            shazamProgressInterval = null;
-            if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopped'; }
-            const gotoBtn = document.getElementById('shazamProgressGotoBtn');
-            if (gotoBtn) gotoBtn.textContent = 'Follow row';
-            shazamHideSyncProgress();
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
-            shazamLoadStatus();
-            if (p.mode === 'search_global') shazamQueueSyncFavoritesAfterSearch();
-            shazamMaybeStartQueuedJob();
+            if ((p.mode === 'star_single' && !starQueueEmpty) || (p.mode === 'unstar_single' && !unstarQueueEmpty)) {
+                // Queue still has items (next will start); keep polling
+            } else {
+                shazamFollowCurrentRow = false;
+                shazamCurrentProgress = {};
+                shazamProgressPollCount = 0;
+                clearInterval(shazamProgressInterval);
+                shazamProgressInterval = null;
+                if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopped'; }
+                const gotoBtn = document.getElementById('shazamProgressGotoBtn');
+                if (gotoBtn) gotoBtn.textContent = 'Follow row';
+                shazamHideSyncProgress();
+                if (shazamLastData) shazamRenderTrackList(shazamLastData);
+                shazamLoadStatus();
+                if (p.mode === 'search_global') shazamQueueSyncFavoritesAfterSearch();
+                shazamMaybeStartQueuedJob();
+            }
         }
     }).catch(() => {});
 }
@@ -3387,6 +3621,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     document.addEventListener('click', (e) => {
+        const removeQueueBtn = e.target.closest('.shazam-remove-queue');
+        if (removeQueueBtn) {
+            shazamRemoveFromQueue(removeQueueBtn);
+            return;
+        }
         const btn = e.target.closest('[data-action]');
         if (!btn) return;
         if (btn.classList.contains('shazam-row-action-inactive')) return;
@@ -3428,43 +3667,40 @@ async function shazamSearchSingleOnSoundeo(key, artist, title) {
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             return;
         }
+        var searchQueue = data.single_search_queue || [];
+        shazamApplyQueueState(shazamCurrentStarQueue, searchQueue, data.unstar_queue !== undefined ? data.unstar_queue : shazamCurrentUnstarQueue);
         if (data.status === 'queued') {
             shazamShowSyncProgress(data.message || 'Searching… (queued)');
-            shazamRenderSingleSearchQueue(data.single_search_queue || []);
             delete shazamActionPending[key];
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             return;
         }
         shazamShowSyncProgress(data.message || 'Searching…');
-        shazamRenderSingleSearchQueue(data.single_search_queue || []);
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
         const poll = setInterval(async () => {
             const pRes = await fetch('/api/shazam-sync/progress');
             const p = await pRes.json();
             shazamCurrentProgress = p;
+            shazamApplyQueueState(shazamCurrentStarQueue, p.single_search_queue || [], p.unstar_queue !== undefined ? p.unstar_queue : shazamCurrentUnstarQueue);
             const el = document.getElementById('shazamProgress');
             if (el) el.textContent = p.running ? (p.message || 'Searching…') : (p.error || p.message || 'Done.');
             shazamSetProgressClickable(p.running && !!p.current_key);
-            shazamRenderSingleSearchQueue(p.single_search_queue || []);
             if (p.running && shazamLastData) shazamRenderTrackList(shazamLastData);
             if (!p.running) {
                 if (p.mode === 'search_single') {
                     var trackKey = (p.key != null && p.key !== '') ? p.key : key;
-                    var trackKeyLower = trackKey.toLowerCase();
                     if (p.done === 1 && p.url) {
-                        shazamTrackUrls[trackKey] = p.url;
-                        shazamTrackUrls[trackKeyLower] = p.url;
+                        shazamSetUrlLive(trackKey, p.url);
                         if (p.soundeo_title) {
-                            shazamSoundeoTitles[trackKey] = p.soundeo_title;
-                            shazamSoundeoTitles[trackKeyLower] = p.soundeo_title;
+                            shazamKeyVariants(trackKey).forEach(function (k) {
+                                shazamSoundeoTitles[k] = p.soundeo_title;
+                            });
                         }
-                        shazamStarred[trackKey] = !!p.starred;
-                        shazamStarred[trackKeyLower] = !!p.starred;
-                        delete shazamNotFound[trackKey];
-                        delete shazamNotFound[trackKeyLower];
+                        shazamSetStarredLive(trackKey, !!p.starred);
+                        shazamSetNotFoundLive(trackKey, false);
                         shazamLoadStatus();
                     } else if (p.done === 0 && p.failed === 1) {
-                        shazamNotFound[trackKey] = true;
-                        shazamNotFound[trackKeyLower] = true;
+                        shazamSetNotFoundLive(trackKey, true);
                     }
                 }
                 delete shazamActionPending[key];
@@ -3499,6 +3735,7 @@ async function shazamSearchAllOnSoundeo(searchMode) {
                 const label = searchMode === 'new' ? 'Search new' : 'Search unfound';
                 shazamJobQueue.push({ id: ++shazamJobId, type: 'search', label: label, payload: { mode: searchMode } });
                 shazamRenderJobQueue();
+                shazamEnsureProgressVisibleWhenQueued();
             } else {
                 alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
             }
@@ -3509,6 +3746,7 @@ async function shazamSearchAllOnSoundeo(searchMode) {
             const pRes = await fetch('/api/shazam-sync/progress');
             const p = await pRes.json();
             shazamCurrentProgress = p;
+            shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
             const el = document.getElementById('shazamProgress');
             if (el) {
                 if (p.running) {

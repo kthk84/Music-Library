@@ -2193,7 +2193,7 @@ def shazam_sync_rescan_folder():
 
 @app.route('/api/shazam-sync/progress', methods=['GET'])
 def shazam_sync_progress():
-    """Return current automation progress. Includes single_search_queue when per-track search queue is used."""
+    """Return current automation progress. Includes single_search_queue and star_queue when used."""
     progress = getattr(app, '_shazam_sync_progress', None)
     if not progress:
         out = {'running': False, 'current': 0, 'total': 0}
@@ -2206,6 +2206,20 @@ def shazam_sync_progress():
             out['single_search_queue'] = [{'artist': q.get('artist', ''), 'title': q.get('title', '')} for q in queue]
     else:
         out['single_search_queue'] = []
+    star_lock = getattr(app, '_shazam_single_star_queue_lock', None)
+    star_queue = getattr(app, '_shazam_single_star_queue', None)
+    if star_queue is not None and star_lock is not None:
+        with star_lock:
+            out['star_queue'] = [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in star_queue]
+    else:
+        out['star_queue'] = []
+    unstar_lock = getattr(app, '_shazam_single_unstar_queue_lock', None)
+    unstar_queue = getattr(app, '_shazam_single_unstar_queue', None)
+    if unstar_queue is not None and unstar_lock is not None:
+        with unstar_lock:
+            out['unstar_queue'] = [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in unstar_queue]
+    else:
+        out['unstar_queue'] = []
     return jsonify(out)
 
 
@@ -3122,43 +3136,20 @@ def shazam_sync_dismiss_track():
     })
 
 
-@app.route('/api/shazam-sync/unstar-track', methods=['POST'])
-def shazam_sync_unstar_track():
-    """Unstar a track on Soundeo only. Does not set dismissed — link stays visible, no strikethrough.
-    Body: { key, track_url? }."""
+def _unstar_one_track_impl(key: str, track_url: str):
+    """Perform unstar on Soundeo for one track; update status cache. Returns (soundeo_ok: bool)."""
     from config_shazam import get_soundeo_cookies_path
     from soundeo_automation import extract_track_id, soundeo_api_set_favorite
     from shazam_cache import save_status_cache, load_status_cache
 
-    try:
-        data = request.get_json(silent=True) or {}
-        key = (data.get('key') or '').strip()
-        track_url = (data.get('track_url') or '').strip()
-    except Exception:
-        return jsonify({'error': 'Invalid request'}), 400
-    if not key:
-        return jsonify({'error': 'Missing track key'}), 400
-
     status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
     if not track_url:
         track_url = _status_url_for_key(status, key)
-        _soundeo_star_log.info("Soundeo unstar: track_url from cache=%s (key=%s)", track_url[:80] if track_url else "(empty)", key[:50] if key else "")
-    else:
-        _soundeo_star_log.info("Soundeo unstar: track_url from request=%s", track_url[:80])
-
     soundeo_result = None
     cookies_path = get_soundeo_cookies_path()
     track_id = extract_track_id(track_url) if track_url else None
-    _soundeo_star_log.info("Soundeo unstar: track_id=%s cookies_path=%s", track_id, bool(cookies_path))
     if track_id:
-        _soundeo_star_log.info("Soundeo unstar: trying HTTP set_favorite favored=False for key=%s", key[:60] if key else "")
         soundeo_result = soundeo_api_set_favorite(track_id, cookies_path, favored=False, track_url=track_url or None)
-        if soundeo_result and soundeo_result.get('ok'):
-            _soundeo_star_log.info("Soundeo unstar: HTTP succeeded")
-        else:
-            _soundeo_star_log.info("Soundeo unstar: HTTP failed (%s), trying crawler", (soundeo_result or {}).get('error', 'unknown'))
-    else:
-        _soundeo_star_log.warning("Soundeo unstar: no track_id, skipping HTTP")
     if track_url and not (soundeo_result and soundeo_result.get('ok')):
         from config_shazam import load_config
         from soundeo_automation import _get_driver, load_cookies, verify_logged_in, unfavorite_track_on_soundeo, _graceful_quit
@@ -3170,31 +3161,125 @@ def shazam_sync_unstar_track():
             if load_cookies(driver, cookies_path) and verify_logged_in(driver):
                 if unfavorite_track_on_soundeo(driver, track_url):
                     soundeo_result = {'ok': True, 'result': 'unfavored'}
-                    _soundeo_star_log.info("Soundeo unstar: crawler succeeded")
-                else:
-                    _soundeo_star_log.warning("Soundeo unstar: crawler failed")
-            else:
-                _soundeo_star_log.warning("Soundeo unstar: crawler skipped (cookies/login failed)")
-        except Exception as e:
-            _soundeo_star_log.warning("Soundeo unstar: crawler error: %s", e)
-        finally:
-            _graceful_quit(driver)
-
+            finally:
+                _graceful_quit(driver)
+        except Exception:
+            pass
     soundeo_ok = bool(soundeo_result and soundeo_result.get('ok'))
-    _soundeo_star_log.info("Soundeo unstar: result soundeo_ok=%s (key=%s)", soundeo_ok, key[:50] if key else "")
     if soundeo_result and soundeo_result.get('ok') and track_url and cookies_path:
         _verify_soundeo_favorite_state(track_url, cookies_path, expected_favored=False, key=key)
-
     status.setdefault('starred', {})
     status['starred'][key] = False
     status['starred'][key.lower()] = False
     app._shazam_sync_status = status
     save_status_cache(status)
+    return soundeo_ok
 
+
+def _start_next_single_unstar() -> None:
+    """If unstar queue has items, pop one and run in background."""
+    unstar_lock = getattr(app, '_shazam_single_unstar_queue_lock', None)
+    if unstar_lock is None:
+        return
+    with unstar_lock:
+        queue = getattr(app, '_shazam_single_unstar_queue', None) or []
+        if not queue:
+            app._shazam_sync_progress = {'running': False, 'mode': 'unstar_single'}
+            return
+        item = queue.pop(0)
+        app._shazam_single_unstar_queue = queue
+    thread = threading.Thread(target=_run_unstar_queue_worker, args=(item,), daemon=True)
+    thread.start()
+
+
+def _run_unstar_queue_worker(item: Dict) -> None:
+    """Background: unstar one track, then start next in queue."""
+    key = (item.get('key') or '').strip() or f"{item.get('artist', '')} - {item.get('title', '')}"
+    track_url = (item.get('track_url') or '').strip()
+    artist = (item.get('artist') or '').strip()
+    title = (item.get('title') or '').strip()
+    try:
+        app._shazam_sync_progress = {
+            'running': True, 'mode': 'unstar_single', 'current_key': key,
+            'message': f'Unstarring: {artist} - {title}', 'key': key,
+        }
+        soundeo_ok = _unstar_one_track_impl(key, track_url)
+        app._shazam_sync_progress = {
+            'running': True, 'mode': 'unstar_single', 'current_key': key,
+            'message': f'Unstarring: {artist} - {title}', 'key': key,
+            'done': 1 if soundeo_ok else 0, 'failed': 0 if soundeo_ok else 1,
+        }
+    except Exception as e:
+        app._shazam_sync_progress = {
+            'running': True, 'mode': 'unstar_single', 'current_key': key,
+            'message': f'Unstarring: {artist} - {title}', 'key': key,
+            'done': 0, 'failed': 1, 'error': str(e),
+        }
+    _start_next_single_unstar()
+
+
+@app.route('/api/shazam-sync/unstar-track', methods=['POST'])
+def shazam_sync_unstar_track():
+    """Unstar a track on Soundeo only; add to queue like star. Body: { key, track_url?, artist?, title? }."""
+    from shazam_cache import load_status_cache
+
+    try:
+        data = request.get_json(silent=True) or {}
+        key = (data.get('key') or '').strip()
+        track_url = (data.get('track_url') or '').strip()
+        artist = (data.get('artist') or '').strip()
+        title = (data.get('title') or '').strip()
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not key:
+        return jsonify({'error': 'Missing track key'}), 400
+
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
+    if not track_url:
+        track_url = _status_url_for_key(status, key)
+    if not track_url:
+        return jsonify({'error': 'No track URL. Run Search first to get a link.'}), 400
+
+    if not hasattr(app, '_shazam_single_unstar_queue'):
+        app._shazam_single_unstar_queue = []
+    if not hasattr(app, '_shazam_single_unstar_queue_lock'):
+        app._shazam_single_unstar_queue_lock = threading.Lock()
+
+    item = {'key': key, 'track_url': track_url, 'artist': artist, 'title': title}
+    with app._shazam_single_unstar_queue_lock:
+        app._shazam_single_unstar_queue.append(item)
+        queue = list(app._shazam_single_unstar_queue)
+
+    running = _shazam_any_job_running()
+    if running:
+        return jsonify({
+            'ok': True,
+            'status': 'queued',
+            'message': f'Queued unstar: {artist} - {title}',
+            'unstar_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue],
+        })
+
+    with app._shazam_single_unstar_queue_lock:
+        if not app._shazam_single_unstar_queue:
+            return jsonify({'ok': True, 'status': 'started', 'unstar_queue': []})
+        next_item = app._shazam_single_unstar_queue.pop(0)
+        queue_after = list(app._shazam_single_unstar_queue)
+        if getattr(app, '_shazam_compare_running', False):
+            app._shazam_single_unstar_queue.insert(0, next_item)
+            return jsonify({
+                'status': 'queued',
+                'message': f'Queued unstar (compare in progress)',
+                'unstar_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in app._shazam_single_unstar_queue],
+            })
+        app._shazam_single_unstar_queue = queue_after
+
+    thread = threading.Thread(target=_run_unstar_queue_worker, args=(next_item,), daemon=True)
+    thread.start()
     return jsonify({
         'ok': True,
-        'key': key,
-        'soundeo_ok': soundeo_ok,
+        'status': 'started',
+        'message': f'Unstarring: {next_item.get("artist")} - {next_item.get("title")}',
+        'unstar_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue_after],
     })
 
 
@@ -3522,12 +3607,64 @@ def shazam_sync_star_batch():
     return jsonify({'status': 'started', 'total': len(out), 'message': f'Starring {len(out)} track(s). Poll /api/shazam-sync/progress.'})
 
 
+def _start_next_single_star() -> None:
+    """If single-star queue has items, pop one and run it in a background thread."""
+    star_queue = getattr(app, '_shazam_single_star_queue', None) or []
+    star_lock = getattr(app, '_shazam_single_star_queue_lock', None)
+    if star_lock is None:
+        return
+    with star_lock:
+        star_queue = getattr(app, '_shazam_single_star_queue', None) or []
+        if not star_queue:
+            app._shazam_sync_progress = {'running': False, 'mode': 'star_single'}
+            return
+        item = star_queue.pop(0)
+        app._shazam_single_star_queue = star_queue
+    thread = threading.Thread(target=_run_star_queue_worker, args=(item,), daemon=True)
+    thread.start()
+
+
+def _run_star_queue_worker(item: Dict) -> None:
+    """Background: star one track, update progress, then start next in queue."""
+    key = (item.get('key') or '').strip() or f"{item.get('artist', '')} - {item.get('title', '')}"
+    track_url = (item.get('track_url') or '').strip()
+    artist = (item.get('artist') or '').strip()
+    title = (item.get('title') or '').strip()
+    star_lock = getattr(app, '_shazam_single_star_queue_lock', None)
+    try:
+        app._shazam_sync_progress = {
+            'running': True, 'mode': 'star_single', 'current_key': key,
+            'message': f'Starring: {artist} - {title}',
+            'key': key,
+        }
+        soundeo_ok, new_url = _star_one_track_impl(key, track_url, artist, title)
+        if star_lock:
+            with star_lock:
+                q = list(getattr(app, '_shazam_single_star_queue', None) or [])
+            app._shazam_sync_progress = {
+                'running': True, 'mode': 'star_single', 'current_key': key,
+                'message': f'Starring: {artist} - {title}',
+                'key': key, 'done': 1 if soundeo_ok else 0, 'failed': 0 if soundeo_ok else 1,
+                'url': new_url, 'starred': soundeo_ok,
+            }
+    except Exception as e:
+        app._shazam_sync_progress = {
+            'running': True, 'mode': 'star_single', 'current_key': key,
+            'message': f'Starring: {artist} - {title}', 'key': key,
+            'done': 0, 'failed': 1, 'error': str(e),
+        }
+    _start_next_single_star()
+
+
 @app.route('/api/shazam-sync/star-track', methods=['POST'])
 def shazam_sync_star_track():
-    """Just star: add track to Soundeo favorites when we already have the URL. Tries API first, then browser fallback.
-    Body: { key, track_url?, artist?, title? }. track_url can be omitted if status has urls[key]."""
-    from config_shazam import get_soundeo_cookies_path
-    from shazam_cache import save_status_cache
+    """Star one track: add to queue, show progress/queue bar. Body: { key, track_url?, artist?, title? }."""
+    from shazam_cache import load_status_cache
+
+    if not hasattr(app, '_shazam_single_star_queue'):
+        app._shazam_single_star_queue = []
+    if not hasattr(app, '_shazam_single_star_queue_lock'):
+        app._shazam_single_star_queue_lock = threading.Lock()
 
     try:
         data = request.get_json(silent=True) or {}
@@ -3540,19 +3677,145 @@ def shazam_sync_star_track():
     if not key:
         return jsonify({'error': 'Missing track key'}), 400
 
-    status = dict(getattr(app, '_shazam_sync_status', None) or {})
+    status = dict(getattr(app, '_shazam_sync_status', None) or load_status_cache() or {})
     if not track_url:
-        track_url = (status.get('urls') or {}).get(key, '')
+        track_url = _status_url_for_key(status, key)
     if not track_url and not (artist and title):
         return jsonify({'error': 'No track URL and no artist/title. Run Search on Soundeo first to get a link.'}), 400
 
-    soundeo_ok, new_url = _star_one_track_impl(key, track_url, artist, title)
+    item = {'key': key, 'track_url': track_url, 'artist': artist, 'title': title}
+    with app._shazam_single_star_queue_lock:
+        app._shazam_single_star_queue.append(item)
+        queue = list(app._shazam_single_star_queue)
+
+    running = _shazam_any_job_running()
+    if running:
+        return jsonify({
+            'status': 'queued',
+            'message': f'Queued: {artist} - {title}',
+            'star_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue],
+        })
+
+    with app._shazam_single_star_queue_lock:
+        if not app._shazam_single_star_queue:
+            return jsonify({'ok': True, 'status': 'started', 'star_queue': []})
+        next_item = app._shazam_single_star_queue.pop(0)
+        queue_after = list(app._shazam_single_star_queue)
+        if getattr(app, '_shazam_compare_running', False):
+            app._shazam_single_star_queue.insert(0, next_item)
+            return jsonify({
+                'status': 'queued',
+                'message': f'Queued: {next_item.get("artist")} - {next_item.get("title")} (compare in progress)',
+                'star_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in app._shazam_single_star_queue],
+            })
+        app._shazam_single_star_queue = queue_after
+
+    thread = threading.Thread(target=_run_star_queue_worker, args=(next_item,), daemon=True)
+    thread.start()
     return jsonify({
-        'ok': True,
-        'key': key,
-        'soundeo_ok': soundeo_ok,
-        'url': new_url or track_url,
+        'status': 'started',
+        'message': f'Starring: {next_item.get("artist")} - {next_item.get("title")}',
+        'star_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue_after],
     })
+
+
+@app.route('/api/shazam-sync/remove-from-star-queue', methods=['POST'])
+def shazam_remove_from_star_queue():
+    """Remove one item from the star queue by key or artist+title. Body: { key } or { artist, title }."""
+    if not hasattr(app, '_shazam_single_star_queue'):
+        return jsonify({'ok': True, 'star_queue': []})
+    try:
+        data = request.get_json(silent=True) or {}
+        key = (data.get('key') or '').strip()
+        artist = (data.get('artist') or '').strip()
+        title = (data.get('title') or '').strip()
+        if not key and (artist or title):
+            key = f"{artist} - {title}"
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not key:
+        return jsonify({'error': 'Missing key or artist+title'}), 400
+    key_lower = key.lower()
+    with app._shazam_single_star_queue_lock:
+        queue = getattr(app, '_shazam_single_star_queue', None) or []
+        new_queue = []
+        removed = False
+        for q in queue:
+            qk = (q.get('key') or '').strip()
+            if not qk:
+                qk = f"{q.get('artist', '')} - {q.get('title', '')}"
+            if not removed and (qk == key or qk.lower() == key_lower):
+                removed = True
+                continue
+            new_queue.append(q)
+        app._shazam_single_star_queue = new_queue
+        out = [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in new_queue]
+    return jsonify({'ok': True, 'star_queue': out})
+
+
+@app.route('/api/shazam-sync/remove-from-search-queue', methods=['POST'])
+def shazam_remove_from_search_queue():
+    """Remove one item from the single-search queue by artist+title. Body: { artist, title } or { key }."""
+    if not hasattr(app, '_shazam_single_search_queue'):
+        return jsonify({'ok': True, 'single_search_queue': []})
+    try:
+        data = request.get_json(silent=True) or {}
+        artist = (data.get('artist') or '').strip()
+        title = (data.get('title') or '').strip()
+        key = (data.get('key') or '').strip()
+        if not (artist and title) and key and ' - ' in key:
+            parts = key.split(' - ', 1)
+            artist, title = (parts[0] or '').strip(), (parts[1] or '').strip()
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not artist and not title:
+        return jsonify({'error': 'Missing artist+title or key'}), 400
+    with app._shazam_single_search_queue_lock:
+        queue = getattr(app, '_shazam_single_search_queue', None) or []
+        new_queue = []
+        removed = False
+        for q in queue:
+            if not removed and (q.get('artist') or '').strip() == artist and (q.get('title') or '').strip() == title:
+                removed = True
+                continue
+            new_queue.append(q)
+        app._shazam_single_search_queue = new_queue
+        out = [{'artist': q['artist'], 'title': q['title']} for q in new_queue]
+    return jsonify({'ok': True, 'single_search_queue': out})
+
+
+@app.route('/api/shazam-sync/remove-from-unstar-queue', methods=['POST'])
+def shazam_remove_from_unstar_queue():
+    """Remove one item from the unstar queue by key or artist+title. Body: { key } or { artist, title }."""
+    if not hasattr(app, '_shazam_single_unstar_queue'):
+        return jsonify({'ok': True, 'unstar_queue': []})
+    try:
+        data = request.get_json(silent=True) or {}
+        key = (data.get('key') or '').strip()
+        artist = (data.get('artist') or '').strip()
+        title = (data.get('title') or '').strip()
+        if not key and (artist or title):
+            key = f"{artist} - {title}"
+    except Exception:
+        return jsonify({'error': 'Invalid request'}), 400
+    if not key:
+        return jsonify({'error': 'Missing key or artist+title'}), 400
+    key_lower = key.lower()
+    with app._shazam_single_unstar_queue_lock:
+        queue = getattr(app, '_shazam_single_unstar_queue', None) or []
+        new_queue = []
+        removed = False
+        for q in queue:
+            qk = (q.get('key') or '').strip()
+            if not qk:
+                qk = f"{q.get('artist', '')} - {q.get('title', '')}"
+            if not removed and (qk == key or qk.lower() == key_lower):
+                removed = True
+                continue
+            new_queue.append(q)
+        app._shazam_single_unstar_queue = new_queue
+        out = [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in new_queue]
+    return jsonify({'ok': True, 'unstar_queue': out})
 
 
 @app.route('/api/shazam-sync/sync-single-track', methods=['POST'])

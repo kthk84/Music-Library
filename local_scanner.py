@@ -300,10 +300,25 @@ def _find_matching_local_track(
                 return (_prefer_extended_track(same_key), 1.0)
 
     # Full canonical "name vs name" pass so we never miss due to index/cap (script found 15 such misses). Prefer Extended.
+    # Require minimum length for containment to avoid false matches (e.g. "me" in "dimi mechero", "life" in "elysian life").
+    _min_title_contain = 5
+    _min_artist_contain = 3
     if local_canon is not None and len(local_canon) == len(local_tracks):
         st, sa = _canon(track['title']), _canon(track['artist'])
+        def _canon_title_ok(s, t):
+            if s == t:
+                return True
+            if s in t or t in s:
+                return min(len(s), len(t)) >= _min_title_contain
+            return False
+        def _canon_artist_ok(s, t):
+            if s == t:
+                return True
+            if s in t or t in s:
+                return min(len(s), len(t)) >= _min_artist_contain
+            return False
         canon_matches = [lt_dict for (lt, la), lt_dict in zip(local_canon, local_tracks)
-                         if (st == lt or st in lt or lt in st) and (sa == la or sa in la or la in sa)]
+                         if _canon_title_ok(st, lt) and _canon_artist_ok(sa, la)]
         if canon_matches:
             return (_prefer_extended_track(canon_matches), 0.95)
 
