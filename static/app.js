@@ -1193,6 +1193,10 @@ function shazamStartProgressPoll() {
         clearInterval(shazamProgressInterval);
         shazamProgressInterval = null;
     }
+    if (shazamProgressRestoreInterval) {
+        clearInterval(shazamProgressRestoreInterval);
+        shazamProgressRestoreInterval = null;
+    }
     shazamProgressInterval = setInterval(shazamPollProgress, 500);
 }
 
@@ -1246,6 +1250,8 @@ let shazamActionPending = {};
 /** Pending batch jobs when one is already running. Each item: { id, type: 'search'|'star_batch'|'sync_favorites', label: string, payload: object }. */
 let shazamJobQueue = [];
 let shazamJobId = 0;
+/** True for the entire lifecycle of a single-track star/unstar: from click until the bar is fully hidden and cleanup is done. While true, no other bar may appear and restore/status-apply skip bar-related work. */
+let shazamSingleBarActive = false;
 
 async function shazamLoadSettings() {
     try {
@@ -1282,6 +1288,8 @@ function shazamApplySettings(cfg) {
             }).join(' ');
         }
     }
+    const headedToggle = document.getElementById('shazamHeadedModeToggle');
+    if (headedToggle) headedToggle.checked = cfg.headed_mode !== false;
     const statusEl = document.getElementById('soundeoSessionStatus');
     const pathEl = document.getElementById('soundeoSessionPath');
     const configPathEl = document.getElementById('configPathHint');
@@ -1338,6 +1346,22 @@ function shazamRenderFolderList() {
     el.innerHTML = rows.map((path, i) =>
         `<div class="folder-list-item"><input type="text" value="${(path || '').replace(/"/g, '&quot;')}" placeholder="${i === 0 && !path ? 'Paste folder path or click Add Folder' : ''}" data-idx="${i}" onchange="shazamFolderChanged(this)" />${path ? `<button onclick="shazamRescanFolder(${i})" class="btn btn-small" title="Rescan this folder only">Rescan</button>` : ''}<button onclick="shazamRemoveFolder(${i})" class="btn btn-small" title="Remove folder" ${rows.length === 1 && !path ? 'style="visibility:hidden"' : ''}>✕</button></div>`
     ).join('');
+}
+
+async function shazamSetHeadedMode(showBrowser) {
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ headed_mode: !!showBrowser })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data && data.headed_mode !== undefined) {
+            const toggle = document.getElementById('shazamHeadedModeToggle');
+            if (toggle) toggle.checked = data.headed_mode;
+            if (shazamLastSettings) shazamLastSettings.headed_mode = data.headed_mode;
+        }
+    } catch (e) { console.error(e); }
 }
 
 async function shazamSetDownloadFolder(btn) {
@@ -1561,7 +1585,8 @@ async function shazamFetchShazam() {
             return;
         }
         alert(data.message || `Fetched. Total: ${data.total}, New: ${data.added}`);
-        shazamLoadStatus();
+        await shazamLoadStatus();
+        shazamSearchAllOnSoundeo('new');
     } catch (e) {
         hideLoading();
         alert('Error: ' + e.message);
@@ -1811,7 +1836,7 @@ function shazamApplyStatus(data) {
     shazamRenderTrackList(data);
     if (data.download_queue && Array.isArray(data.download_queue)) {
         shazamCurrentDownloadQueue = data.download_queue;
-        shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+        if (!shazamSingleBarActive) shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
     }
     if (data.compare_running && !shazamComparePollInterval) {
         const sp = data.scan_progress || {};
@@ -1826,12 +1851,36 @@ function shazamApplyStatus(data) {
     shazamRestoreProgressIfRunning();
 }
 
+/** True when a single-track star/unstar action is in flight. Uses the lifecycle flag, NOT shazamCurrentProgress (which gets cleared before the bar is hidden). */
+function shazamIsSingleTrackProgress() {
+    return !!shazamSingleBarActive;
+}
+
 /** If a sync/search job is still running on the server, show the progress bar and poll until done. */
 function shazamRestoreProgressIfRunning() {
+    if (shazamSingleBarActive) {
+        shazamBarLog('RESTORE', 'skip entirely (shazamSingleBarActive)');
+        return;
+    }
+    shazamBarLog('RESTORE', 'fetching progress to restore');
     fetch('/api/shazam-sync/progress')
         .then(r => r.json())
         .then(p => {
-            if (!p.running) return;
+            if (shazamSingleBarActive) {
+                shazamBarLog('RESTORE', 'skip (shazamSingleBarActive set while fetch was in flight)');
+                return;
+            }
+            if (!p.running) {
+                shazamBarLog('RESTORE', 'progress not running, skip');
+                return;
+            }
+            var isSingleStarUnstar = p.mode === 'star_single' || p.mode === 'unstar_single';
+            if (isSingleStarUnstar) {
+                shazamBarLog('RESTORE', 'single-track: handler owns the bar, skip');
+                shazamCurrentProgress = p;
+                return;
+            }
+            shazamBarLog('RESTORE', 'job running, will show progress if bar hidden', { mode: p.mode });
             shazamCurrentProgress = p;
             shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
             if (p.download_queue && Array.isArray(p.download_queue)) {
@@ -1841,7 +1890,10 @@ function shazamRestoreProgressIfRunning() {
             shazamSetProgressClickable(!!p.current_key);
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             const barEl = document.getElementById('shazamSyncProgress');
-            if (barEl && barEl.style.display === 'flex') return; /* already visible and likely already polling */
+            if (barEl && barEl.style.display === 'flex') {
+                shazamBarLog('RESTORE', 'progress bar already visible, skip SHOW_PROGRESS');
+                return; /* already visible and likely already polling */
+            }
             if (shazamProgressRestoreInterval) clearInterval(shazamProgressRestoreInterval);
             const stopBtn = document.getElementById('shazamSyncStopBtn');
             const total = p.total != null && p.total > 0 ? p.total : null;
@@ -1853,6 +1905,7 @@ function shazamRestoreProgressIfRunning() {
             } else {
                 initText = (p.current != null && p.total != null) ? `${p.current}/${p.total}: ${p.message || ''}` : (p.message || 'Running…');
             }
+            shazamBarLog('RESTORE', 'calling shazamShowSyncProgress');
             shazamShowSyncProgress(initText);
             if (stopBtn) stopBtn.disabled = false;
             let restorePollCount = 0;
@@ -1861,7 +1914,13 @@ function shazamRestoreProgressIfRunning() {
                     .then(r => r.json())
                     .then(p => {
                         shazamCurrentProgress = p;
-                        shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
+                        var skipRestoreQueueBars = Object.keys(shazamActionPending || {}).length > 0 || p.mode === 'star_single' || p.mode === 'unstar_single';
+                        if (skipRestoreQueueBars) {
+                            if (restorePollCount === 0 || restorePollCount % 10 === 0) shazamBarLog('RESTORE_POLL', 'skip APPLY_QUEUE', { mode: p.mode, pending: Object.keys(shazamActionPending || {}).length });
+                        }
+                        if (!skipRestoreQueueBars) {
+                            shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
+                        }
                         if (p.download_queue && Array.isArray(p.download_queue)) {
                             shazamCurrentDownloadQueue = p.download_queue;
                             shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
@@ -1897,11 +1956,15 @@ function shazamRestoreProgressIfRunning() {
                                 fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
                                     if (data && !data.compare_running) {
                                         shazamApplyStatus(data);
-                                        if (shazamLastData) shazamRenderTrackList(shazamLastData);
+                                        var hasPendingRestore = Object.keys(shazamActionPending || {}).length > 0;
+                                        var skipRestore = hasPendingRestore || (p.mode === 'star_single' || p.mode === 'unstar_single');
+                                        if (shazamLastData && !skipRestore) shazamRenderTrackList(shazamLastData);
                                     }
                                 }).catch(() => {});
                             }
-                            if (shazamLastData) {
+                            var hasPendingRestoreRerender = Object.keys(shazamActionPending || {}).length > 0;
+                            var skipRestoreRerender = hasPendingRestoreRerender || (p.mode === 'star_single' || p.mode === 'unstar_single');
+                            if (shazamLastData && !skipRestoreRerender) {
                                 shazamRenderTrackList(shazamLastData);
                                 if (shazamFollowCurrentRow && p.current_key) shazamScrollCurrentRowToCenter(false);
                             }
@@ -1943,7 +2006,7 @@ let shazamToDownloadTracks = [];
 let shazamLastData = null;
 let shazamFilterTime = 'all';
 const SHAZAM_FILTER_STATUS_KEY = 'mp3cleaner_shazam_filter_status';
-const SHAZAM_FILTER_STATUS_VALUES = ['all', 'have', 'todl', 'skipped', 'ignored'];
+const SHAZAM_FILTER_STATUS_VALUES = ['all', 'have', 'todl', 'skipped'];
 let shazamFilterStatus = 'all';
 let shazamFilterSearch = '';
 /** Scan Soundeo favorites range: 'all' | '1_month' | '2_months' | '3_months'. Use All time to fix starred state. */
@@ -2065,13 +2128,25 @@ function shazamApplyFilters(merged) {
         const cutoff = now - sec;
         out = out.filter(t => (t.shazamed_at ?? 0) >= cutoff);
     }
-    if (shazamFilterStatus === 'ignored') {
-        out = out.filter(t => {
-            const key = `${t.artist || ''} - ${t.title || ''}`;
-            return shazamDismissed[key] || shazamDismissed[key.toLowerCase()];
-        });
-    } else if (shazamFilterStatus !== 'all') {
+    if (shazamFilterStatus !== 'all') {
         out = out.filter(t => t.status === shazamFilterStatus);
+        // To DL tab: hide tracks that were searched and "Track not found on Soundeo" (not actionable for download)
+        if (shazamFilterStatus === 'todl') {
+            const _lu = (map, ...keys) => { for (const k of keys) { if (map[k]) return true; } return false; };
+            out = out.filter(t => {
+                const key = `${t.artist || ''} - ${t.title || ''}`;
+                const keyLower = key.toLowerCase();
+                const keyNorm = key.indexOf(' (') !== -1 ? key.substring(0, key.indexOf(' (')).trim() : key;
+                const keyNormLower = keyNorm.toLowerCase();
+                let keyDeep = keyNormLower.replace(/ & /g, ', ');
+                const d = keyDeep.indexOf(' - ');
+                if (d !== -1) {
+                    const arts = keyDeep.substring(0, d).split(', ').map(a => a.trim()).filter(Boolean).sort().join(', ');
+                    keyDeep = arts + ' - ' + keyDeep.substring(d + 3);
+                }
+                return !_lu(shazamNotFound, key, keyLower, keyNorm, keyNormLower, keyDeep);
+            });
+        }
     }
     const search = (shazamFilterSearch || '').trim().toLowerCase();
     if (search) {
@@ -2137,7 +2212,7 @@ function shazamRenderTrackList(data) {
     const hasTodl = filtered.some(r => r.status === 'todl');
     const hasSkipped = filtered.some(r => r.status === 'skipped');
     html += '<table class="shazam-track-table"><thead><tr><th></th><th>When</th><th>Artist</th><th>Title</th><th class="shazam-match-col">Match</th>';
-    html += '<th></th><th></th><th>Actions</th>';
+    html += '<th></th><th>Actions</th>';
     html += '<th class="shazam-select-col">' + (hasTodl ? '<input type="checkbox" id="shazamSelectAll" onchange="shazamToggleSelectAll(this)" title="Select all" />' : '<span aria-hidden="true" style="display:inline-block;width:18px;height:18px;"></span>') + '</th>';
     html += '</tr></thead><tbody>';
     filtered.forEach((row, i) => {
@@ -2240,11 +2315,6 @@ function shazamRenderTrackList(data) {
         const starInactive = isDismissed || isSkipped || (isTodl && !url);
         const starTitle = starInactive ? (isDismissed ? 'Dismissed' : isSkipped ? 'Skipped' : 'Not on Soundeo') : (starred ? 'In Soundeo favorites' : 'Not in favorites');
         const starFilled = starred && !isDismissed;
-        const starCellClass = 'starred-cell' + (starInactive ? ' starred-cell-inactive' : '');
-        const starIconClass = 'star-icon' + (starFilled ? ' starred' : '');
-        const starSvgFilled = '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>';
-        const starSvgOutline = '<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>';
-        let starredCell = '<td class="' + starCellClass + '" title="' + escapeHtml(starTitle) + '"><svg class="' + starIconClass + '" width="14" height="14" viewBox="0 0 24 24" ' + (starFilled ? 'fill="currentColor"' : 'fill="none" stroke="currentColor" stroke-width="2"') + '>' + (starFilled ? starSvgFilled : starSvgOutline) + '</svg></td>';
 
         let matchCell = '';
         if (isSkipped || isDismissed) {
@@ -2322,11 +2392,12 @@ function shazamRenderTrackList(data) {
             }
             actionsCell += '</span>';
         } else {
-            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
+            /* Order: star toggle, download, search, then conditional (clear dismissed / undo / skip) */
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-star-action${starToggleInactive}${isPending ? ' shazam-star-action-pending' : ''}" data-action="${starToggleAction}" data-key="${safeAttr(key)}"${starToggleDataAttrs} data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="${escapeHtml(isPending ? 'Processing…' : starToggleTitle)}"${starBtnDisabled}>${starBtnContent}</button>`;
             const downloadInactive = (row.status === 'have' || row.status === 'skipped' || !url) ? inactive : '';
             const downloadTitle = row.status === 'have' ? 'Have locally (download not needed)' : row.status === 'skipped' ? 'Skipped' : !url ? 'No Soundeo link' : 'Download AIFF';
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>`;
-            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-star-action${starToggleInactive}${isPending ? ' shazam-star-action-pending' : ''}" data-action="${starToggleAction}" data-key="${safeAttr(key)}"${starToggleDataAttrs} data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="${escapeHtml(isPending ? 'Processing…' : starToggleTitle)}"${starBtnDisabled}>${starBtnContent}</button>`;
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
             if (isDismissed) {
                 actionsCell += `<button type="button" class="shazam-row-action-btn shazam-clear-dismissed" data-action="clear_dismissed" data-key="${safeAttr(key)}" title="Reset to: have locally, not starred on Soundeo (removes strikethrough, link visible again)">Remove strikethrough</button>`;
             }
@@ -2361,7 +2432,7 @@ function shazamRenderTrackList(data) {
             }
         }
 
-        html += `<tr class="${rowClass}"${rowAttrs}>${statusCell}<td class="shazam-when">${escapeHtml(when)}</td><td>${escapeHtml(row.artist)}</td><td>${titleCellContent}</td>${matchCell}${playCell}${starredCell}${actionsCell}${selectCell}</tr>`;
+        html += `<tr class="${rowClass}"${rowAttrs}>${statusCell}<td class="shazam-when">${escapeHtml(when)}</td><td>${escapeHtml(row.artist)}</td><td>${titleCellContent}</td>${matchCell}${playCell}${actionsCell}${selectCell}</tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
@@ -2642,16 +2713,18 @@ async function shazamUnstarTrack(key, trackUrl, artist, title) {
             return;
         }
         var unstarQueue = data.unstar_queue || [];
-        shazamApplyQueueState(shazamCurrentStarQueue, shazamCurrentSearchQueue, unstarQueue);
-        if (data.status === 'queued') {
-            delete shazamActionPending[key];
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
-        } else if (data.status === 'started') {
+        if (data.status === 'started') {
+            shazamBarLog('UNSTAR_HANDLER', 'status=started, showing progress only (no APPLY_QUEUE)');
+            shazamCurrentStarQueue = shazamCurrentStarQueue || [];
+            shazamCurrentUnstarQueue = unstarQueue;
+            shazamSingleBarActive = true;
             shazamShowSyncProgress(data.message || 'Unstarring…');
             shazamStartProgressPoll();
-            // Keep pending so spinner stays until progress poll reports job done and updates starred state
+        } else {
+            shazamApplyQueueState(shazamCurrentStarQueue, shazamCurrentSearchQueue, unstarQueue);
         }
-        if (data.status === 'queued' || data.status === 'started') {
+        if (data.status === 'queued') {
+            delete shazamActionPending[key];
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
         }
     } catch (e) {
@@ -2794,16 +2867,19 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
             return;
         }
         var starQueue = data.star_queue || [];
-        shazamApplyQueueState(starQueue, shazamCurrentSearchQueue, data.unstar_queue !== undefined ? data.unstar_queue : shazamCurrentUnstarQueue);
-        if (data.status === 'queued') {
-            delete shazamActionPending[key];
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
-        } else if (data.status === 'started') {
+        if (data.status === 'started') {
+            shazamBarLog('STAR_HANDLER', 'status=started, showing progress only (no APPLY_QUEUE)');
+            shazamCurrentStarQueue = starQueue;
+            shazamCurrentSearchQueue = shazamCurrentSearchQueue || [];
+            shazamCurrentUnstarQueue = data.unstar_queue !== undefined ? data.unstar_queue : shazamCurrentUnstarQueue;
+            shazamSingleBarActive = true;
             shazamShowSyncProgress(data.message || 'Starring…');
             shazamStartProgressPoll();
-            // Keep pending so spinner stays until progress poll reports job done and updates starred state
+        } else {
+            shazamApplyQueueState(starQueue, shazamCurrentSearchQueue, data.unstar_queue !== undefined ? data.unstar_queue : shazamCurrentUnstarQueue);
         }
-        if (data.status === 'queued' || data.status === 'started') {
+        if (data.status === 'queued') {
+            delete shazamActionPending[key];
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
         }
     } catch (e) {
@@ -3072,18 +3148,20 @@ function shazamRenderJobQueue() {
     const clearBtn = document.getElementById('shazamJobQueueClearBtn');
     if (!bar || !list) return;
     if (shazamJobQueue.length === 0) {
-        bar.style.display = 'none';
-        list.innerHTML = '';
         if (clearBtn) clearBtn.style.display = 'none';
+        shazamHideBarWithAnimation(bar, function () {
+            list.innerHTML = '';
+            shazamUpdateBatchJobsSectionVisibility();
+        });
     } else {
-        bar.style.display = 'flex';
         list.innerHTML = shazamJobQueue.map(job => {
             const remove = escapeHtml('×');
             return `<span class="shazam-job-queue-item" data-job-id="${job.id}">${escapeHtml(job.label)} <button type="button" class="shazam-job-queue-remove" onclick="shazamRemoveQueuedJob(${job.id})" title="Remove from queue">${remove}</button></span>`;
         }).join('');
         if (clearBtn) clearBtn.style.display = 'inline-block';
+        shazamShowBarWithAnimation(bar);
+        shazamUpdateBatchJobsSectionVisibility();
     }
-    shazamUpdateBatchJobsSectionVisibility();
 }
 
 /** When we queue a job because something is already running, show progress section and start polling so "Running:" is visible. */
@@ -3211,6 +3289,7 @@ async function shazamMaybeStartQueuedJob() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok && data.error) { shazamLoadStatus(); return; }
         shazamLoadStatus();
+        shazamSearchAllOnSoundeo('new');
         shazamMaybeStartQueuedJob();
     }
 }
@@ -3259,7 +3338,76 @@ async function shazamStopSync() {
     } catch (e) { alert('Error: ' + e.message); }
 }
 
-/** Show/hide the batch jobs section (Running + Search queue + Star queue + Unstar + Download queue + Queued) so all are visible when applicable. */
+/** Duration (ms) for queue bar in/out animations; must match CSS --shazam-bar-anim-duration. */
+var SHAZAM_BAR_ANIM_MS = 450;
+
+/** Log progress/queue bar visibility for debugging double-show. Filter console by "[ShazamBar]". */
+function shazamBarLog(tag, message, detail) {
+    var ts = new Date().toISOString().split('T')[1].slice(0, 12);
+    var caller = '';
+    try {
+        var stack = new Error().stack;
+        if (stack) {
+            var lines = stack.split('\n').slice(2, 5);
+            caller = lines.map(function (l) { return l.replace(/^\s*at\s+/, '').split(' ')[0]; }).join(' <- ');
+        }
+    } catch (e) {}
+    console.log('[ShazamBar] ' + ts + ' | ' + tag + ' | ' + message, detail !== undefined ? detail : '', caller ? '| ' + caller : '');
+}
+
+/** Show a queue/progress bar with a smooth slide-in-from-top animation. Only animates when the bar is not already visible — repeated calls while visible are no-ops (no animation restart). */
+function shazamShowBarWithAnimation(barEl) {
+    if (!barEl) return;
+    var isProgressBar = barEl.id === 'shazamSyncProgress';
+    if (!isProgressBar && shazamIsSingleTrackProgress()) {
+        return;
+    }
+    if (barEl.style.display === 'flex' && !barEl.classList.contains('shazam-bar-leave')) {
+        return;
+    }
+    barEl.classList.remove('shazam-bar-leave');
+    barEl.style.display = 'flex';
+    barEl.classList.remove('shazam-bar-enter');
+    void barEl.offsetHeight;
+    barEl.classList.add('shazam-bar-enter');
+    const onEnd = function () {
+        barEl.classList.remove('shazam-bar-enter');
+        barEl.removeEventListener('animationend', onEnd);
+    };
+    barEl.addEventListener('animationend', onEnd);
+}
+
+/** Hide a queue/progress bar with a smooth slide-out animation, then run callback (e.g. update section visibility). */
+function shazamHideBarWithAnimation(barEl, callback) {
+    if (!barEl) {
+        if (callback) callback();
+        return;
+    }
+    if (barEl.style.display === 'none') {
+        if (callback) callback();
+        return;
+    }
+    shazamBarLog('HIDE_BAR', 'bar hiding + animation', { id: barEl.id || '(no id)' });
+    barEl.classList.remove('shazam-bar-enter');
+    barEl.classList.add('shazam-bar-leave');
+    const onEnd = function () {
+        barEl.classList.remove('shazam-bar-leave');
+        barEl.removeEventListener('animationend', onEnd);
+        barEl.style.display = 'none';
+        if (callback) callback();
+    };
+    barEl.addEventListener('animationend', onEnd);
+    setTimeout(function () {
+        if (barEl.classList.contains('shazam-bar-leave')) {
+            barEl.removeEventListener('animationend', onEnd);
+            barEl.classList.remove('shazam-bar-leave');
+            barEl.style.display = 'none';
+            if (callback) callback();
+        }
+    }, SHAZAM_BAR_ANIM_MS + 50);
+}
+
+/** Show/hide the batch jobs section. */
 function shazamUpdateBatchJobsSectionVisibility() {
     const section = document.getElementById('shazamBatchJobsSection');
     if (!section) return;
@@ -3274,11 +3422,17 @@ function shazamUpdateBatchJobsSectionVisibility() {
     const unstarQueueVisible = unstarQueueBar && unstarQueueBar.style.display === 'flex';
     const downloadQueueVisible = downloadQueueBar && downloadQueueBar.style.display === 'flex';
     const jobQueueVisible = shazamJobQueue.length > 0;
-    section.style.display = (progressVisible || searchQueueVisible || starQueueVisible || unstarQueueVisible || downloadQueueVisible || jobQueueVisible) ? 'flex' : 'none';
+    const willShow = progressVisible || searchQueueVisible || starQueueVisible || unstarQueueVisible || downloadQueueVisible || jobQueueVisible;
+    const prevDisplay = section.style.display;
+    section.style.display = willShow ? 'flex' : 'none';
+    if (prevDisplay !== section.style.display) {
+        shazamBarLog('SECTION', willShow ? 'batch section visible' : 'batch section hidden');
+    }
 }
 
 /** Set current queue state (globals + banners) so row "Queued 2/5" and queue bars stay in sync. */
 function shazamApplyQueueState(starQueue, searchQueue, unstarQueue) {
+    shazamBarLog('APPLY_QUEUE', 'updating queue bars (may show/hide)', { star: (starQueue || []).length, search: (searchQueue || []).length, unstar: (unstarQueue !== undefined ? (unstarQueue || []) : shazamCurrentUnstarQueue).length });
     shazamCurrentStarQueue = starQueue || [];
     shazamCurrentSearchQueue = searchQueue || [];
     shazamCurrentUnstarQueue = unstarQueue !== undefined ? (unstarQueue || []) : shazamCurrentUnstarQueue;
@@ -3293,16 +3447,18 @@ function shazamRenderSingleSearchQueue(queue) {
     const list = document.getElementById('shazamSingleSearchQueueList');
     if (!bar || !list) return;
     if (!queue || queue.length === 0) {
-        bar.style.display = 'none';
-        list.innerHTML = '';
+        shazamHideBarWithAnimation(bar, function () {
+            list.innerHTML = '';
+            shazamUpdateBatchJobsSectionVisibility();
+        });
     } else {
-        bar.style.display = 'flex';
         list.innerHTML = queue.map(function (q) {
             const label = (q.artist && q.title) ? (q.artist + ' – ' + q.title) : (q.artist || q.title || '…');
             return '<span class="shazam-job-queue-item">' + escapeHtml(label) + '</span>';
         }).join('');
+        shazamShowBarWithAnimation(bar);
+        shazamUpdateBatchJobsSectionVisibility();
     }
-    shazamUpdateBatchJobsSectionVisibility();
 }
 
 /** Render the per-track star queue. queue = [ { artist, title, key? }, ... ]. Uses dedicated Star queue bar so Search and Star can both be visible. */
@@ -3311,16 +3467,18 @@ function shazamRenderStarQueue(queue) {
     const list = document.getElementById('shazamStarQueueList');
     if (!bar || !list) return;
     if (!queue || queue.length === 0) {
-        bar.style.display = 'none';
-        list.innerHTML = '';
+        shazamHideBarWithAnimation(bar, function () {
+            list.innerHTML = '';
+            shazamUpdateBatchJobsSectionVisibility();
+        });
     } else {
-        bar.style.display = 'flex';
         list.innerHTML = queue.map(function (q) {
             const label = (q.artist && q.title) ? (q.artist + ' – ' + q.title) : (q.artist || q.title || q.key || '…');
             return '<span class="shazam-job-queue-item">' + escapeHtml(label) + '</span>';
         }).join('');
+        shazamShowBarWithAnimation(bar);
+        shazamUpdateBatchJobsSectionVisibility();
     }
-    shazamUpdateBatchJobsSectionVisibility();
 }
 
 /** Render the per-track unstar queue. queue = [ { artist, title, key? }, ... ]. */
@@ -3329,16 +3487,18 @@ function shazamRenderUnstarQueue(queue) {
     const list = document.getElementById('shazamUnstarQueueList');
     if (!bar || !list) return;
     if (!queue || queue.length === 0) {
-        bar.style.display = 'none';
-        list.innerHTML = '';
+        shazamHideBarWithAnimation(bar, function () {
+            list.innerHTML = '';
+            shazamUpdateBatchJobsSectionVisibility();
+        });
     } else {
-        bar.style.display = 'flex';
         list.innerHTML = queue.map(function (q) {
             const label = (q.artist && q.title) ? (q.artist + ' – ' + q.title) : (q.artist || q.title || q.key || '…');
             return '<span class="shazam-job-queue-item">' + escapeHtml(label) + '</span>';
         }).join('');
+        shazamShowBarWithAnimation(bar);
+        shazamUpdateBatchJobsSectionVisibility();
     }
-    shazamUpdateBatchJobsSectionVisibility();
 }
 
 /** Render the download queue. queue = [ 'Artist - Title', ... ] (keys). */
@@ -3347,39 +3507,54 @@ function shazamRenderDownloadQueue(queue) {
     const list = document.getElementById('shazamDownloadQueueList');
     if (!bar || !list) return;
     if (!queue || queue.length === 0) {
-        bar.style.display = 'none';
-        list.innerHTML = '';
+        shazamHideBarWithAnimation(bar, function () {
+            list.innerHTML = '';
+            shazamUpdateBatchJobsSectionVisibility();
+        });
     } else {
-        bar.style.display = 'flex';
         list.innerHTML = queue.map(function (key) {
             return '<span class="shazam-job-queue-item">' + escapeHtml(key || '…') + '</span>';
         }).join('');
+        shazamShowBarWithAnimation(bar);
+        shazamUpdateBatchJobsSectionVisibility();
     }
-    shazamUpdateBatchJobsSectionVisibility();
 }
 
 function shazamShowSyncProgress(initialMessage) {
     const el = document.getElementById('shazamSyncProgress');
     const textEl = document.getElementById('shazamProgress');
     const stopBtn = document.getElementById('shazamSyncStopBtn');
-    if (el) el.style.display = 'flex';
+    const alreadyVisible = el && el.style.display === 'flex';
+    shazamBarLog('SHOW_PROGRESS', alreadyVisible ? 'progress bar already visible (text only)' : 'progress bar showing with animation', { message: (initialMessage || 'Starting…').slice(0, 40), alreadyVisible: !!alreadyVisible });
+    if (el) {
+        if (!alreadyVisible) shazamShowBarWithAnimation(el);
+        else el.style.display = 'flex';
+    }
     if (textEl) textEl.textContent = initialMessage || 'Starting…';
     if (stopBtn) { stopBtn.disabled = false; stopBtn.textContent = 'Stop'; }
     shazamUpdateBatchJobsSectionVisibility();
 }
 
 function shazamHideSyncProgress() {
+    shazamBarLog('HIDE_PROGRESS', 'hiding progress bar and clearing queue bars');
     shazamFollowCurrentRow = false;
     const el = document.getElementById('shazamSyncProgress');
-    if (el) el.style.display = 'none';
     const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
-    if (viewLogBtn) viewLogBtn.style.display = 'none';
     const gotoBtn = document.getElementById('shazamProgressGotoBtn');
+    if (viewLogBtn) viewLogBtn.style.display = 'none';
     if (gotoBtn) gotoBtn.textContent = 'Follow row';
     shazamSetProgressClickable(false);
-    shazamApplyQueueState([], [], []);
-    shazamUpdateBatchJobsSectionVisibility();
-    if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    if (el) {
+        shazamHideBarWithAnimation(el, function () {
+            shazamApplyQueueState([], [], []);
+            shazamUpdateBatchJobsSectionVisibility();
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        });
+    } else {
+        shazamApplyQueueState([], [], []);
+        shazamUpdateBatchJobsSectionVisibility();
+        if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    }
 }
 
 /** When progress has current_key, show progress bar as clickable (cursor + title + Follow row button). */
@@ -3520,12 +3695,15 @@ function shazamCaptureSyncProgress() {
     return { visible: !!visible, text: (textEl && textEl.textContent) || '' };
 }
 
-/** Restore progress bar if it was visible before a re-render, so the "Searching X of Y" cue is not lost. */
+/** Restore progress bar if it was visible before a re-render, so the "Searching X of Y" cue is not lost. Skip during single-track star/unstar (the handler and poll own the bar lifecycle). */
 function shazamRestoreSyncProgress(captured) {
     if (!captured || !captured.visible) return;
+    if (shazamSingleBarActive) return;
     const el = document.getElementById('shazamSyncProgress');
+    if (!el) return;
+    if (el.classList.contains('shazam-bar-leave')) return;
     const textEl = document.getElementById('shazamProgress');
-    if (el) el.style.display = 'flex';
+    if (el.style.display !== 'flex') shazamShowBarWithAnimation(el);
     if (textEl && captured.text) textEl.textContent = captured.text;
 }
 
@@ -3590,14 +3768,23 @@ async function shazamSyncFavoritesFromSoundeo() {
 function shazamPollProgress() {
     fetch('/api/shazam-sync/progress').then(r => r.json()).then(p => {
         shazamCurrentProgress = p;
-        shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
+        var hasPendingSingle = Object.keys(shazamActionPending || {}).length > 0;
+        var inSingleStarUnstar = p.mode === 'star_single' || p.mode === 'unstar_single';
+        var skipQueueBarUpdates = hasPendingSingle || inSingleStarUnstar;
+        if (skipQueueBarUpdates && (shazamProgressPollCount || 0) % 10 === 0) {
+            shazamBarLog('POLL', 'skip APPLY_QUEUE', { mode: p.mode, hasPending: hasPendingSingle });
+        }
+        if (!skipQueueBarUpdates) {
+            shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
+        }
         if (p.download_queue && Array.isArray(p.download_queue)) {
             shazamCurrentDownloadQueue = p.download_queue;
-            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+            if (!skipQueueBarUpdates) shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
         }
-        // Re-render track list whenever queue state changes so row-level "Star/Search/Unstar/Download queued X/Y" and × stay in sync (skip during star_single/unstar_single to avoid spinner flicker)
+        // Re-render track list whenever queue state changes so row-level "Star/Search/Unstar/Download queued X/Y" and × stay in sync (skip whenever any single-track action is pending to avoid spinner/hover flicker)
         var queuesNonEmpty = (p.star_queue || []).length > 0 || (p.single_search_queue || []).length > 0 || (p.unstar_queue || []).length > 0 || (p.download_queue || []).length > 0;
-        if (shazamLastData && queuesNonEmpty && !(p.running && (p.mode === 'star_single' || p.mode === 'unstar_single'))) {
+        var skipRerenderForSingle = hasPendingSingle || (p.running && (p.mode === 'star_single' || p.mode === 'unstar_single'));
+        if (shazamLastData && queuesNonEmpty && !skipRerenderForSingle) {
             shazamRenderTrackList(shazamLastData);
         }
         const el = document.getElementById('shazamProgress');
@@ -3648,13 +3835,15 @@ function shazamPollProgress() {
                 fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
                     if (data && !data.compare_running) {
                         shazamApplyStatus(data);
-                        var skipRerender = (shazamCurrentProgress.mode === 'star_single' || shazamCurrentProgress.mode === 'unstar_single');
+                        var hasPendingStatus = Object.keys(shazamActionPending || {}).length > 0;
+                        var skipRerender = hasPendingStatus || (shazamCurrentProgress.mode === 'star_single' || shazamCurrentProgress.mode === 'unstar_single');
                         if (shazamLastData && !skipRerender) shazamRenderTrackList(shazamLastData);
                     }
                 }).catch(() => {});
             }
             if (shazamLastData) {
-                var skipFullRerender = (p.mode === 'star_single' || p.mode === 'unstar_single');
+                var hasPending = Object.keys(shazamActionPending || {}).length > 0;
+                var skipFullRerender = hasPending || (p.mode === 'star_single' || p.mode === 'unstar_single');
                 if (!skipFullRerender) {
                     shazamRenderTrackList(shazamLastData);
                 }
@@ -3666,7 +3855,7 @@ function shazamPollProgress() {
         }
         // When no sync/search running but download queue has items, start the download worker (e.g. after Search finishes)
         const dp = p.download_progress;
-        if (!p.running && (p.download_queue || []).length > 0 && !(dp && dp.running)) {
+        if (!p.running && !shazamSingleBarActive && (p.download_queue || []).length > 0 && !(dp && dp.running)) {
             fetch('/api/shazam-sync/download-start-next', { method: 'POST' }).then(r => r.json()).then(function (d) {
                 if (d.started) {
                     shazamShowSyncProgress('Downloading…');
@@ -3691,11 +3880,22 @@ function shazamPollProgress() {
                 if (stopBtn) { stopBtn.disabled = true; stopBtn.textContent = 'Stopped'; }
                 const gotoBtn = document.getElementById('shazamProgressGotoBtn');
                 if (gotoBtn) gotoBtn.textContent = 'Follow row';
-                shazamHideSyncProgress();
-                if (shazamLastData) shazamRenderTrackList(shazamLastData);
-                shazamLoadStatus();
-                if (p.mode === 'search_global') shazamQueueSyncFavoritesAfterSearch();
-                shazamMaybeStartQueuedJob();
+                var isSingleStarUnstar = p.mode === 'star_single' || p.mode === 'unstar_single';
+                if (isSingleStarUnstar) {
+                    setTimeout(function () {
+                        shazamHideSyncProgress();
+                        shazamLoadStatus().finally(function () {
+                            shazamSingleBarActive = false;
+                            shazamBarLog('SINGLE_BAR', 'lifecycle complete, flag cleared');
+                        });
+                        shazamMaybeStartQueuedJob();
+                    }, 1800);
+                } else {
+                    shazamHideSyncProgress();
+                    shazamLoadStatus();
+                    if (p.mode === 'search_global') shazamQueueSyncFavoritesAfterSearch();
+                    shazamMaybeStartQueuedJob();
+                }
             }
         }
     }).catch(() => {});
@@ -3808,7 +4008,7 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         }
     } catch (err) {
-        console.error('MP3 Cleaner init error:', err);
+        console.error('SoundBridge init error:', err);
         showConnectionBanner();
     }
     (function () {

@@ -17,7 +17,7 @@
 | Compare result (to_download, have_locally, counts) | `shazam_status_cache.json` | Page load, `/api/shazam-sync/status`, bootstrap |
 | Favorited / fetched track URLs (Soundeo links per track) | `shazam_status_cache.json` → `urls` | Same as above; merged when sync completes |
 | **Starred in Soundeo** (per-track: is this track starred?) | `shazam_status_cache.json` → `starred` | Same as above; merged when sync completes |
-| **Dismissed tracks** (tracks user dismissed — unstarred on Soundeo; "Ignored" filter) | `shazam_status_cache.json` → `dismissed` | Status, bootstrap; POST `/api/shazam-sync/dismiss-track`, `/api/shazam-sync/clear-dismissed`, `/api/shazam-sync/undismiss-track`. Always loaded from cache when in-memory is empty so ignore state is never lost. |
+| **Dismissed tracks** (tracks user dismissed — unstarred on Soundeo) | `shazam_status_cache.json` → `dismissed` | Status, bootstrap; POST `/api/shazam-sync/dismiss-track`, `/api/shazam-sync/clear-dismissed`, `/api/shazam-sync/undismiss-track`. Always loaded from cache when in-memory is empty so dismissed state is never lost. |
 | **Dismissed Manual check** (track keys user dismissed) | `shazam_status_cache.json` → `dismissed_manual_check` | Status, bootstrap; POST `/api/shazam-sync/dismiss-manual-check` |
 | **Soundeo track title** (exact filename/details as on Soundeo per track) | `shazam_status_cache.json` → `soundeo_titles` | Set when sync completes; merged when rebuilding status |
 | **Soundeo track ID** (numeric ID per track for HTTP star/unstar) | `shazam_status_cache.json` → `track_ids` | Set when resolved from URL or by visiting track page; merged when rebuilding/merging status. Backfill: `python3 scripts/backfill_track_ids.py`. Single source of truth: same file only. |
@@ -31,7 +31,7 @@
 | **Soundeo download folder** (one of destination folders for AIFF saves) | `config.json` → `soundeo_download_folder` | Bootstrap, settings API; UI: one toggle active per folder |
 | **Download last run** (done/failed/results, no_credits) | `shazam_status_cache.json` → `download_last_run` | Set after each download queue run; status API |
 | Settings (folders, headed mode, etc.) | `config.json` | Bootstrap, settings API |
-| **Shazam list filter** (All / Have / To DL / Skipped / Ignored) | `localStorage` → `mp3cleaner_shazam_filter_status` | Page load; filter button click |
+| **Shazam list filter** (All / Have / To DL / Skipped) | `localStorage` → `mp3cleaner_shazam_filter_status` | Page load; filter button click |
 
 ## Implementation notes
 

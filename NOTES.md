@@ -1,4 +1,4 @@
-# MP3 Cleaner – Notes
+# SoundBridge – Notes
 
 ## Run the app
 

@@ -1,4 +1,4 @@
-"""Pytest fixtures for MP3 Cleaner tests."""
+"""Pytest fixtures for SoundBridge tests."""
 import pytest
 import os
 import tempfile

@@ -1,4 +1,4 @@
-# MP3 Cleaner – Testing Strategy
+# SoundBridge – Testing Strategy
 
 ## 1. Step-by-step approach: all known features
 

@@ -2,13 +2,16 @@
 Persistent caches for Shazam sync.
 - Shazam tracks: saved list from Shazam DB, merged with new fetches (no duplicates)
 - Local scan: cached folder scan result to avoid re-scanning every Compare
+When running from a frozen bundle, data lives in ~/Library/Application Support/SoundBridge.
 """
 import json
 import os
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-_PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+from app_paths import get_project_root_for_data
+
+_PROJECT_ROOT = get_project_root_for_data(__file__)
 SHAZAM_CACHE_PATH = os.path.join(_PROJECT_ROOT, "shazam_cache.json")
 LOCAL_SCAN_CACHE_PATH = os.path.join(_PROJECT_ROOT, "local_scan_cache.json")
 
@@ -215,7 +218,7 @@ def remove_from_skip_list(tracks: List[Dict]) -> int:
     return before - len(skip)
 
 
-# --- App state (MP3 Cleaner: last folder, etc. – restore on load/refresh) ---
+# --- App state (SoundBridge: last folder, etc. – restore on load/refresh) ---
 
 APP_STATE_PATH = os.path.join(_PROJECT_ROOT, "app_state.json")
 

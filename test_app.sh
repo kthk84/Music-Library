@@ -1,10 +1,10 @@
 #!/bin/bash
-# Quick smoke test for MP3 Cleaner app. App must be running (e.g. python app.py).
+# Quick smoke test for SoundBridge app. App must be running (e.g. python app.py).
 # Port: default 5002 (same as app.py). Override: MP3CLEANER_PORT=5002 bash test_app.sh
 cd "$(dirname "$0")"
 PORT="${MP3CLEANER_PORT:-5002}"
 BASE="http://127.0.0.1:$PORT"
-echo "=== MP3 Cleaner Smoke Test (port $PORT) ==="
+echo "=== SoundBridge Smoke Test (port $PORT) ==="
 echo ""
 echo "1. Testing bootstrap API..."
 start=$(python3 -c "import time; print(int(time.time()*1000))")

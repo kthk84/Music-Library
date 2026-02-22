@@ -1,4 +1,4 @@
-# MP3 Cleaner – Improvement Plan (post-testing)
+# SoundBridge – Improvement Plan (post-testing)
 
 Based on: testing strategy, test plan, validation (pytest + smoke), and gaps identified.
 

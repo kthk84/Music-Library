@@ -17,6 +17,8 @@ import shlex
 import shutil
 import threading
 
+from app_paths import get_project_root_for_data, get_resource_root
+
 # Logger for Soundeo star/unstar: file only (no console), so agents can read it and users aren't spammed.
 def _get_soundeo_star_logger():
     _log = logging.getLogger("soundeo_star")
@@ -25,7 +27,7 @@ def _get_soundeo_star_logger():
     _log.setLevel(logging.INFO)
     _log.propagate = False
     try:
-        _dir = os.path.dirname(os.path.abspath(__file__))
+        _dir = get_project_root_for_data(__file__)
         _path = os.path.join(_dir, "soundeo_star.log")
         _h = logging.FileHandler(_path, encoding="utf-8")
         _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -45,7 +47,7 @@ def _get_search_favorite_logger():
     _log.setLevel(logging.INFO)
     _log.propagate = False
     try:
-        _dir = os.path.dirname(os.path.abspath(__file__))
+        _dir = get_project_root_for_data(__file__)
         _path = os.path.join(_dir, "search_favorite.log")
         _h = logging.FileHandler(_path, encoding="utf-8")
         _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -66,7 +68,7 @@ def _get_soundeo_download_logger():
     _log.setLevel(logging.INFO)
     _log.propagate = False
     try:
-        _dir = os.path.dirname(os.path.abspath(__file__))
+        _dir = get_project_root_for_data(__file__)
         _path = os.path.join(_dir, "soundeo_download.log")
         _h = logging.FileHandler(_path, encoding="utf-8")
         _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -80,11 +82,12 @@ _soundeo_download_log = _get_soundeo_download_logger()
 
 
 def _get_soundeo_download_log_path():
-    """Path to soundeo_download.log (same dir as app.py) for UI / download-log API."""
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "soundeo_download.log")
+    """Path to soundeo_download.log (same dir as app.py, or Application Support when frozen) for UI / download-log API."""
+    return os.path.join(get_project_root_for_data(__file__), "soundeo_download.log")
 
 
-app = Flask(__name__)
+_APP_DIR = get_resource_root() or os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, template_folder=os.path.join(_APP_DIR, 'templates'), static_folder=os.path.join(_APP_DIR, 'static'))
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max request size
 
 # Global variable to store current folder path
@@ -97,7 +100,7 @@ ACOUSTID_API_URL = "https://api.acoustid.org/v2/lookup"
 # MusicBrainz API (free, no key needed)
 MUSICBRAINZ_API_URL = "https://musicbrainz.org/ws/2/"
 MUSICBRAINZ_HEADERS = {
-    'User-Agent': 'MP3Cleaner/1.0 (https://github.com/yourusername/mp3cleaner)'
+    'User-Agent': 'SoundBridge/1.0 (https://github.com/kthk84/Music-Library)'
 }
 
 # Last.fm API (free, requires key - get from https://www.last.fm/api/account/create)
@@ -987,6 +990,29 @@ def _dedupe_tracks_by_key(tracks: List[Dict], prefer_with_filepath: bool = False
     return list(by_key.values())
 
 
+def _apply_skip_list_to_status(out: Dict) -> Dict:
+    """Enforce skip list on status: remove skipped from to_download, set skipped_tracks from skip list.
+    Single source of truth for skipped is shazam_skip_list.json; this ensures status never shows skipped tracks in to_download."""
+    from shazam_cache import load_skip_list
+    skipped_set = load_skip_list()
+    if not skipped_set:
+        return out
+    out = dict(out)
+    to_download = list(out.get('to_download') or [])
+    to_dl = [t for t in to_download if ((t.get('artist') or '').strip().lower(), (t.get('title') or '').strip().lower()) not in skipped_set]
+    all_tracks = (out.get('to_download') or []) + (out.get('have_locally') or []) + (out.get('skipped_tracks') or [])
+    by_key = {}
+    for t in all_tracks:
+        k = ((t.get('artist') or '').strip().lower(), (t.get('title') or '').strip().lower())
+        if k not in by_key:
+            by_key[k] = t
+    skipped_tracks = [by_key[k] for k in by_key if k in skipped_set]
+    out['to_download'] = to_dl
+    out['to_download_count'] = len(to_dl)
+    out['skipped_tracks'] = skipped_tracks
+    return out
+
+
 def _folder_scan_stats(
     folder_paths: List[str],
     local_tracks: List[Dict],
@@ -1505,12 +1531,14 @@ def _get_best_available_status():
 
     if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status and not _status_is_stale(app._shazam_sync_status):
         out = _sanitize_have_locally_filepaths(dict(app._shazam_sync_status))
+        out = _apply_skip_list_to_status(out)
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
     cached = load_status_cache()
     has_cached_data = cached and (cached.get('shazam_count', 0) > 0 or cached.get('have_locally') or cached.get('to_download'))
     if has_cached_data and not _status_is_stale(cached):
         out = _sanitize_have_locally_filepaths(dict(cached))
+        out = _apply_skip_list_to_status(out)
         app._shazam_sync_status = out
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
@@ -1518,6 +1546,7 @@ def _get_best_available_status():
     if rebuilt:
         save_status_cache(rebuilt)
         out = _sanitize_have_locally_filepaths(dict(rebuilt))
+        out = _apply_skip_list_to_status(out)
         app._shazam_sync_status = out
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
@@ -1527,6 +1556,7 @@ def _get_best_available_status():
         if _status_is_stale(cached):
             out['message'] = out.get('message') or 'Data may be outdated. Click Fetch Shazam or Compare to refresh.'
         out = _sanitize_have_locally_filepaths(out)
+        out = _apply_skip_list_to_status(out)
         app._shazam_sync_status = out
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
@@ -1568,9 +1598,10 @@ def _get_best_available_status():
                 partial['not_found'] = dict(old['not_found'])
         app._shazam_sync_status = partial
         save_status_cache(partial)
-        out = _apply_dot_state_from_log(dict(partial))
+        out = _apply_skip_list_to_status(dict(partial))
+        out = _apply_dot_state_from_log(out)
         return _add_starred_lowercase_aliases(out)
-    return _add_starred_lowercase_aliases({'shazam_count': 0, 'local_count': 0, 'to_download_count': 0, 'to_download': [], 'have_locally': [], 'folder_stats': []})
+    return _add_starred_lowercase_aliases(_apply_skip_list_to_status({'shazam_count': 0, 'local_count': 0, 'to_download_count': 0, 'to_download': [], 'have_locally': [], 'folder_stats': []}))
 
 
 @app.route('/api/shazam-sync/status', methods=['GET'])
@@ -1636,7 +1667,7 @@ def shazam_export_shazam_tracks():
 
 
 # --- Temporary MP3 proxy for AIFF/WAV (instant playback + scrubbing) ---
-_PROXY_MP3_DIR = os.environ.get('MP3_CLEANER_PROXY_DIR') or os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'audio_proxies')
+_PROXY_MP3_DIR = os.environ.get('MP3_CLEANER_PROXY_DIR') or os.path.join(get_project_root_for_data(__file__), 'instance', 'audio_proxies')
 _PROXY_TTL_SEC = 20 * 60  # 20 min since last access
 _PROXY_CLEANUP_INTERVAL_SEC = 5 * 60  # every 5 min
 _proxy_store: Dict[str, dict] = {}  # proxy_id -> { path, refcount, last_access }

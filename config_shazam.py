@@ -1,11 +1,13 @@
 """
 Configuration for Shazam-Soundeo sync.
-Stored in config.json (project root).
+Stored in config.json (project root, or ~/Library/Application Support/SoundBridge when frozen).
 """
 import os
 import json
 import re
 from typing import List, Optional, Dict, Any
+
+from app_paths import get_project_root_for_data
 
 CONFIG_FILENAME = "config.json"
 USER_CONFIG_PATH = os.path.expanduser("~/.mp3-cleaner-soundeo.json")
@@ -37,7 +39,8 @@ DEFAULT_CONFIG = {
 
 
 def _project_config_path() -> str:
-    return os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_FILENAME)
+    root = get_project_root_for_data(__file__)
+    return os.path.join(root, CONFIG_FILENAME)
 
 
 def _resolve_config_path() -> str:
@@ -187,7 +190,7 @@ def get_soundeo_browser_config() -> Dict[str, Any]:
     elif raw_profile:
         user_data_dir = _default_chrome_user_data_dir()
     else:
-        project_dir = os.path.dirname(os.path.abspath(__file__))
+        project_dir = get_project_root_for_data(__file__)
         user_data_dir = os.path.join(project_dir, ".soundeo_browser_profile")
         os.makedirs(user_data_dir, exist_ok=True)
     profile_directory = _resolve_profile_display_name(user_data_dir, raw_profile) if raw_profile else None
@@ -196,5 +199,5 @@ def get_soundeo_browser_config() -> Dict[str, Any]:
 
 def get_soundeo_cookies_path() -> str:
     """Path to cookie file (for optional save/load)."""
-    project_dir = os.path.dirname(os.path.abspath(__file__))
+    project_dir = get_project_root_for_data(__file__)
     return os.path.join(project_dir, "soundeo_cookies.json")

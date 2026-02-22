@@ -948,6 +948,31 @@ button[onclick*="revertLookup"] {
     flex-wrap: wrap;
 }
 
+.settings-toggle-row {
+    margin-top: var(--sp-2);
+    margin-bottom: var(--sp-2);
+}
+.settings-toggle-row .settings-toggle-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    cursor: pointer;
+    font-weight: 500;
+}
+.settings-toggle-row .folder-hint {
+    display: block;
+    margin-top: 2px;
+    margin-left: 1.5em;
+}
+.settings-toolbar-row {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    flex-wrap: wrap;
+    margin-top: var(--sp-2);
+    margin-bottom: var(--sp-2);
+}
+
 .folder-list {
     display: flex;
     flex-direction: column;
@@ -1185,19 +1210,25 @@ button[onclick*="revertLookup"] {
     font-size: var(--text-xs);
 }
 
-/* Batch jobs: one section for Running + Queued; sticky at top of Sync tab so it stays above the track list when scrolling */
+/* Batch jobs: floating overlay at top so it never shifts content (no jump when scrolling) */
 .shazam-batch-jobs-section {
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
-    position: sticky;
+    position: fixed;
     top: 0;
+    left: 0;
+    right: 0;
     z-index: 100;
     background: var(--bg);
     padding: var(--sp-2) var(--sp-4) var(--sp-1);
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
-    margin-bottom: var(--sp-2);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    margin: 0;
     box-sizing: border-box;
+    max-width: 1400px;
+    margin-left: auto;
+    margin-right: auto;
+    width: 100%;
 }
 .shazam-single-search-queue-bar {
     display: flex;
@@ -1222,6 +1253,89 @@ button[onclick*="revertLookup"] {
 }
 .shazam-batch-jobs-section .shazam-job-queue-bar {
     margin-top: 0;
+}
+
+/* Queue/progress bars: global in/out animations (slower, consistent for all bars) */
+:root {
+    --shazam-bar-anim-duration: 0.45s;
+}
+@keyframes shazam-bar-slide-in {
+    from {
+        opacity: 0;
+        transform: translateY(-12px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+@keyframes shazam-bar-slide-out {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    to {
+        opacity: 0;
+        transform: translateY(-12px);
+    }
+}
+.shazam-batch-jobs-section .shazam-sync-progress-bar.shazam-bar-enter,
+.shazam-batch-jobs-section .shazam-single-search-queue-bar.shazam-bar-enter,
+.shazam-batch-jobs-section .shazam-job-queue-bar.shazam-bar-enter {
+    animation: shazam-bar-slide-in var(--shazam-bar-anim-duration) ease-out forwards;
+}
+.shazam-batch-jobs-section .shazam-sync-progress-bar.shazam-bar-leave,
+.shazam-batch-jobs-section .shazam-single-search-queue-bar.shazam-bar-leave,
+.shazam-batch-jobs-section .shazam-job-queue-bar.shazam-bar-leave {
+    animation: shazam-bar-slide-out var(--shazam-bar-anim-duration) ease-in forwards;
+}
+
+/* Queue/progress bars: fixed overlay only, one clear notification bubble below header */
+.shazam-queue-bars-fixed {
+    position: fixed;
+    top: 3rem;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: var(--sp-2) var(--sp-4);
+    box-sizing: border-box;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 0 var(--r-md) var(--r-md) 0;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+    margin: 0;
+    max-width: 1400px;
+}
+/* Overlay only: do not reserve space; content scrolls under the bubble */
+/* Bars inside: no extra box, so one cohesive bubble */
+.shazam-queue-bars-fixed > .shazam-sync-progress-bar {
+    margin-top: 0;
+    margin-bottom: 0;
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+.shazam-queue-bars-fixed > .shazam-single-search-queue-bar,
+.shazam-queue-bars-fixed > .shazam-job-queue-bar {
+    border: none !important;
+    box-shadow: none !important;
+    background: transparent !important;
+}
+.shazam-queue-bars-fixed > .shazam-job-queue-bar {
+    margin-top: 0;
+}
+.shazam-queue-bars-fixed > .shazam-sync-progress-bar.shazam-bar-enter,
+.shazam-queue-bars-fixed > .shazam-single-search-queue-bar.shazam-bar-enter,
+.shazam-queue-bars-fixed > .shazam-job-queue-bar.shazam-bar-enter {
+    animation: shazam-bar-slide-in var(--shazam-bar-anim-duration) ease-out forwards;
+}
+.shazam-queue-bars-fixed > .shazam-sync-progress-bar.shazam-bar-leave,
+.shazam-queue-bars-fixed > .shazam-single-search-queue-bar.shazam-bar-leave,
+.shazam-queue-bars-fixed > .shazam-job-queue-bar.shazam-bar-leave {
+    animation: shazam-bar-slide-out var(--shazam-bar-anim-duration) ease-in forwards;
 }
 
 .shazam-running-label {
@@ -1787,27 +1901,6 @@ button[onclick*="revertLookup"] {
     text-align: center;
 }
 
-/* Starred column — always show star; grey when not relevant */
-.shazam-track-table .starred-cell {
-    text-align: center;
-    color: var(--text-tertiary);
-}
-.shazam-track-table .starred-cell .star-icon.starred {
-    color: var(--accent);
-}
-.shazam-track-table .starred-cell-inactive {
-    opacity: 0.35;
-}
-.shazam-track-table .shazam-starred {
-    color: var(--text);
-    font-size: var(--text-md);
-}
-
-.shazam-track-table .shazam-not-starred {
-    color: var(--text-tertiary);
-    font-size: var(--text-xs);
-}
-
 /* ========== Play buttons (unified premium style) ========== */
 /* Row play buttons: Tags tab + Shazam table — same size and style */
 .play-btn,
@@ -2060,10 +2153,9 @@ button[onclick*="revertLookup"] {
     color: var(--text-tertiary) !important;
     opacity: 0.6;
 }
-/* Keep status, play, star and actions readable and clickable (no strikethrough on buttons) */
+/* Keep status, play and actions readable and clickable (no strikethrough on buttons) */
 .shazam-row-dismissed .status-cell,
 .shazam-row-dismissed .shazam-play-col,
-.shazam-row-dismissed .starred-cell,
 .shazam-row-dismissed .shazam-actions-col {
     text-decoration: none !important;
     opacity: 1;
@@ -2124,6 +2216,13 @@ button[onclick*="revertLookup"] {
     opacity: 0.35;
     cursor: default;
     pointer-events: none;
+}
+/* Star and download buttons: black (solid and outline) when active for prominence */
+.shazam-star-action:not(.shazam-row-action-inactive) {
+    color: #1a1a1a;
+}
+.shazam-download-action:not(.shazam-row-action-inactive) {
+    color: #1a1a1a;
 }
 /* Queue state replaces action buttons in same cell width */
 .shazam-queue-replacement {

@@ -1,6 +1,6 @@
-# 🎵 MP3 Tag Cleaner
+# 🎵 SoundBridge
 
-A professional web-based application for cleaning and organizing MP3 metadata using online music databases (MusicBrainz).
+A professional web-based application for cleaning and organizing MP3 metadata and bridging Shazam with your library and Soundeo (MusicBrainz, Soundeo sync).
 
 ## Features
 

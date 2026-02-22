@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MP3 Cleaner</title>
+    <title>SoundBridge</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=6">
 </head>
 <body>
@@ -23,10 +23,10 @@
 
     <div class="container">
         <div id="connectionBanner" class="connection-banner" style="display:none;" role="alert">
-            <strong>Not connected to server.</strong> Open this app at <a href="http://127.0.0.1:5002" target="_blank" rel="noopener">http://127.0.0.1:5002</a> and ensure the server is running (<code>python3 app.py</code>). Buttons and tracks will not work until connected.
+            <strong>Not connected to server.</strong> Open SoundBridge at <a href="http://127.0.0.1:5002" target="_blank" rel="noopener">http://127.0.0.1:5002</a> and ensure the server is running (<code>python3 app.py</code>). Buttons and tracks will not work until connected.
         </div>
         <header>
-            <h1>MP3 Cleaner</h1>
+            <h1>SoundBridge</h1>
             <nav class="tab-nav" role="tablist" aria-label="Main sections">
                 <button type="button" id="tab-btn-mp3" class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-panel-mp3" data-tab="mp3">Tags</button>
                 <button type="button" id="tab-btn-shazam" class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-panel-shazam" data-tab="shazam">Sync</button>
@@ -104,8 +104,8 @@
 
         <!-- Tab: Sync -->
         <div id="tab-panel-shazam" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-shazam">
-        <!-- Queue/progress bars: sticky at top of Sync content so they stay above the track list when scrolling -->
-        <div id="shazamBatchJobsSection" class="shazam-batch-jobs-section" style="display:none;">
+        <!-- Queue/progress bars: fixed at top like a notification bubble (no box styling) -->
+        <div id="shazamQueueBarsFixed" class="shazam-queue-bars-fixed">
             <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack(event)" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
                 <span class="shazam-running-label">Running:</span>
                 <span id="shazamProgress" class="shazam-progress-text"></span>
@@ -155,6 +155,36 @@
                         <button type="button" id="shazamLoggedInBtn" onclick="shazamSessionSaved()" class="btn btn-small" style="display:none;background:var(--accent);color:white;">I have logged in</button>
                         <button type="button" onclick="shazamCheckBrowser()" class="btn btn-small" title="Diagnose why browser may not open">Check browser</button>
                     </div>
+                    <div class="settings-toggle-row">
+                        <label class="settings-toggle-label">
+                            <input type="checkbox" id="shazamHeadedModeToggle" onchange="shazamSetHeadedMode(this.checked)" aria-describedby="shazamHeadedModeHint" />
+                            <span>Show browser when crawling</span>
+                        </label>
+                        <span id="shazamHeadedModeHint" class="folder-hint">When off, the crawler runs in the background (no window).</span>
+                    </div>
+                    <div class="settings-toolbar-row">
+                        <div class="favorites-dropdown-wrap toolbar-group">
+                            <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Sync starred state from Soundeo" aria-haspopup="true" aria-expanded="false">
+                                Sync starred <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
+                            </button>
+                            <div class="search-dropdown-menu" id="shazamFavoritesDropdownMenu" role="menu">
+                                <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="all">All</button>
+                                <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="1_month">Last month</button>
+                                <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="2_months">2 months</button>
+                                <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="3_months">Last quarter</button>
+                            </div>
+                        </div>
+                        <div class="rescan-dropdown-wrap toolbar-group">
+                            <button type="button" id="shazamRescanDropdownBtn" class="btn btn-secondary btn-small" title="Rescan local folders" aria-haspopup="true" aria-expanded="false">
+                                Rescan <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
+                            </button>
+                            <div class="search-dropdown-menu" id="shazamRescanDropdownMenu" role="menu">
+                                <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="compare">Rescan local and match</button>
+                                <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="only">Rescan local only</button>
+                                <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="match_only">Match only</button>
+                            </div>
+                        </div>
+                    </div>
                     <p id="soundeoSessionPath" class="folder-hint" style="display:none;"></p>
                     <p id="configPathHint" class="folder-hint config-path-hint" style="display:none;"></p>
                 </div>
@@ -179,29 +209,6 @@
                         </div>
                     </div>
                 </div>
-                <div class="toolbar-divider"></div>
-                <div class="favorites-dropdown-wrap toolbar-group">
-                    <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Sync starred state from Soundeo" aria-haspopup="true" aria-expanded="false">
-                        Sync starred <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
-                    </button>
-                    <div class="search-dropdown-menu" id="shazamFavoritesDropdownMenu" role="menu">
-                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="all">All</button>
-                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="1_month">Last month</button>
-                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="2_months">2 months</button>
-                        <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="3_months">Last quarter</button>
-                    </div>
-                </div>
-                <div class="toolbar-divider"></div>
-                <div class="rescan-dropdown-wrap toolbar-group">
-                    <button type="button" id="shazamRescanDropdownBtn" class="btn btn-secondary btn-small" title="Rescan local folders" aria-haspopup="true" aria-expanded="false">
-                        Rescan <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
-                    </button>
-                    <div class="search-dropdown-menu" id="shazamRescanDropdownMenu" role="menu">
-                        <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="compare">Rescan local and match</button>
-                        <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="only">Rescan local only</button>
-                        <button type="button" class="search-dropdown-item" role="menuitem" data-rescan-mode="match_only">Match only</button>
-                    </div>
-                </div>
                 <div class="toolbar-stats">
                     <span id="shazamCount">0</span> shazam · <span id="shazamLocalCount">0</span> local · <span id="shazamHaveCount">0</span> have · <span id="shazamToDownloadCount">0</span> to DL
                 </div>
@@ -221,7 +228,6 @@
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="have">Have</button>
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="todl">To DL</button>
                     <button type="button" class="btn btn-small shazam-filter-btn" data-status="skipped">Skipped</button>
-                    <button type="button" class="btn btn-small shazam-filter-btn" data-status="ignored">Ignored</button>
                 </div>
                 <div class="filter-group">
                     <button type="button" class="btn btn-small shazam-filter-time-btn active" data-time-range="all">All</button>
@@ -282,7 +288,7 @@
     if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {
         var el = document.getElementById('connectionBanner');
         if (el) {
-            el.innerHTML = '<strong>JavaScript failed to load or run.</strong> Open this app at <a href="http://127.0.0.1:5002">http://127.0.0.1:5002</a>, ensure the server is running (<code>python3 app.py</code>), and do a hard refresh (Ctrl+Shift+R / Cmd+Shift+R).';
+            el.innerHTML = '<strong>JavaScript failed to load or run.</strong> Open SoundBridge at <a href="http://127.0.0.1:5002">http://127.0.0.1:5002</a>, ensure the server is running (<code>python3 app.py</code>), and do a hard refresh (Ctrl+Shift+R / Cmd+Shift+R).';
             el.style.display = 'block';
         }
     }

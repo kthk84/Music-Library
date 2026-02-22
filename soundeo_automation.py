@@ -19,6 +19,39 @@ _ONE_YEAR = 365 * 24 * 60 * 60
 _PROFILE_LOCK_FILES = ("SingletonLock", "SingletonSocket", "SingletonCookie")
 
 
+def _kill_stale_chrome_for_profile(user_data_dir: str) -> None:
+    """Kill any Chrome/chromedriver processes still using *user_data_dir*.
+
+    This prevents 'profile locked' hangs when a previous driver wasn't shut
+    down properly (crash, kill -9, etc.).  We parse the command-line of every
+    running Chrome process and SIGKILL any that reference our profile path.
+    """
+    if not user_data_dir:
+        return
+    import subprocess, signal
+    needle = f"--user-data-dir={user_data_dir}"
+    try:
+        out = subprocess.check_output(["ps", "axo", "pid,command"], text=True, timeout=5)
+    except Exception:
+        return
+    for line in out.splitlines():
+        line = line.strip()
+        if needle not in line:
+            continue
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            pid = int(parts[0])
+            if pid == os.getpid():
+                continue
+            os.kill(pid, signal.SIGKILL)
+            logging.info("_kill_stale_chrome_for_profile: killed pid %d", pid)
+        except (ValueError, OSError):
+            pass
+    time.sleep(0.5)
+
+
 def _clean_profile_dir(profile_path: str, profile_subdir: Optional[str] = None) -> None:
     """Remove stale lock files from Chrome user-data-dir (and optional profile subdir) so launches don't show profile error dialog."""
     for dir_path in (profile_path,):
@@ -57,9 +90,7 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
     If the profile is corrupted, automatically resets it and retries once.
     """
     from selenium import webdriver
-    from selenium.webdriver.chrome.service import Service
     from selenium.webdriver.chrome.options import Options
-    from webdriver_manager.chrome import ChromeDriverManager
     from config_shazam import get_soundeo_browser_config
 
     opts = Options()
@@ -70,8 +101,7 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
         if ":" not in str(addr):
             addr = "127.0.0.1:" + str(addr).strip()
         opts.add_experimental_option("debuggerAddress", addr)
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=opts)
+        driver = webdriver.Chrome(options=opts)
         driver._connected_to_existing = True
         return driver
 
@@ -90,18 +120,17 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
         o.add_argument("--window-size=1280,900")
         o.add_argument("--disable-gpu")
         o.add_argument("--no-sandbox")
-        # Suppress "Something went wrong when opening your profile" when profile was previously killed
         o.add_argument("--noerrdialogs")
         o.add_argument("--no-first-run")
         o.add_experimental_option("excludeSwitches", ["enable-automation"])
         o.add_argument("--disable-blink-features=AutomationControlled")
         return o
 
+    _kill_stale_chrome_for_profile(user_data_dir)
     _clean_profile_dir(user_data_dir, profile_directory)
 
     try:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=_build_opts())
+        driver = webdriver.Chrome(options=_build_opts())
         driver._connected_to_existing = False
         return driver
     except Exception as first_err:
@@ -109,8 +138,7 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
             raise
         _reset_profile_dir(user_data_dir)
         try:
-            service = Service(ChromeDriverManager().install())
-            driver = webdriver.Chrome(service=service, options=_build_opts())
+            driver = webdriver.Chrome(options=_build_opts())
             driver._connected_to_existing = False
             return driver
         except Exception:
@@ -1508,15 +1536,20 @@ def run_search_tracks(
     clear_sync_stop_request()
     skip_keys = skip_keys or set()
     driver = None
+    logging.info("run_search_tracks: starting, headed=%s, %d tracks", headed, len(tracks))
     try:
         driver = _get_driver(headless=not headed, use_persistent_profile=True)
+        logging.info("run_search_tracks: driver created OK")
     except Exception as e:
+        logging.error("run_search_tracks: driver creation failed: %s", e)
         return {"error": _chrome_session_error_message(e)}
 
     results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "starred": {}, "stopped": False}
 
     try:
+        logging.info("run_search_tracks: loading cookies from %s", cookies_path)
         if not load_cookies(driver, cookies_path):
+            logging.error("run_search_tracks: cookie load failed")
             return {"error": "No saved session. Save Soundeo session first in Settings."}
 
         for i, t in enumerate(tracks):
