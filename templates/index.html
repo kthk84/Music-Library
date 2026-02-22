@@ -104,8 +104,8 @@
 
         <!-- Tab: Sync -->
         <div id="tab-panel-shazam" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-shazam">
-        <!-- Queue/progress bars: fixed at top like a notification bubble (no box styling) -->
-        <div id="shazamQueueBarsFixed" class="shazam-queue-bars-fixed">
+        <!-- Queue/progress bars: fixed notification bubble at top (no box), hidden by default -->
+        <div id="shazamQueueBarsFixed" class="shazam-queue-bars-fixed" style="display:none;">
             <div id="shazamSyncProgress" class="shazam-sync-progress-bar" style="display:none;" role="button" tabindex="0" onclick="shazamScrollToCurrentTrack(event)" onkeydown="if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); shazamScrollToCurrentTrack(); }">
                 <span class="shazam-running-label">Running:</span>
                 <span id="shazamProgress" class="shazam-progress-text"></span>

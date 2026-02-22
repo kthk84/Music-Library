@@ -3387,6 +3387,8 @@ function shazamHideBarWithAnimation(barEl, callback) {
         if (callback) callback();
         return;
     }
+    var w = document.getElementById('shazamQueueBarsFixed');
+    if (w && w.style.display !== 'none') w.dataset.leaveHeight = w.offsetHeight;
     shazamBarLog('HIDE_BAR', 'bar hiding + animation', { id: barEl.id || '(no id)' });
     barEl.classList.remove('shazam-bar-enter');
     barEl.classList.add('shazam-bar-leave');
@@ -3407,27 +3409,58 @@ function shazamHideBarWithAnimation(barEl, callback) {
     }, SHAZAM_BAR_ANIM_MS + 50);
 }
 
-/** Show/hide the batch jobs section. */
+/** Show/hide the queue bars fixed wrapper (notification bubble). Wrapper-level in/out animations; hide when no bars visible. */
 function shazamUpdateBatchJobsSectionVisibility() {
-    const section = document.getElementById('shazamBatchJobsSection');
-    if (!section) return;
-    const progressEl = document.getElementById('shazamSyncProgress');
-    const progressVisible = progressEl && progressEl.style.display === 'flex';
-    const searchQueueBar = document.getElementById('shazamSingleSearchQueueBar');
-    const starQueueBar = document.getElementById('shazamStarQueueBar');
-    const unstarQueueBar = document.getElementById('shazamUnstarQueueBar');
-    const downloadQueueBar = document.getElementById('shazamDownloadQueueBar');
-    const searchQueueVisible = searchQueueBar && searchQueueBar.style.display === 'flex';
-    const starQueueVisible = starQueueBar && starQueueBar.style.display === 'flex';
-    const unstarQueueVisible = unstarQueueBar && unstarQueueBar.style.display === 'flex';
-    const downloadQueueVisible = downloadQueueBar && downloadQueueBar.style.display === 'flex';
-    const jobQueueVisible = shazamJobQueue.length > 0;
-    const willShow = progressVisible || searchQueueVisible || starQueueVisible || unstarQueueVisible || downloadQueueVisible || jobQueueVisible;
-    const prevDisplay = section.style.display;
-    section.style.display = willShow ? 'flex' : 'none';
-    if (prevDisplay !== section.style.display) {
-        shazamBarLog('SECTION', willShow ? 'batch section visible' : 'batch section hidden');
+    var progressEl = document.getElementById('shazamSyncProgress');
+    var progressVisible = progressEl && progressEl.style.display === 'flex';
+    var searchQueueBar = document.getElementById('shazamSingleSearchQueueBar');
+    var starQueueBar = document.getElementById('shazamStarQueueBar');
+    var unstarQueueBar = document.getElementById('shazamUnstarQueueBar');
+    var downloadQueueBar = document.getElementById('shazamDownloadQueueBar');
+    var searchQueueVisible = searchQueueBar && searchQueueBar.style.display === 'flex';
+    var starQueueVisible = starQueueBar && starQueueBar.style.display === 'flex';
+    var unstarQueueVisible = unstarQueueBar && unstarQueueBar.style.display === 'flex';
+    var downloadQueueVisible = downloadQueueBar && downloadQueueBar.style.display === 'flex';
+    var jobQueueVisible = shazamJobQueue.length > 0;
+    var willShow = progressVisible || searchQueueVisible || starQueueVisible || unstarQueueVisible || downloadQueueVisible || jobQueueVisible;
+    var wrapper = document.getElementById('shazamQueueBarsFixed');
+    if (!wrapper) return;
+    if (willShow) {
+        wrapper.classList.remove('shazam-queue-bars-leaving');
+        wrapper.style.height = '';
+        wrapper.style.overflow = '';
+        if (wrapper.style.display === 'none') {
+            wrapper.style.display = 'flex';
+            wrapper.classList.add('shazam-queue-bars-entering');
+            setTimeout(function () { wrapper.classList.remove('shazam-queue-bars-entering'); }, SHAZAM_BAR_ANIM_MS);
+        }
+        return;
     }
+    if (wrapper.style.display === 'none') return;
+    var h = wrapper.dataset.leaveHeight || wrapper.offsetHeight;
+    if (h) wrapper.style.height = h + 'px';
+    wrapper.style.overflow = 'hidden';
+    delete wrapper.dataset.leaveHeight;
+    function clearWrapper() {
+        wrapper.classList.remove('shazam-queue-bars-leaving');
+        wrapper.style.display = 'none';
+        wrapper.style.height = '';
+        wrapper.style.overflow = '';
+        delete wrapper.dataset.leaveHeight;
+    }
+    function onOutDone(ev) {
+        if (ev.target !== wrapper) return;
+        wrapper.removeEventListener('animationend', onOutDone);
+        clearWrapper();
+    }
+    requestAnimationFrame(function () { wrapper.classList.add('shazam-queue-bars-leaving'); });
+    wrapper.addEventListener('animationend', onOutDone, false);
+    setTimeout(function () {
+        if (wrapper.classList.contains('shazam-queue-bars-leaving')) {
+            wrapper.removeEventListener('animationend', onOutDone);
+            clearWrapper();
+        }
+    }, SHAZAM_BAR_ANIM_MS + 50);
 }
 
 /** Set current queue state (globals + banners) so row "Queued 2/5" and queue bars stay in sync. */
@@ -3914,12 +3947,12 @@ function switchTab(tabId) {
         b.classList.toggle('active', b.dataset.tab === tabId);
         b.setAttribute('aria-selected', b.dataset.tab === tabId ? 'true' : 'false');
     });
-    const batchSection = document.getElementById('shazamBatchJobsSection');
-    if (batchSection) {
+    const queueBubble = document.getElementById('shazamQueueBarsFixed');
+    if (queueBubble) {
         if (tabId === 'shazam') {
             shazamUpdateBatchJobsSectionVisibility();
         } else {
-            batchSection.style.display = 'none';
+            queueBubble.style.display = 'none';
         }
     }
     saveAppStateToStorage({ active_tab: tabId });

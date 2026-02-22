@@ -1290,24 +1290,38 @@ button[onclick*="revertLookup"] {
     animation: shazam-bar-slide-out var(--shazam-bar-anim-duration) ease-in forwards;
 }
 
-/* Queue/progress bars: fixed overlay only, one clear notification bubble below header */
+/* Queue/progress bars: fixed overlay only, one clear notification bubble; spacing from top and sides */
 .shazam-queue-bars-fixed {
     position: fixed;
-    top: 3rem;
-    left: 0;
-    right: 0;
+    top: 1rem;
+    left: var(--sp-4);
+    right: var(--sp-4);
     z-index: 100;
     display: flex;
     flex-direction: column;
     gap: var(--sp-2);
-    padding: var(--sp-2) var(--sp-4);
+    padding: var(--sp-3) 2rem;
     box-sizing: border-box;
     background: var(--bg);
     border: 1px solid var(--border-strong);
-    border-radius: 0 var(--r-md) var(--r-md) 0;
+    border-radius: var(--r-md);
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
-    margin: 0;
+    margin: 0 auto;
     max-width: 1400px;
+}
+/* Wrapper-level in/out: whole bubble slides in/out; same easing, no height change on out */
+.shazam-queue-bars-fixed.shazam-queue-bars-entering {
+    animation: shazam-bar-slide-in var(--shazam-bar-anim-duration) ease-in-out forwards;
+}
+.shazam-queue-bars-fixed.shazam-queue-bars-leaving {
+    animation: shazam-queue-bubble-out var(--shazam-bar-anim-duration) ease-in-out forwards;
+    pointer-events: none;
+    overflow: hidden;
+    will-change: opacity, transform;
+}
+@keyframes shazam-queue-bubble-out {
+    0% { opacity: 1; transform: translateY(0); }
+    100% { opacity: 0; transform: translateY(-12px); }
 }
 /* Overlay only: do not reserve space; content scrolls under the bubble */
 /* Bars inside: no extra box, so one cohesive bubble */
