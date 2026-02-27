@@ -34,11 +34,32 @@ TRACK_SUFFIXES = re.compile(
 )
 
 
+_APOSTROPHE_CHARS = '\u0027\u2018\u2019\u201a\u201b\u2032\u2033'  # straight, curly, primes
+
+
+def _maybe_fix_mojibake(s: str) -> str:
+    """Fix common UTF-8-as-Latin1 mojibake in metadata/filenames for matching."""
+    if not s:
+        return s
+    if not any(ch in s for ch in ("Ã", "Â", "â")):
+        return s
+    try:
+        fixed = s.encode("latin-1").decode("utf-8")
+        if fixed and fixed != s:
+            return fixed
+    except Exception:
+        pass
+    return s
+
+
 def normalize(s: str) -> str:
-    """Normalize for matching: lowercase, strip, collapse whitespace, remove suffixes."""
+    """Normalize for matching: lowercase, strip, collapse whitespace, remove suffixes. Normalize apostrophes so N'Juno matches NʼJuno."""
     if not s:
         return ""
+    s = _maybe_fix_mojibake(s)
     s = s.lower().strip()
+    for c in _APOSTROPHE_CHARS:
+        s = s.replace(c, "'")
     s = re.sub(r'\s+', ' ', s)
     s = TRACK_SUFFIXES.sub('', s)
     return s.strip()

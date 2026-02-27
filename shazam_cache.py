@@ -6,6 +6,7 @@ When running from a frozen bundle, data lives in ~/Library/Application Support/S
 """
 import json
 import os
+import shutil
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -133,7 +134,7 @@ def save_local_scan_cache(folder_paths: List[str], tracks: List[Dict], files_cac
 
 
 def local_scan_cache_valid(cache: Optional[Dict], folder_paths: List[str]) -> bool:
-    """True if cache exists, folder list matches, version current, and cache has tracks."""
+    """True if cache exists, folder list matches, version current, has tracks, and no folder was modified after scan (so new downloads are seen)."""
     if not cache or not folder_paths:
         return False
     if cache.get("version") != _LOCAL_SCAN_VERSION:
@@ -145,6 +146,19 @@ def local_scan_cache_valid(cache: Optional[Dict], folder_paths: List[str]) -> bo
     tracks = cache.get("tracks", [])
     if not tracks:
         return False
+    scanned_at = cache.get("scanned_at")
+    if scanned_at:
+        try:
+            scan_ts = datetime.fromisoformat(scanned_at.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            scan_ts = 0
+        for folder in requested:
+            if folder and os.path.isdir(folder):
+                try:
+                    if os.path.getmtime(folder) > scan_ts:
+                        return False
+                except OSError:
+                    pass
     return True
 
 
@@ -243,7 +257,7 @@ STATUS_CACHE_PATH = os.path.join(_PROJECT_ROOT, "shazam_status_cache.json")
 
 
 def load_status_cache() -> Optional[Dict]:
-    """Load last compare result for instant display. One-time: if status has no search_outcomes and old shazam_search_log.json exists, migrate it in."""
+    """Load last compare result for instant display. If main file has track lists but no search_outcomes/urls, merge in from .bak so dots (purple/orange) never disappear."""
     status = _load_json(STATUS_CACHE_PATH, None)
     if status is not None and not status.get("search_outcomes"):
         _old_log_path = os.path.join(_PROJECT_ROOT, "shazam_search_log.json")
@@ -257,6 +271,23 @@ def load_status_cache() -> Optional[Dict]:
                     os.remove(_old_log_path)
                 except OSError:
                     pass
+    if status is not None and (status.get("to_download") or status.get("have_locally")) and not (status.get("search_outcomes") or status.get("urls")):
+        bak = _load_json(STATUS_CACHE_PATH + ".bak", None)
+        if bak and isinstance(bak, dict) and (bak.get("search_outcomes") or bak.get("urls")):
+            if bak.get("search_outcomes"):
+                status = dict(status)
+                status["search_outcomes"] = list(bak["search_outcomes"])
+                status["urls"], status["not_found"] = _replay_search_outcomes(status["search_outcomes"], status.get("urls"))
+            else:
+                status = dict(status)
+                status["urls"] = dict(bak.get("urls") or {})
+                urls = status["urls"]
+                nf = dict(bak.get("not_found") or {})
+                status["not_found"] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
+            for key in ("track_ids", "starred", "soundeo_titles", "soundeo_match_scores", "dismissed_manual_check"):
+                if bak.get(key) and not status.get(key):
+                    v = bak[key]
+                    status[key] = list(v) if isinstance(v, list) else (dict(v) if isinstance(v, dict) else v)
     return status
 
 
@@ -264,7 +295,7 @@ def save_status_cache(status: Dict) -> None:
     """Persist compare result. Uses atomic write to prevent corrupt reads on refresh.
     Paper trail: never persist not_found for a track that has a URL (so status stays correct).
     When search_outcomes exists, urls/not_found are derived from it so batch search data is always consistent.
-    Never wipe search_outcomes: if status has none, preserve the existing file's log so dots survive compare/refresh."""
+    Never wipe search_outcomes: if status has none, preserve from existing file, then from .bak, so dots never disappear."""
     out = dict(status)
     log = out.get('search_outcomes') or []
     if not log:
@@ -274,6 +305,17 @@ def save_status_cache(status: Dict) -> None:
             if existing_log:
                 out['search_outcomes'] = existing_log
                 log = existing_log
+        if not log:
+            bak = _load_json(STATUS_CACHE_PATH + ".bak", None)
+            if bak and isinstance(bak, dict) and (bak.get('search_outcomes') or []):
+                out['search_outcomes'] = list(bak['search_outcomes'])
+                log = out['search_outcomes']
+                if bak.get('track_ids'):
+                    out.setdefault('track_ids', {}).update(bak.get('track_ids') or {})
+                if bak.get('starred'):
+                    out.setdefault('starred', {}).update(bak.get('starred') or {})
+                if bak.get('soundeo_titles'):
+                    out.setdefault('soundeo_titles', {}).update(bak.get('soundeo_titles') or {})
     if log:
         urls, nf = _replay_search_outcomes(log, out.get('urls'))
         out['urls'] = urls
@@ -281,6 +323,12 @@ def save_status_cache(status: Dict) -> None:
     urls = out.get('urls') or {}
     nf = out.get('not_found') or {}
     out['not_found'] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
+    # Keep one backup of previous version so status/context per track can be restored if lost
+    if os.path.exists(STATUS_CACHE_PATH) and os.path.getsize(STATUS_CACHE_PATH) > 0:
+        try:
+            shutil.copy2(STATUS_CACHE_PATH, STATUS_CACHE_PATH + ".bak")
+        except OSError:
+            pass
     _save_json_atomic(STATUS_CACHE_PATH, out)
 
 

@@ -1355,6 +1355,8 @@ def _rebuild_status_from_caches():
                 out['soundeo_match_scores'] = dict(old['soundeo_match_scores'])
             if old.get('track_ids'):
                 out['track_ids'] = dict(old['track_ids'])
+            if old.get('search_outcomes'):
+                out['search_outcomes'] = list(old['search_outcomes'])
         return out
     local_scan = load_local_scan_cache()
     if not local_scan_cache_valid(local_scan, folder_paths):
@@ -1404,12 +1406,14 @@ def _rebuild_status_from_caches():
             out['not_found'] = dict(old['not_found'])
         if old.get('track_ids'):
             out['track_ids'] = dict(old['track_ids'])
+        if old.get('search_outcomes'):
+            out['search_outcomes'] = list(old['search_outcomes'])
     return out
 
 
 def _merge_preserved_urls_into_status(status: Dict) -> None:
-    """Merge existing favorited/synced URLs, starred, dismissed, etc. from status cache file into status. Mutates status.
-    not_found is single-source-of-truth from file only (replace, never merge) so we don't pollute from in-memory state."""
+    """Merge existing favorited/synced URLs, starred, dismissed, search_outcomes, etc. from status cache file into status. Mutates status.
+    search_outcomes is the single source of truth for urls/not_found (dots); always preserve so compare never drops purple/orange state."""
     from shazam_cache import load_status_cache
     old = load_status_cache()
     if old:
@@ -1431,6 +1435,9 @@ def _merge_preserved_urls_into_status(status: Dict) -> None:
             status['download_last_run'] = dict(old['download_last_run'])
         # not_found: replace from file only (single source of truth; never merge in-memory)
         status['not_found'] = dict(old.get('not_found') or {})
+        # search_outcomes: preserve so save_status_cache never writes a version that loses purple/orange dots
+        if old.get('search_outcomes'):
+            status['search_outcomes'] = list(old['search_outcomes'])
 
 
 def _status_is_stale(status: Optional[Dict]) -> bool:
@@ -1494,9 +1501,7 @@ def _sanitize_have_locally_filepaths(status: Dict) -> Dict:
 
 
 def _get_best_available_status():
-    """Return best available status: in-memory, file, rebuild, or partial. Persists when building fresh.
-    urls and not_found (dot state) are ALWAYS derived from the cache file's search_outcomes when present,
-    so search/refresh never shows wrong or empty dots."""
+    """Return best available status. Prefer file over in-memory when file has full context (urls/search_outcomes) so first load after restart always shows purple/orange dots. Dots are derived from file search_outcomes when present."""
     from shazam_cache import (
         load_status_cache,
         save_status_cache,
@@ -1507,7 +1512,7 @@ def _get_best_available_status():
     )
 
     def _apply_dot_state_from_file(out: Dict) -> Dict:
-        """Overwrite urls and not_found from the cache file's search_outcomes (single source of truth). So dots always match what was saved."""
+        """Overwrite urls and not_found from the cache file's search_outcomes (single source of truth). load_status_cache() already merges from .bak when file lacks context."""
         out = dict(out)
         file_status = load_status_cache()
         log = (file_status or {}).get("search_outcomes") or []
@@ -1529,13 +1534,20 @@ def _get_best_available_status():
         out["not_found"] = nf
         return out
 
+    cached = load_status_cache()
+    has_cached_data = cached and (cached.get('shazam_count', 0) > 0 or cached.get('have_locally') or cached.get('to_download'))
+    file_has_dot_state = bool((cached or {}).get('search_outcomes') or (cached or {}).get('urls'))
+    if has_cached_data and file_has_dot_state and not _status_is_stale(cached):
+        out = _sanitize_have_locally_filepaths(dict(cached))
+        out = _apply_skip_list_to_status(out)
+        app._shazam_sync_status = out
+        out = _apply_dot_state_from_file(out)
+        return _add_starred_lowercase_aliases(out)
     if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status and not _status_is_stale(app._shazam_sync_status):
         out = _sanitize_have_locally_filepaths(dict(app._shazam_sync_status))
         out = _apply_skip_list_to_status(out)
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
-    cached = load_status_cache()
-    has_cached_data = cached and (cached.get('shazam_count', 0) > 0 or cached.get('have_locally') or cached.get('to_download'))
     if has_cached_data and not _status_is_stale(cached):
         out = _sanitize_have_locally_filepaths(dict(cached))
         out = _apply_skip_list_to_status(out)
@@ -1596,6 +1608,8 @@ def _get_best_available_status():
                 partial['dismissed'] = dict(old['dismissed'])
             if old.get('not_found'):
                 partial['not_found'] = dict(old['not_found'])
+            if old.get('search_outcomes'):
+                partial['search_outcomes'] = list(old['search_outcomes'])
         app._shazam_sync_status = partial
         save_status_cache(partial)
         out = _apply_skip_list_to_status(dict(partial))
@@ -2114,10 +2128,10 @@ def soundeo_stream_preview():
 
 
 def _run_rescan_only_background():
-    """Background thread: scan all folders and save cache only; do not run compare."""
+    """Background thread: scan all folders, save cache, then rebuild status (to_download/have_locally) so list updates without needing Compare."""
     from config_shazam import get_destination_folders, get_destination_folders_raw
-    from local_scanner import scan_folders, ScanCancelled
-    from shazam_cache import load_local_scan_cache, save_local_scan_cache
+    from local_scanner import scan_folders, compute_to_download, _find_matching_local_track, ScanCancelled
+    from shazam_cache import load_local_scan_cache, save_local_scan_cache, save_status_cache, load_shazam_cache, load_skip_list
     try:
         folder_paths = get_destination_folders()
         configured = get_destination_folders_raw()
@@ -2151,10 +2165,50 @@ def _run_rescan_only_background():
             app._shazam_compare_running = False
             return
         save_local_scan_cache(folder_paths, local_tracks)
-        existing = dict(getattr(app, '_shazam_sync_status') or {})
-        existing['message'] = 'Rescan complete. Click Compare to update the list.'
-        existing['local_count'] = len(local_tracks)
-        app._shazam_sync_status = existing
+        shazam_tracks = load_shazam_cache()
+        if shazam_tracks:
+            app._shazam_scan_progress = {'scanning': True, 'current': len(local_tracks), 'total': len(local_tracks), 'message': 'Matching tracks...'}
+            skipped = load_skip_list()
+            to_download_raw, title_word_index, exact_match_map, local_canon = compute_to_download(shazam_tracks, local_tracks)
+            to_download = [t for t in to_download_raw if (t['artist'].strip().lower(), t['title'].strip().lower()) not in skipped]
+            to_download = _dedupe_tracks_by_key(to_download)
+            skipped_tracks = [{'artist': t['artist'], 'title': t['title'], **({'shazamed_at': t['shazamed_at']} if t.get('shazamed_at') is not None else {})}
+                              for t in to_download_raw if (t['artist'].strip().lower(), t['title'].strip().lower()) in skipped]
+            to_dl_set = {_track_key_norm(s) for s in to_download}
+            have_by_key = {}
+            for s in shazam_tracks:
+                k = _track_key_norm(s)
+                if k in to_dl_set:
+                    continue
+                item = {'artist': s['artist'], 'title': s['title']}
+                if s.get('shazamed_at') is not None:
+                    item['shazamed_at'] = s['shazamed_at']
+                match, match_score = _find_matching_local_track(s, local_tracks, title_word_index=title_word_index, exact_match_map=exact_match_map, local_canon=local_canon)
+                if match and match.get('filepath'):
+                    item['filepath'] = match['filepath']
+                if match_score is not None:
+                    item['match_score'] = match_score
+                if k not in have_by_key or (item.get('filepath') and not have_by_key[k].get('filepath')):
+                    have_by_key[k] = item
+            have_locally = list(have_by_key.values())
+            folder_stats = _folder_scan_stats(folder_paths, local_tracks, have_locally)
+            status = {
+                'shazam_count': len(shazam_tracks),
+                'local_count': len(local_tracks),
+                'to_download_count': len(to_download),
+                'to_download': to_download,
+                'have_locally': have_locally,
+                'folder_stats': folder_stats,
+                'skipped_tracks': skipped_tracks,
+            }
+            _merge_preserved_urls_into_status(status)
+            app._shazam_sync_status = status
+            save_status_cache(status)
+        else:
+            existing = dict(getattr(app, '_shazam_sync_status') or {})
+            existing['message'] = 'Rescan complete. No Shazam tracks.'
+            existing['local_count'] = len(local_tracks)
+            app._shazam_sync_status = existing
     except Exception:
         app._shazam_sync_status = dict(getattr(app, '_shazam_sync_status') or {})
         app._shazam_sync_status['message'] = 'Rescan failed.'
@@ -2358,9 +2412,52 @@ def _shazam_any_job_running() -> bool:
     return False
 
 
+def _apply_download_to_status_and_cache(key: str, filepath: str) -> None:
+    """After download: we know exact key and filepath. Update status (have_locally, to_download) and local_scan_cache directly — no rescan or matching needed."""
+    if not key or not filepath:
+        return
+    parts = key.split(' - ', 1)
+    artist = parts[0].strip() if parts else ''
+    title = parts[1].strip() if len(parts) > 1 else ''
+    if not artist and not title:
+        return
+    from shazam_cache import load_status_cache, save_status_cache, load_local_scan_cache, save_local_scan_cache
+    from config_shazam import get_destination_folders
+
+    status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
+    have = list(status.get('have_locally') or [])
+    to_dl = list(status.get('to_download') or [])
+    key_lower = (artist.strip().lower(), title.strip().lower())
+
+    found = False
+    for h in have:
+        if _track_key_norm(h) == key_lower:
+            h['filepath'] = filepath
+            found = True
+            break
+    if not found:
+        have.append({'artist': artist, 'title': title, 'filepath': filepath})
+    to_dl = [t for t in to_dl if _track_key_norm(t) != key_lower]
+    status['have_locally'] = have
+    status['to_download'] = to_dl
+    status['to_download_count'] = len(to_dl)
+    _merge_preserved_urls_into_status(status)
+    app._shazam_sync_status = status
+    save_status_cache(status)
+
+    folder_paths = get_destination_folders()
+    if folder_paths:
+        cache = load_local_scan_cache()
+        tracks = list(cache.get('tracks', [])) if cache else []
+        existing_paths = {t.get('filepath') for t in tracks}
+        if filepath not in existing_paths:
+            tracks.append({'artist': artist, 'title': title, 'filepath': filepath})
+            save_local_scan_cache(folder_paths, tracks)
+
+
 def _rescan_folder_and_update_status(folder_abs: str) -> None:
-    """Rescan one folder, merge into local cache, rebuild to_download/have_locally and save status. Used after download."""
-    from config_shazam import get_destination_folders_raw
+    """Rescan one folder, merge into local cache, rebuild to_download/have_locally and save status. Used when we need full rescan (e.g. files added outside the app)."""
+    from config_shazam import get_destination_folders, get_destination_folders_raw
     from local_scanner import scan_folders, compute_to_download, _find_matching_local_track
     from shazam_cache import load_shazam_cache, load_local_scan_cache, save_local_scan_cache, save_status_cache, load_skip_list
 
@@ -2369,7 +2466,7 @@ def _rescan_folder_and_update_status(folder_abs: str) -> None:
         return p == base or p.startswith(base + os.sep)
 
     cache = load_local_scan_cache()
-    folder_paths = get_destination_folders_raw()
+    folder_paths = get_destination_folders()
     other_tracks = []
     if cache and cache.get('tracks'):
         for t in cache.get('tracks', []):
@@ -2476,13 +2573,14 @@ def _run_download_queue_worker():
             dlog.warning("download_queue: failed key=%s error=%s", key[:60], err)
         else:
             done += 1
-            results.append({'key': key, 'ok': True, 'filepath': out.get('filepath'), 'filename': out.get('filename')})
-            dlog.info("download_queue: saved key=%s filepath=%s", key[:60], out.get('filepath', '')[:80])
-            app._shazam_download_progress['message'] = f'Matching: {key[:40]}...'
+            fp = out.get('filepath', '')
+            results.append({'key': key, 'ok': True, 'filepath': fp, 'filename': out.get('filename')})
+            dlog.info("download_queue: saved key=%s filepath=%s", key[:60], fp[:80] if fp else '')
+            app._shazam_download_progress['message'] = f'Updating: {key[:40]}...'
             try:
-                _rescan_folder_and_update_status(os.path.abspath(dest_dir).rstrip(os.sep))
+                _apply_download_to_status_and_cache(key, fp)
             except Exception as e:
-                dlog.warning("download_queue: rescan after download failed: %s", e)
+                dlog.warning("download_queue: apply download to status failed: %s", e)
         app._shazam_download_progress['done'] = done
         app._shazam_download_progress['failed'] = failed
         app._shazam_download_progress['results'] = results
@@ -5341,5 +5439,8 @@ def _eager_load_shazam_status():
 _eager_load_shazam_status()
 
 if __name__ == '__main__':
+    from shazam_cache import STATUS_CACHE_PATH
+    import logging
+    logging.info("SoundBridge status cache (single source of truth): %s", STATUS_CACHE_PATH)
     app.run(debug=True, port=5002, host='127.0.0.1', threaded=True, use_reloader=False)
 

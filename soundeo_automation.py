@@ -2042,6 +2042,21 @@ def _safe_filename_from_key(key: str, max_len: int = 200) -> str:
     return s or "track"
 
 
+def _maybe_fix_mojibake_filename(s: str) -> str:
+    """Fix common UTF-8-as-Latin1 mojibake in filenames (e.g. MÃ¼ckenschwarm -> Mückenschwarm)."""
+    if not s:
+        return s
+    if not any(ch in s for ch in ("Ã", "Â", "â")):
+        return s
+    try:
+        fixed = s.encode("latin-1").decode("utf-8")
+        if fixed and fixed != s:
+            return fixed
+    except Exception:
+        pass
+    return s
+
+
 def _path_with_copy_number(dest_dir: str, filename: str) -> str:
     """Return path under dest_dir with filename; if file exists, add (1), (2), etc. before extension."""
     base, ext = os.path.splitext(filename)
@@ -2317,21 +2332,34 @@ def soundeo_download_file_http(
         # Filename from Content-Disposition or URL; fallback to track key so we don't get "downloads.aiff"
         filename = None
         cd = resp.headers.get("Content-Disposition")
-        if cd and "filename=" in cd:
-            m = re.search(r'filename[*]?=(?:UTF-8\'\')?["\']?([^"\';]+)', cd, re.I)
-            if m:
-                filename = m.group(1).strip().strip('"\'')
+        if cd:
+            from urllib.parse import unquote
+            # RFC 5987 form: filename*=UTF-8''Joi%20N%27Juno%20-%20Musik.aiff
+            m_star = re.search(r"filename\*\s*=\s*([^;]+)", cd, re.I)
+            if m_star:
+                raw = m_star.group(1).strip().strip('"')
+                if raw.lower().startswith("utf-8''"):
+                    raw = raw[7:]
+                filename = unquote(raw).strip()
+            # Quoted/plain fallback: filename="Joi N'Juno - Musik (Original Mix).aiff"
+            if not filename:
+                m_plain = re.search(r'filename\s*=\s*(?:"([^"]+)"|([^;]+))', cd, re.I)
+                if m_plain:
+                    filename = (m_plain.group(1) or m_plain.group(2) or "").strip().strip('"')
+            filename = _maybe_fix_mojibake_filename(filename or "")
         if not filename:
             from urllib.parse import unquote, urlparse
             # Prefer filename from final URL (CDN path, e.g. 4560715.aiff) over Soundeo path (e.g. "download")
             final_path = urlparse(resp.url or "").path if resp.url else ""
             if final_path and os.path.basename(final_path) and "." in os.path.basename(final_path):
                 candidate = unquote(os.path.basename(final_path)) or ""
+                candidate = _maybe_fix_mojibake_filename(candidate)
                 # Do not use web-page extensions (server returned wrong content)
                 if candidate and os.path.splitext(candidate)[1].lower() not in (".css", ".js", ".html", ".htm", ".json"):
                     filename = candidate
             if not filename and download_url:
                 candidate = unquote(os.path.basename(urlparse(download_url).path)) or ""
+                candidate = _maybe_fix_mojibake_filename(candidate)
                 if candidate and os.path.splitext(candidate)[1].lower() not in (".css", ".js", ".html", ".htm", ".json"):
                     filename = candidate
         if not filename or not filename.strip():
