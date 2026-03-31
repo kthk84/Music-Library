@@ -3,6 +3,8 @@ let processedCount = 0;
 let successCount = 0;
 
 const APP_STATE_KEY = 'mp3cleaner_app_state';
+/** Bootstrap runs server-side reconcile + status merge; large libraries can exceed a short client timeout. */
+const SHAZAM_BOOTSTRAP_TIMEOUT_MS = 120000;
 
 /** Unified play/pause icon SVGs for consistent premium look (row = 12px, bar = 16px) */
 const PLAY_ICON_ROW = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><use href="#icon-play"/></svg>';
@@ -1310,10 +1312,10 @@ function shazamApplySettings(cfg) {
 
 async function shazamBootstrapLoad() {
     const trackList = document.getElementById('shazamTrackList');
-    if (trackList) trackList.innerHTML = '<p class="shazam-info-msg">Loading...</p>';
+    if (trackList) trackList.innerHTML = '<p class="shazam-info-msg">Loading… (large libraries can take up to two minutes)</p>';
     try {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        const timeoutId = setTimeout(() => controller.abort(), SHAZAM_BOOTSTRAP_TIMEOUT_MS);
         const res = await fetch('/api/shazam-sync/bootstrap', { signal: controller.signal });
         clearTimeout(timeoutId);
         const data = await res.json();
@@ -1326,7 +1328,7 @@ async function shazamBootstrapLoad() {
     } catch (e) {
         console.error('Bootstrap failed:', e);
         const msg = e.name === 'AbortError'
-            ? 'Request timed out. Server may be busy.'
+            ? 'Request timed out after ' + Math.round(SHAZAM_BOOTSTRAP_TIMEOUT_MS / 1000) + 's. Server may still be working — try Retry, or restart the app (python3 app.py).'
             : (e.message || 'Could not load settings and tracks.');
         if (trackList) trackList.innerHTML =
             '<p class="shazam-info-msg shazam-warning">' + escapeHtml(msg) +
