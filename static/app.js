@@ -2024,6 +2024,8 @@ let shazamBarTimeUpdate = null;
 let shazamBarEnded = null;
 /** Proxy ID for temp MP3 (AIFF/WAV); released on end/close/switch. */
 let shazamCurrentProxyId = null;
+/** Pre-buffered next track so playback can continue when the current track ends. */
+let shazamNextBuffer = null;
 /** Cover art hashes for Sync list / play bar (from server status.cover_hashes). */
 let shazamCoverHashes = {};
 /** Metadata of the currently playing track (player bar star / download / skip). */
@@ -2049,6 +2051,238 @@ window.addEventListener('beforeunload', function () {
         navigator.sendBeacon('/api/shazam-sync/release-proxy', new Blob([JSON.stringify({ proxy_id: shazamCurrentProxyId })], { type: 'application/json' }));
     }
 });
+
+/** Find a play button by exact data-track-key (avoids brittle CSS attribute selectors). */
+function shazamFindPlayBtnByTrackKey(trackKey) {
+    if (!trackKey) return null;
+    var btns = document.querySelectorAll('#shazamTrackList .shazam-play-btn[data-track-key]');
+    for (var i = 0; i < btns.length; i++) {
+        if (btns[i].dataset.trackKey === trackKey) return btns[i];
+    }
+    return null;
+}
+
+/** Cancel any pending next-track prefetch and release its resources. */
+function shazamCancelNextBuffer() {
+    var buf = shazamNextBuffer;
+    shazamNextBuffer = null;
+    if (!buf) return;
+    buf.cancelled = true;
+    if (buf.audioEl) {
+        buf.audioEl.onended = null;
+        buf.audioEl.onerror = null;
+        buf.audioEl.pause();
+        buf.audioEl.src = '';
+    }
+    if (buf.proxyId) {
+        fetch('/api/shazam-sync/release-proxy', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ proxy_id: buf.proxyId })
+        }).catch(function () {});
+    }
+}
+
+/** Find the next play button after fromBtn's row (or shazamPlayingBtn if detached). */
+function shazamFindNextBtn(fromBtn) {
+    var effectiveBtn = (fromBtn && fromBtn.isConnected) ? fromBtn : shazamPlayingBtn;
+    if (!effectiveBtn) return null;
+    var fromRow = effectiveBtn.closest('tr');
+    if (!fromRow) return null;
+    var nextRow = fromRow.nextElementSibling;
+    while (nextRow) {
+        var b = nextRow.querySelector('.shazam-play-btn');
+        if (b) return b;
+        nextRow = nextRow.nextElementSibling;
+    }
+    return null;
+}
+
+/** Pre-fetch and pre-load the next track so it can start quickly when the current one ends. */
+async function shazamPrefetchNext(fromBtn) {
+    shazamCancelNextBuffer();
+    var nextBtn = shazamFindNextBtn(fromBtn);
+    if (!nextBtn) return;
+
+    var buf = {
+        type: null, trackKey: nextBtn.dataset.trackKey, btn: nextBtn,
+        audioEl: null, mp3Url: null, proxyId: null, streamUrl: null,
+        soundeoUrl: null, preparing: false, cancelled: false
+    };
+
+    var isSoundeo = nextBtn.classList.contains('shazam-soundeo-play') && !nextBtn.dataset.dirB64 && !nextBtn.dataset.pathB64;
+
+    if (isSoundeo) {
+        var trackUrl = nextBtn.dataset.soundeoUrl;
+        if (!trackUrl) return;
+        buf.type = 'soundeo';
+        buf.soundeoUrl = trackUrl;
+        buf.preparing = true;
+        shazamNextBuffer = buf;
+        try {
+            var sRes = await fetch('/api/soundeo/prefetch-preview?track_url=' + encodeURIComponent(trackUrl));
+            if (buf.cancelled) return;
+            var sData = await sRes.json().catch(function () { return {}; });
+            if (buf.cancelled) return;
+            if (sRes.ok && sData.mp3_url) {
+                buf.streamUrl = sData.mp3_url;
+            } else {
+                buf.streamUrl = '/api/soundeo/stream-preview?track_url=' + encodeURIComponent(trackUrl);
+            }
+        } catch (e) {
+            if (!buf.cancelled) buf.streamUrl = '/api/soundeo/stream-preview?track_url=' + encodeURIComponent(trackUrl);
+        }
+        buf.preparing = false;
+        if (!buf.cancelled && buf.streamUrl) {
+            var sAudio = new Audio();
+            sAudio.preload = 'auto';
+            sAudio.src = buf.streamUrl;
+            sAudio.load();
+            buf.audioEl = sAudio;
+        }
+    } else {
+        var dirB64 = (nextBtn.dataset.dirB64 || '').trim();
+        var file = nextBtn.dataset.file || '';
+        var pathB64 = (nextBtn.dataset.pathB64 || '').trim();
+        var isAiff = /\.(aiff?|wav)$/.test(file.toLowerCase());
+
+        if (isAiff) {
+            var body = (dirB64 && file) ? { dir_b64: dirB64, file: file } : (pathB64 ? { path_b64: pathB64 } : null);
+            if (!body) return;
+            buf.type = 'aiff';
+            buf.streamUrl = (dirB64 && file)
+                ? '/api/shazam-sync/stream-file?dir=' + encodeURIComponent(dirB64) + '&file=' + encodeURIComponent(file)
+                : '/api/shazam-sync/stream-file?path=' + encodeURIComponent(pathB64);
+            buf.preparing = true;
+            shazamNextBuffer = buf;
+            try {
+                var prepCtrl = new AbortController();
+                var prepTimer = setTimeout(function () { prepCtrl.abort(); }, 30000);
+                var res = await fetch('/api/shazam-sync/prepare-proxy', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                    signal: prepCtrl.signal
+                });
+                clearTimeout(prepTimer);
+                if (buf.cancelled) return;
+                var data = await res.json().catch(function () { return {}; });
+                if (buf.cancelled) return;
+                if (res.ok && data.mp3_url) {
+                    buf.mp3Url = data.mp3_url;
+                    buf.proxyId = data.proxy_id;
+                    var proxyAudio = new Audio();
+                    proxyAudio.preload = 'auto';
+                    proxyAudio.src = data.mp3_url;
+                    proxyAudio.load();
+                    buf.audioEl = proxyAudio;
+                }
+            } catch (e) { /* fall back to shazamPlayNextTrack */ }
+            buf.preparing = false;
+        } else {
+            var streamUrl2 = (dirB64 && file)
+                ? '/api/shazam-sync/stream-file?dir=' + encodeURIComponent(dirB64) + '&file=' + encodeURIComponent(file)
+                : (pathB64 ? '/api/shazam-sync/stream-file?path=' + encodeURIComponent(pathB64) : null);
+            if (!streamUrl2) return;
+            buf.type = 'local';
+            buf.streamUrl = streamUrl2;
+            shazamNextBuffer = buf;
+            var localAudio = new Audio();
+            localAudio.preload = 'auto';
+            localAudio.src = streamUrl2;
+            localAudio.load();
+            buf.audioEl = localAudio;
+        }
+    }
+}
+
+/**
+ * When a track ends: play the pre-buffered next track if available, else start the next row normally.
+ */
+async function shazamPlayFromBuffer(prevRow, prevKey) {
+    var buf = shazamNextBuffer;
+    if (!buf || buf.cancelled) {
+        shazamNextBuffer = null;
+        shazamPlayNextTrack(prevRow, prevKey);
+        return;
+    }
+
+    if (buf.preparing) {
+        var waited = 0;
+        while (buf.preparing && !buf.cancelled && waited < 6000) {
+            await new Promise(function (r) { setTimeout(r, 100); });
+            waited += 100;
+        }
+    }
+
+    if (buf.cancelled || !buf.audioEl) {
+        shazamNextBuffer = null;
+        shazamPlayNextTrack(prevRow, prevKey);
+        return;
+    }
+
+    shazamNextBuffer = null;
+
+    var liveBtn = buf.trackKey ? shazamFindPlayBtnByTrackKey(buf.trackKey) : null;
+    if (!liveBtn || !liveBtn.isConnected) {
+        if (buf.proxyId) {
+            fetch('/api/shazam-sync/release-proxy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ proxy_id: buf.proxyId }) }).catch(function () {});
+        }
+        shazamPlayNextTrack(prevRow, prevKey);
+        return;
+    }
+
+    releaseShazamProxy();
+    var _oldAudioEl = shazamAudioEl;
+    if (_oldAudioEl) {
+        _oldAudioEl.onended = null;
+        _oldAudioEl.onerror = null;
+        if (shazamBarEnded) { _oldAudioEl.removeEventListener('ended', shazamBarEnded); shazamBarEnded = null; }
+        if (shazamBarTimeUpdate) { _oldAudioEl.removeEventListener('timeupdate', shazamBarTimeUpdate); shazamBarTimeUpdate = null; }
+        _oldAudioEl.pause();
+        _oldAudioEl.src = '';
+    }
+    shazamAudioEl = buf.audioEl;
+
+    var playKey = (buf.type === 'soundeo') ? buf.soundeoUrl : buf.streamUrl;
+    var resetNewBtn = function () {
+        if (liveBtn) { liveBtn.innerHTML = PLAY_ICON_ROW; liveBtn.classList.remove('playing'); }
+        shazamCurrentlyPlaying = null;
+        shazamPlayingBtn = null;
+        shazamPlayerBarHide();
+    };
+
+    shazamAudioEl.onerror = function () { resetNewBtn(); };
+    shazamAudioEl.onended = function () {
+        var np = shazamPlayingBtn && shazamPlayingBtn.isConnected ? shazamPlayingBtn.closest('tr') : null;
+        var nk = shazamPlayingBtn ? shazamPlayingBtn.dataset.trackKey : null;
+        resetNewBtn();
+        shazamPlayFromBuffer(np, nk);
+    };
+
+    if (buf.type === 'aiff') {
+        shazamCurrentProxyId = buf.proxyId;
+    }
+
+    var prevPlaying = document.querySelector('.shazam-play-btn.playing');
+    if (prevPlaying && prevPlaying !== liveBtn) {
+        prevPlaying.innerHTML = PLAY_ICON_ROW;
+        prevPlaying.classList.remove('playing');
+    }
+
+    try {
+        await shazamAudioEl.play();
+        liveBtn.innerHTML = PAUSE_ICON_ROW;
+        liveBtn.classList.add('playing');
+        shazamCurrentlyPlaying = playKey;
+        shazamPlayingBtn = liveBtn;
+        shazamPlayerBarShow(liveBtn.dataset.trackLabel || '—');
+        shazamPrefetchNext(liveBtn);
+    } catch (e) {
+        resetNewBtn();
+        shazamPlayNextTrack(prevRow, prevKey);
+    }
+}
 
 function shazamPlayerBarShow(label) {
     const bar = document.getElementById('shazamPlayerBar');
@@ -2153,9 +2387,99 @@ function shazamPlayerBarPlayPause() {
 }
 
 function shazamPlayerBarClose() {
+    shazamCancelNextBuffer();
     if (shazamAudioEl) shazamAudioEl.pause();
     shazamCurrentlyPlaying = null;
     shazamPlayerBarHide();
+}
+
+/** Play the next visible track in the list after the given row (or the currently playing row). */
+function shazamPlayNextTrack(fromRow, fallbackTrackKey) {
+    var currentRow = (fromRow && fromRow.isConnected) ? fromRow : null;
+    if (!currentRow && shazamPlayingBtn && shazamPlayingBtn.isConnected) {
+        currentRow = shazamPlayingBtn.closest('tr');
+    }
+    if (!currentRow) {
+        var playingEl = document.querySelector('#shazamTrackList .shazam-play-btn.playing');
+        if (playingEl) currentRow = playingEl.closest('tr');
+    }
+    if (!currentRow && fallbackTrackKey) {
+        var allRows = document.querySelectorAll('#shazamTrackList tbody tr');
+        var foundIdx = -1;
+        for (var ri = 0; ri < allRows.length; ri++) {
+            if (allRows[ri].dataset.trackKey === fallbackTrackKey) { foundIdx = ri; break; }
+        }
+        if (foundIdx >= 0 && foundIdx + 1 < allRows.length) {
+            currentRow = allRows[foundIdx];
+        } else if (allRows.length > 0) {
+            var targetIdx = foundIdx >= 0 ? foundIdx : 0;
+            var candidate = allRows[Math.min(targetIdx, allRows.length - 1)];
+            var btn = candidate.querySelector('.shazam-play-btn');
+            if (btn) {
+                if (btn.classList.contains('shazam-soundeo-play') && !btn.dataset.dirB64 && !btn.dataset.pathB64) shazamToggleSoundeoPlay(btn);
+                else shazamTogglePlay(btn);
+            }
+            return;
+        }
+    }
+    if (!currentRow) return;
+    var nextRow = currentRow.nextElementSibling;
+    while (nextRow) {
+        var nextBtn = nextRow.querySelector('.shazam-play-btn');
+        if (nextBtn) {
+            if (nextBtn.classList.contains('shazam-soundeo-play') && !nextBtn.dataset.dirB64 && !nextBtn.dataset.pathB64) {
+                shazamToggleSoundeoPlay(nextBtn);
+            } else {
+                shazamTogglePlay(nextBtn);
+            }
+            return;
+        }
+        nextRow = nextRow.nextElementSibling;
+    }
+}
+
+/** Play the previous visible track in the list before the currently playing row. */
+function shazamPlayPrevTrack() {
+    var currentRow = null;
+    if (shazamPlayingBtn && shazamPlayingBtn.isConnected) {
+        currentRow = shazamPlayingBtn.closest('tr');
+    }
+    if (!currentRow) {
+        var playingEl = document.querySelector('#shazamTrackList .shazam-play-btn.playing');
+        if (playingEl) currentRow = playingEl.closest('tr');
+    }
+    if (!currentRow) return;
+    var prevRow = currentRow.previousElementSibling;
+    while (prevRow) {
+        var prevBtn = prevRow.querySelector('.shazam-play-btn');
+        if (prevBtn) {
+            if (prevBtn.classList.contains('shazam-soundeo-play') && !prevBtn.dataset.dirB64 && !prevBtn.dataset.pathB64) {
+                shazamToggleSoundeoPlay(prevBtn);
+            } else {
+                shazamTogglePlay(prevBtn);
+            }
+            return;
+        }
+        prevRow = prevRow.previousElementSibling;
+    }
+}
+
+function shazamPlayerBarNext() {
+    var prevRow = shazamPlayingBtn && shazamPlayingBtn.isConnected ? shazamPlayingBtn.closest('tr') : null;
+    var prevKey = shazamPlayingBtn ? shazamPlayingBtn.dataset.trackKey : null;
+    shazamCancelNextBuffer();
+    if (shazamAudioEl) shazamAudioEl.pause();
+    shazamCurrentlyPlaying = null;
+    shazamPlayerBarHide();
+    shazamPlayNextTrack(prevRow, prevKey);
+}
+
+function shazamPlayerBarPrev() {
+    shazamCancelNextBuffer();
+    if (shazamAudioEl) shazamAudioEl.pause();
+    shazamCurrentlyPlaying = null;
+    shazamPlayerBarHide();
+    shazamPlayPrevTrack();
 }
 
 /** Update the player bar action buttons (star / download / skip) to match current track state. */
@@ -2603,114 +2927,144 @@ function shazamTogglePlay(btn) {
             : (pathB64 ? '/api/shazam-sync/stream-file?path=' + encodeURIComponent(pathB64) : null);
         if (!streamUrl) return;
         const playKey = streamUrl;
-    if (!shazamAudioEl) {
-        shazamAudioEl = document.createElement('audio');
-    }
-    const playingBtn = document.querySelector('.shazam-play-btn.playing');
-    if (playingBtn) {
-        playingBtn.innerHTML = PLAY_ICON_ROW;
-        playingBtn.classList.remove('playing');
-    }
-    if (shazamCurrentlyPlaying === playKey) {
-        shazamAudioEl.pause();
-        shazamCurrentlyPlaying = null;
-        shazamPlayerBarHide();
-        return;
-    }
-    releaseShazamProxy();
-    let playErrorAlertShown = false;
-    const showPlayError = (msg) => { if (!playErrorAlertShown) { playErrorAlertShown = true; alert(msg); } };
-    const resetBtn = () => { if (btn) { btn.innerHTML = PLAY_ICON_ROW; btn.classList.remove('playing'); } shazamCurrentlyPlaying = null; shazamPlayingBtn = null; shazamPlayerBarHide(); };
-    const fileLower = (btn.dataset.file || '').toLowerCase();
-    const isAiffOrWav = /\.(aiff?|wav)$/.test(fileLower);
 
-    // AIFF/WAV: temp MP3 proxy for instant playback + scrubbing (prepare → mp3_url → release on end/close/switch)
-    if (isAiffOrWav) {
-        (async function () {
-            btn.textContent = '…';
-            btn.disabled = true;
-            const body = (dirB64 && file != null) ? { dir_b64: dirB64, file: file } : (pathB64 ? { path_b64: pathB64 } : null);
-            if (!body) { btn.disabled = false; btn.innerHTML = PLAY_ICON_ROW; return; }
-            try {
-                const res = await fetch('/api/shazam-sync/prepare-proxy', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                });
-                const data = await res.json().catch(function () { return {}; });
-                if (!res.ok) {
-                    showPlayError(data.error || res.status === 403 ? 'Add your music folder to Sync \u2192 Settings \u2192 Destination folders.' : res.status === 404 ? 'File not found.' : 'Prepare failed.');
-                    btn.disabled = false;
-                    btn.innerHTML = PLAY_ICON_ROW;
-                    return;
-                }
-                const mp3Url = data.mp3_url;
-                const proxyId = data.proxy_id;
-                if (!mp3Url || !proxyId) {
-                    showPlayError('Invalid prepare response.');
-                    btn.disabled = false;
-                    btn.innerHTML = PLAY_ICON_ROW;
-                    return;
-                }
-                shazamCurrentProxyId = proxyId;
-                shazamAudioEl.onerror = function () {
-                    resetBtn();
-                    fetch(streamUrl).then(function (r) {
-                        if (r.status === 403) showPlayError('Playback blocked. Add your music folder to Sync \u2192 Settings \u2192 Destination folders, then run Compare.');
-                        else if (r.status === 404) showPlayError('File not found. It may have been moved or deleted.');
-                        else showPlayError('Playback failed.');
-                    }).catch(function () { showPlayError('Playback failed.'); });
-                };
-                shazamAudioEl.onended = function () { resetBtn(); };
-                shazamAudioEl.src = mp3Url;
-                shazamAudioEl.load();
-                await shazamAudioEl.play();
-                btn.innerHTML = PAUSE_ICON_ROW;
-                btn.classList.add('playing');
-                btn.disabled = false;
-                shazamCurrentlyPlaying = playKey;
-                shazamPlayingBtn = btn;
-                shazamPlayerBarShow(btn.dataset.trackLabel || '—');
-            } catch (e) {
-                showPlayError('Playback failed: ' + (e.message || String(e)));
-                btn.disabled = false;
-                btn.innerHTML = PLAY_ICON_ROW;
-            }
-        })();
-        return;
-    }
+        if (shazamAudioEl) { shazamAudioEl.onended = null; shazamAudioEl.onerror = null; shazamAudioEl.pause(); shazamAudioEl.src = ''; }
+        shazamAudioEl = new Audio();
 
-    btn.textContent = '…';
-    shazamAudioEl.onerror = () => {
-        resetBtn();
-        fetch(streamUrl).then(function (res) {
-            if (res.status === 403) {
-                showPlayError('Playback blocked. Add your music folder to Sync \u2192 Settings \u2192 Destination folders, then run Compare.');
-            } else if (res.status === 404) {
-                showPlayError('File not found. It may have been moved or deleted.');
-            } else if (res.status >= 400 && isAiffOrWav) {
-                showPlayError('Playback failed. For AIFF/WAV files, install ffmpeg (e.g. brew install ffmpeg) and restart the app.');
-            } else if (res.status === 200) {
-                showPlayError('Playback failed. The file could not be played. If it\'s AIFF or WAV, ensure ffmpeg is installed (e.g. brew install ffmpeg) and restart the app.');
-            }
-        }).catch(function () {
-            showPlayError('Playback failed. Could not load the file.');
+        const playingBtn = document.querySelector('.shazam-play-btn.playing');
+        if (playingBtn) {
+            playingBtn.innerHTML = PLAY_ICON_ROW;
+            playingBtn.classList.remove('playing');
+        }
+        if (shazamCurrentlyPlaying === playKey) {
+            shazamCancelNextBuffer();
+            shazamCurrentlyPlaying = null;
+            shazamPlayerBarHide();
+            return;
+        }
+        shazamCancelNextBuffer();
+        releaseShazamProxy();
+
+        let playErrorAlertShown = false;
+        const showPlayError = (msg) => { if (!playErrorAlertShown) { playErrorAlertShown = true; alert(msg); } };
+        const resetBtn = () => {
+            var rowBtn = shazamPlayingBtn || btn;
+            if (rowBtn) { rowBtn.innerHTML = PLAY_ICON_ROW; rowBtn.classList.remove('playing'); }
+            shazamCurrentlyPlaying = null;
+            shazamPlayingBtn = null;
+            shazamPlayerBarHide();
+        };
+        const fileLower = (btn.dataset.file || '').toLowerCase();
+        const isAiffOrWav = /\.(aiff?|wav)$/.test(fileLower);
+
+        if (isAiffOrWav) {
+            (async function () {
+                var activeBtn = btn;
+                activeBtn.textContent = '…';
+                activeBtn.disabled = true;
+                const body = (dirB64 && file != null) ? { dir_b64: dirB64, file: file } : (pathB64 ? { path_b64: pathB64 } : null);
+                if (!body) { activeBtn.disabled = false; activeBtn.innerHTML = PLAY_ICON_ROW; return; }
+                try {
+                    const _playCtrl = new AbortController();
+                    const _playTimer = setTimeout(function () { _playCtrl.abort(); }, 90000);
+                    const res = await fetch('/api/shazam-sync/prepare-proxy', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                        signal: _playCtrl.signal
+                    });
+                    clearTimeout(_playTimer);
+                    const data = await res.json().catch(function () { return {}; });
+                    if (!res.ok) {
+                        showPlayError(data.error || res.status === 403 ? 'Add your music folder to Sync \u2192 Settings \u2192 Destination folders.' : res.status === 404 ? 'File not found.' : 'Prepare failed.');
+                        activeBtn.disabled = false;
+                        activeBtn.innerHTML = PLAY_ICON_ROW;
+                        return;
+                    }
+                    const mp3Url = data.mp3_url;
+                    const proxyId = data.proxy_id;
+                    if (!mp3Url || !proxyId) {
+                        showPlayError('Invalid prepare response.');
+                        activeBtn.disabled = false;
+                        activeBtn.innerHTML = PLAY_ICON_ROW;
+                        return;
+                    }
+                    if (!activeBtn.isConnected) {
+                        var _tk = activeBtn.dataset.trackKey || '';
+                        var _fb = _tk ? shazamFindPlayBtnByTrackKey(_tk) : null;
+                        if (_fb && _fb.isConnected) activeBtn = _fb;
+                    }
+                    shazamCurrentProxyId = proxyId;
+                    shazamAudioEl.onerror = function () {
+                        resetBtn();
+                        fetch(streamUrl).then(function (r) {
+                            if (r.status === 403) showPlayError('Playback blocked. Add your music folder to Sync \u2192 Settings \u2192 Destination folders, then run Compare.');
+                            else if (r.status === 404) showPlayError('File not found. It may have been moved or deleted.');
+                            else showPlayError('Playback failed.');
+                        }).catch(function () { showPlayError('Playback failed.'); });
+                    };
+                    shazamAudioEl.onended = function () {
+                        var prevRow = shazamPlayingBtn && shazamPlayingBtn.isConnected ? shazamPlayingBtn.closest('tr') : null;
+                        var prevKey = shazamPlayingBtn ? shazamPlayingBtn.dataset.trackKey : null;
+                        resetBtn();
+                        shazamPlayFromBuffer(prevRow, prevKey);
+                    };
+                    shazamAudioEl.src = mp3Url;
+                    shazamAudioEl.load();
+                    await shazamAudioEl.play();
+                    activeBtn.innerHTML = PAUSE_ICON_ROW;
+                    activeBtn.classList.add('playing');
+                    activeBtn.disabled = false;
+                    shazamCurrentlyPlaying = playKey;
+                    shazamPlayingBtn = activeBtn;
+                    shazamPlayerBarShow(activeBtn.dataset.trackLabel || '—');
+                    shazamPrefetchNext(activeBtn);
+                } catch (e) {
+                    showPlayError('Playback failed: ' + (e.message || String(e)));
+                    activeBtn.disabled = false;
+                    activeBtn.innerHTML = PLAY_ICON_ROW;
+                }
+            })();
+            return;
+        }
+
+        btn.textContent = '…';
+        shazamAudioEl.onerror = () => {
+            resetBtn();
+            fetch(streamUrl).then(function (res) {
+                if (res.status === 403) {
+                    showPlayError('Playback blocked. Add your music folder to Sync \u2192 Settings \u2192 Destination folders, then run Compare.');
+                } else if (res.status === 404) {
+                    showPlayError('File not found. It may have been moved or deleted.');
+                } else if (res.status >= 400 && isAiffOrWav) {
+                    showPlayError('Playback failed. For AIFF/WAV files, install ffmpeg (e.g. brew install ffmpeg) and restart the app.');
+                } else if (res.status === 200) {
+                    showPlayError('Playback failed. The file could not be played. If it\'s AIFF or WAV, ensure ffmpeg is installed (e.g. brew install ffmpeg) and restart the app.');
+                }
+            }).catch(function () {
+                showPlayError('Playback failed. Could not load the file.');
+            });
+        };
+        shazamAudioEl.onended = () => {
+            var prevRow = shazamPlayingBtn && shazamPlayingBtn.isConnected ? shazamPlayingBtn.closest('tr') : null;
+            var prevKey = shazamPlayingBtn ? shazamPlayingBtn.dataset.trackKey : null;
+            resetBtn();
+            shazamPlayFromBuffer(prevRow, prevKey);
+        };
+        shazamAudioEl.src = streamUrl;
+        shazamAudioEl.play().then(() => {
+            btn.innerHTML = PAUSE_ICON_ROW;
+            btn.classList.add('playing');
+            shazamCurrentlyPlaying = playKey;
+            shazamPlayingBtn = btn;
+            shazamPlayerBarShow(btn.dataset.trackLabel || '—');
+            shazamPrefetchNext(btn);
+        }).catch(() => {
+            resetBtn();
+            setTimeout(function () {
+                showPlayError('Playback could not start. If the file is AIFF or WAV, install ffmpeg (e.g. brew install ffmpeg) and restart the app.');
+            }, 100);
         });
-    };
-    shazamAudioEl.onended = () => { resetBtn(); };
-    shazamAudioEl.src = streamUrl;
-    shazamAudioEl.play().then(() => {
-        btn.innerHTML = PAUSE_ICON_ROW;
-        btn.classList.add('playing');
-        shazamCurrentlyPlaying = playKey;
-        shazamPlayingBtn = btn;
-        shazamPlayerBarShow(btn.dataset.trackLabel || '—');
-    }).catch(() => {
-        resetBtn();
-        setTimeout(function () {
-            showPlayError('Playback could not start. If the file is AIFF or WAV, install ffmpeg (e.g. brew install ffmpeg) and restart the app.');
-        }, 100);
-    });
     } catch (e) {
         console.error('Play error:', e);
         alert('Play failed: ' + (e.message || String(e)));
@@ -2721,26 +3075,28 @@ async function shazamToggleSoundeoPlay(btn) {
     const trackUrl = btn.dataset.soundeoUrl;
     if (!trackUrl) return;
 
-    if (!shazamAudioEl) {
-        shazamAudioEl = document.createElement('audio');
-    }
+    if (shazamAudioEl) { shazamAudioEl.onended = null; shazamAudioEl.onerror = null; shazamAudioEl.pause(); shazamAudioEl.src = ''; }
+    shazamAudioEl = new Audio();
+
     const playingBtn = document.querySelector('.shazam-play-btn.playing');
     if (playingBtn && playingBtn !== btn) {
         playingBtn.innerHTML = PLAY_ICON_ROW;
         playingBtn.classList.remove('playing');
     }
     if (shazamCurrentlyPlaying === trackUrl) {
-        shazamAudioEl.pause();
+        shazamCancelNextBuffer();
         btn.innerHTML = PLAY_ICON_ROW;
         btn.classList.remove('playing');
         shazamCurrentlyPlaying = null;
         shazamPlayerBarHide();
         return;
     }
+    shazamCancelNextBuffer();
 
     btn.textContent = '…';
     btn.disabled = true;
-    const resetBtn = () => { btn.innerHTML = PLAY_ICON_ROW; btn.classList.remove('playing'); btn.disabled = false; };
+    var activeBtn = btn;
+    const resetBtn = () => { activeBtn.innerHTML = PLAY_ICON_ROW; activeBtn.classList.remove('playing'); activeBtn.disabled = false; };
     try {
         const streamUrl = '/api/soundeo/stream-preview?track_url=' + encodeURIComponent(trackUrl);
         shazamAudioEl.onerror = () => {
@@ -2749,18 +3105,27 @@ async function shazamToggleSoundeoPlay(btn) {
             shazamCurrentlyPlaying = null;
         };
         shazamAudioEl.onended = () => {
+            var prevRow = shazamPlayingBtn && shazamPlayingBtn.isConnected ? shazamPlayingBtn.closest('tr') : null;
+            var prevKey = shazamPlayingBtn ? shazamPlayingBtn.dataset.trackKey : null;
             resetBtn();
             shazamCurrentlyPlaying = null;
+            shazamPlayFromBuffer(prevRow, prevKey);
         };
         shazamAudioEl.src = streamUrl;
         shazamAudioEl.load();
         await shazamAudioEl.play();
-        btn.innerHTML = PAUSE_ICON_ROW;
-        btn.classList.add('playing');
-        btn.disabled = false;
+        if (activeBtn && !activeBtn.isConnected) {
+            var _stk = activeBtn.dataset.trackKey || '';
+            var _sfb = _stk ? shazamFindPlayBtnByTrackKey(_stk) : null;
+            if (_sfb && _sfb.isConnected) activeBtn = _sfb;
+        }
+        activeBtn.innerHTML = PAUSE_ICON_ROW;
+        activeBtn.classList.add('playing');
+        activeBtn.disabled = false;
         shazamCurrentlyPlaying = trackUrl;
-        shazamPlayingBtn = btn;
-        shazamPlayerBarShow(btn.dataset.trackLabel || '—');
+        shazamPlayingBtn = activeBtn;
+        shazamPlayerBarShow(activeBtn.dataset.trackLabel || '—');
+        shazamPrefetchNext(activeBtn);
     } catch (e) {
         console.warn('Soundeo preview playback failed:', e);
         resetBtn();
