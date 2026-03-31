@@ -266,6 +266,7 @@
     <!-- Shazam / Sync playback bar (fixed bottom, shown when playing) -->
     <div id="shazamPlayerBar" class="shazam-player-bar" style="display: none;" role="region" aria-label="Now playing">
         <button type="button" id="shazamBarPlayPause" class="shazam-bar-play-pause" title="Play / Pause" aria-label="Play / Pause" onclick="shazamPlayerBarPlayPause()"><svg viewBox="0 0 24 24" fill="currentColor"><use href="#icon-play"/></svg></button>
+        <div id="shazamBarCover" class="shazam-bar-cover shazam-bar-cover-placeholder" aria-hidden="true"></div>
         <div class="shazam-bar-track-info">
             <span id="shazamBarTrackLabel" class="shazam-bar-track-label">—</span>
         </div>
@@ -276,13 +277,18 @@
             </div>
             <span id="shazamBarDuration" class="shazam-bar-time">0:00</span>
         </div>
+        <div id="shazamBarActions" class="shazam-bar-actions" style="display: none;" aria-label="Track actions">
+            <button type="button" id="shazamBarStarBtn" class="shazam-bar-action-btn" onclick="shazamBarToggleStar()" title="Star" aria-label="Star on Soundeo"></button>
+            <button type="button" id="shazamBarDownloadBtn" class="shazam-bar-action-btn" onclick="shazamBarDownload()" title="Download" aria-label="Download AIFF"></button>
+            <button type="button" id="shazamBarSkipBtn" class="shazam-bar-action-btn" onclick="shazamBarSkip()" title="Skip" aria-label="Skip track"></button>
+        </div>
         <button type="button" id="shazamBarClose" class="shazam-bar-close" title="Stop and close" aria-label="Stop and close" onclick="shazamPlayerBarClose()">×</button>
     </div>
 
     <!-- Context menu for play button (Open file location / Open on Soundeo) -->
     <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=31"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=32"></script>
 <script>
 (function() {
     if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {

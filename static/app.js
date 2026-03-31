@@ -1830,6 +1830,9 @@ function shazamApplyStatus(data) {
     if (data.soundeo_titles && typeof data.soundeo_titles === 'object') {
         Object.assign(shazamSoundeoTitles, data.soundeo_titles);
     }
+    if (data.cover_hashes && typeof data.cover_hashes === 'object') {
+        Object.assign(shazamCoverHashes, data.cover_hashes);
+    }
     // not_found: only replace when applying fresh server data (so reset/refresh shows grey). Never replace inside shazamRenderTrackList or we wipe per-row search updates.
     if (data.hasOwnProperty('not_found') && typeof data.not_found === 'object') {
         shazamNotFound = {};
@@ -2021,6 +2024,13 @@ let shazamBarTimeUpdate = null;
 let shazamBarEnded = null;
 /** Proxy ID for temp MP3 (AIFF/WAV); released on end/close/switch. */
 let shazamCurrentProxyId = null;
+/** Cover art hashes for Sync list / play bar (from server status.cover_hashes). */
+let shazamCoverHashes = {};
+/** Metadata of the currently playing track (player bar star / download / skip). */
+let shazamBarKey = null;
+let shazamBarSoundeoUrl = null;
+let shazamBarArtist = null;
+let shazamBarTitle = null;
 
 function releaseShazamProxy() {
     if (!shazamCurrentProxyId) return;
@@ -2054,14 +2064,31 @@ function shazamPlayerBarShow(label) {
         if (shazamBarEnded) shazamAudioEl.removeEventListener('ended', shazamBarEnded);
         shazamBarTimeUpdate = function () { shazamPlayerBarUpdateProgress(); };
         shazamBarEnded = function () {
-            shazamPlayerBarHide();
-            const playingBtn = document.querySelector('.shazam-play-btn.playing');
-            if (playingBtn) { playingBtn.innerHTML = PLAY_ICON_ROW; playingBtn.classList.remove('playing'); }
+            if (bar.style.display !== 'none') shazamPlayerBarHide();
             shazamCurrentlyPlaying = null;
         };
         shazamAudioEl.addEventListener('timeupdate', shazamBarTimeUpdate);
         shazamAudioEl.addEventListener('ended', shazamBarEnded);
     }
+    const playBtn = shazamPlayingBtn;
+    if (playBtn) {
+        shazamBarKey = playBtn.dataset.trackKey || '';
+        shazamBarSoundeoUrl = playBtn.dataset.soundeoUrl || '';
+        shazamBarArtist = playBtn.dataset.artist || '';
+        shazamBarTitle = playBtn.dataset.title || '';
+    }
+    const barCover = document.getElementById('shazamBarCover');
+    if (barCover) {
+        const hash = shazamBarKey ? (shazamCoverHashes[shazamBarKey] || shazamCoverHashes[(shazamBarKey || '').toLowerCase()] || null) : null;
+        if (hash) {
+            barCover.style.backgroundImage = `url('/api/shazam-sync/cover/${hash}')`;
+            barCover.classList.remove('shazam-bar-cover-placeholder');
+        } else {
+            barCover.style.backgroundImage = '';
+            barCover.classList.add('shazam-bar-cover-placeholder');
+        }
+    }
+    shazamBarUpdateActions();
     shazamPlayerBarUpdateProgress();
 }
 
@@ -2075,6 +2102,16 @@ function shazamPlayerBarHide() {
     shazamBarTimeUpdate = null;
     shazamBarEnded = null;
     if (shazamPlayingBtn) { shazamPlayingBtn.innerHTML = PLAY_ICON_ROW; shazamPlayingBtn.classList.remove('playing'); shazamPlayingBtn = null; }
+    shazamBarKey = null;
+    shazamBarSoundeoUrl = null;
+    shazamBarArtist = null;
+    shazamBarTitle = null;
+    const barCover = document.getElementById('shazamBarCover');
+    if (barCover) {
+        barCover.style.backgroundImage = '';
+        barCover.classList.add('shazam-bar-cover-placeholder');
+    }
+    shazamBarUpdateActions();
 }
 
 function shazamPlayerBarUpdateProgress() {
@@ -2119,6 +2156,72 @@ function shazamPlayerBarClose() {
     if (shazamAudioEl) shazamAudioEl.pause();
     shazamCurrentlyPlaying = null;
     shazamPlayerBarHide();
+}
+
+/** Update the player bar action buttons (star / download / skip) to match current track state. */
+function shazamBarUpdateActions() {
+    var actionsEl = document.getElementById('shazamBarActions');
+    if (!actionsEl) return;
+    actionsEl.style.display = shazamBarKey ? '' : 'none';
+    var starBtn = document.getElementById('shazamBarStarBtn');
+    var dlBtn = document.getElementById('shazamBarDownloadBtn');
+    var skipBtn = document.getElementById('shazamBarSkipBtn');
+    if (!starBtn || !dlBtn || !skipBtn) return;
+
+    var key = shazamBarKey || '';
+    var url = shazamBarSoundeoUrl || '';
+    var keyVariants = key ? shazamKeyVariants(key) : [];
+    var starred = keyVariants.some(function (k) { return shazamStarred[k]; });
+    var dismissed = keyVariants.some(function (k) { return shazamDismissed[k]; });
+
+    var starFilledSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
+    var starOutlineSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
+    if (starred && !dismissed) {
+        starBtn.innerHTML = starFilledSvg;
+        starBtn.title = 'Remove from Soundeo favorites (unstar)';
+        starBtn.classList.add('shazam-bar-action-active');
+    } else {
+        starBtn.innerHTML = starOutlineSvg;
+        starBtn.title = url ? 'Add to Soundeo favorites' : 'Find link first (Search)';
+        starBtn.classList.remove('shazam-bar-action-active');
+    }
+    starBtn.disabled = !url || dismissed;
+
+    var isLocalFile = shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64);
+    var downloadFilledSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5l-4-4 1.41-1.41L10 13.67l6.59-6.59L18 8.5l-8 8z"/></svg>';
+    var downloadOutlineSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    dlBtn.innerHTML = isLocalFile ? downloadFilledSvg : downloadOutlineSvg;
+    dlBtn.disabled = isLocalFile || !url;
+    dlBtn.title = isLocalFile ? 'Downloaded — have locally' : (url ? 'Download AIFF' : 'No Soundeo link');
+    if (isLocalFile) dlBtn.classList.add('shazam-bar-action-active', 'shazam-bar-dl-have');
+    else dlBtn.classList.remove('shazam-bar-action-active', 'shazam-bar-dl-have');
+
+    var skipSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="6" y2="18"/><line x1="10" y1="6" x2="10" y2="18"/><polygon points="14 8 14 16 20 12"/></svg>';
+    skipBtn.innerHTML = skipSvg;
+    skipBtn.title = 'Skip track';
+    skipBtn.disabled = !shazamBarArtist && !shazamBarTitle;
+}
+
+function shazamBarToggleStar() {
+    if (!shazamBarKey) return;
+    var keyVariants = shazamKeyVariants(shazamBarKey);
+    var starred = keyVariants.some(function (k) { return shazamStarred[k]; });
+    var dismissed = keyVariants.some(function (k) { return shazamDismissed[k]; });
+    if (starred && !dismissed) {
+        shazamUnstarTrack(shazamBarKey, shazamBarSoundeoUrl, shazamBarArtist, shazamBarTitle);
+    } else {
+        shazamStarTrack(shazamBarKey, shazamBarSoundeoUrl, shazamBarArtist, shazamBarTitle);
+    }
+}
+
+function shazamBarDownload() {
+    if (!shazamBarKey || !shazamBarSoundeoUrl) return;
+    shazamDownloadTrack(shazamBarKey);
+}
+
+function shazamBarSkip() {
+    if (!shazamBarArtist && !shazamBarTitle) return;
+    shazamSkipSingleTrack(shazamBarArtist, shazamBarTitle);
 }
 
 function shazamApplyFilters(merged) {
@@ -2175,6 +2278,9 @@ function shazamRenderTrackList(data) {
     if (data.soundeo_titles && typeof data.soundeo_titles === 'object') {
         Object.assign(shazamSoundeoTitles, data.soundeo_titles);
     }
+    if (data.cover_hashes && typeof data.cover_hashes === 'object') {
+        Object.assign(shazamCoverHashes, data.cover_hashes);
+    }
     const have = (data.have_locally || []).map(t => ({ ...t, status: 'have' }));
     const toDl = (data.to_download || []).map((t, i) => ({ ...t, status: 'todl', _idx: i }));
     const skipped = (data.skipped_tracks || []).map(t => ({ ...t, status: 'skipped' }));
@@ -2205,6 +2311,7 @@ function shazamRenderTrackList(data) {
         }
         el.innerHTML = html || '<p class="shazam-info-msg">Run Compare to see tracks.</p>';
         if (selectionBar) selectionBar.style.display = 'none';
+        shazamBarUpdateActions();
         shazamRestoreSyncProgress(progressCaptured);
         return;
     }
@@ -2333,7 +2440,9 @@ function shazamRenderTrackList(data) {
             matchCell = '<td class="shazam-match-col">' + (pct != null ? '<span class="shazam-match-pct">' + pct + '%</span>' : '\u2014') + '</td>';
         }
 
+        const safeAttr = s => escapeHtml(s).replace(/'/g, '&#39;');
         const trackLabel = (soundeoTitle || key).replace(/"/g, '&quot;');
+        const playMetaAttrs = ` data-track-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}"`;
         let playCell = '';
         if (row.filepath) {
             const pathNorm = String(row.filepath).replace(/\\/g, '/');
@@ -2344,15 +2453,14 @@ function shazamRenderTrackList(data) {
             const pathB64 = pathNorm ? btoa(unescape(encodeURIComponent(pathNorm))) : '';
             const localFile = file || pathNorm;
             const soundeoUrlAttr = url ? ` data-soundeo-url="${escapeHtml(url)}"` : '';
-            playCell = `<td class="shazam-play-col"><button type="button" class="shazam-play-btn" data-dir-b64="${escapeHtml(dirB64)}" data-file="${escapeHtml(file)}" data-path-b64="${escapeHtml(pathB64)}" data-track-label="${escapeHtml(trackLabel)}"${soundeoUrlAttr} onclick="shazamTogglePlay(this)" oncontextmenu="event.preventDefault(); shazamPlayContextMenu(event, this);" title="Play local file: ${escapeHtml(localFile)}">${PLAY_ICON_ROW}</button></td>`;
+            playCell = `<td class="shazam-play-col"><button type="button" class="shazam-play-btn"${playMetaAttrs} data-dir-b64="${escapeHtml(dirB64)}" data-file="${escapeHtml(file)}" data-path-b64="${escapeHtml(pathB64)}" data-track-label="${escapeHtml(trackLabel)}"${soundeoUrlAttr} onclick="shazamTogglePlay(this)" oncontextmenu="event.preventDefault(); shazamPlayContextMenu(event, this);" title="Play local file: ${escapeHtml(localFile)}">${PLAY_ICON_ROW}</button></td>`;
         } else if (url) {
             const previewTip = soundeoTitle ? `Stream Soundeo preview: ${escapeHtml(soundeoTitle)}` : 'Stream Soundeo preview';
-            playCell = `<td class="shazam-play-col"><button type="button" class="shazam-play-btn shazam-soundeo-play" data-soundeo-url="${escapeHtml(url)}" data-track-label="${escapeHtml(trackLabel)}" onclick="shazamToggleSoundeoPlay(this)" oncontextmenu="event.preventDefault(); shazamPlayContextMenu(event, this);" title="${previewTip}">${PLAY_ICON_ROW}</button></td>`;
+            playCell = `<td class="shazam-play-col"><button type="button" class="shazam-play-btn shazam-soundeo-play"${playMetaAttrs} data-soundeo-url="${escapeHtml(url)}" data-track-label="${escapeHtml(trackLabel)}" onclick="shazamToggleSoundeoPlay(this)" oncontextmenu="event.preventDefault(); shazamPlayContextMenu(event, this);" title="${previewTip}">${PLAY_ICON_ROW}</button></td>`;
         } else {
             playCell = '<td class="shazam-play-col"></td>';
         }
 
-        const safeAttr = s => escapeHtml(s).replace(/'/g, '&#39;');
         const inactive = ' shazam-row-action-inactive';
         const searchInactive = isDismissed || isSkipped ? inactive : '';
         const skipInactive = isDismissed || !isTodl ? inactive : '';
@@ -2440,6 +2548,27 @@ function shazamRenderTrackList(data) {
     el.innerHTML = html;
     if (selectionBar) selectionBar.style.display = 'none';
     shazamUpdateSelectionCount();
+    if (shazamCurrentlyPlaying && shazamAudioEl) {
+        const allPlayBtns = el.querySelectorAll('.shazam-play-btn');
+        for (const b of allPlayBtns) {
+            const dB64 = (b.dataset.dirB64 || '').trim();
+            const f = b.dataset.file;
+            const pB64 = (b.dataset.pathB64 || '').trim();
+            let bKey;
+            if (dB64 || pB64) {
+                bKey = (dB64 && f != null)
+                    ? '/api/shazam-sync/stream-file?dir=' + encodeURIComponent(dB64) + '&file=' + encodeURIComponent(f)
+                    : (pB64 ? '/api/shazam-sync/stream-file?path=' + encodeURIComponent(pB64) : null);
+            } else {
+                bKey = b.dataset.soundeoUrl || null;
+            }
+            if (bKey && bKey === shazamCurrentlyPlaying) {
+                shazamPlayingBtn = b;
+                break;
+            }
+        }
+    }
+    shazamBarUpdateActions();
     shazamRestoreSyncProgress(progressCaptured);
 }
 
@@ -2656,6 +2785,7 @@ function shazamSetStarredLive(key, value) {
     if (shazamLastData && shazamLastData.starred) {
         keys.forEach(function (k) { shazamLastData.starred[k] = value; });
     }
+    shazamBarUpdateActions();
 }
 
 /** Set dismissed state for a key and all display variants so row live-updates. */
@@ -2666,6 +2796,7 @@ function shazamSetDismissedLive(key, value) {
     } else {
         keys.forEach(function (k) { delete shazamDismissed[k]; });
     }
+    shazamBarUpdateActions();
 }
 
 /** Set track URL for a key and all display variants so dot state (found/starred) and row stay in sync. */
@@ -2680,6 +2811,7 @@ function shazamSetUrlLive(key, url) {
             if (url) shazamLastData.urls[k] = url; else delete shazamLastData.urls[k];
         });
     }
+    shazamBarUpdateActions();
 }
 
 /** Set not_found state for a key and all display variants so dot state (orange vs grey) stays in sync. */
