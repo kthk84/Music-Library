@@ -1249,6 +1249,22 @@ let shazamSoundeoTitles = {};
 let shazamNotFound = {};
 /** Track keys currently being processed by a per-row action (dismiss/sync/skip). */
 let shazamActionPending = {};
+/** In-flight download request per track key (separate from star/search so download can queue while starring). */
+let shazamPendingDownload = {};
+
+function shazamRowActionPending(key) {
+    return !!(shazamActionPending[key] || shazamPendingDownload[key]);
+}
+
+function shazamAnyRowActionPending() {
+    return Object.keys(shazamActionPending || {}).length > 0 || Object.keys(shazamPendingDownload || {}).length > 0;
+}
+
+/** Omit "N failed" when N is 0 so the bar does not read "0 failed". */
+function shazamFailedSuffix(failed) {
+    var f = Number(failed) || 0;
+    return f > 0 ? ', ' + f + ' failed' : '';
+}
 /** Pending batch jobs when one is already running. Each item: { id, type: 'search'|'star_batch'|'sync_favorites', label: string, payload: object }. */
 let shazamJobQueue = [];
 let shazamJobId = 0;
@@ -1919,9 +1935,9 @@ function shazamRestoreProgressIfRunning() {
                     .then(r => r.json())
                     .then(p => {
                         shazamCurrentProgress = p;
-                        var skipRestoreQueueBars = Object.keys(shazamActionPending || {}).length > 0 || p.mode === 'star_single' || p.mode === 'unstar_single';
+                        var skipRestoreQueueBars = shazamAnyRowActionPending() || p.mode === 'star_single' || p.mode === 'unstar_single';
                         if (skipRestoreQueueBars) {
-                            if (restorePollCount === 0 || restorePollCount % 10 === 0) shazamBarLog('RESTORE_POLL', 'skip APPLY_QUEUE', { mode: p.mode, pending: Object.keys(shazamActionPending || {}).length });
+                            if (restorePollCount === 0 || restorePollCount % 10 === 0) shazamBarLog('RESTORE_POLL', 'skip APPLY_QUEUE', { mode: p.mode, pending: (Object.keys(shazamActionPending || {}).length + Object.keys(shazamPendingDownload || {}).length) });
                         }
                         if (!skipRestoreQueueBars) {
                             shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
@@ -1961,13 +1977,13 @@ function shazamRestoreProgressIfRunning() {
                                 fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
                                     if (data && !data.compare_running) {
                                         shazamApplyStatus(data);
-                                        var hasPendingRestore = Object.keys(shazamActionPending || {}).length > 0;
+                                        var hasPendingRestore = shazamAnyRowActionPending();
                                         var skipRestore = hasPendingRestore || (p.mode === 'star_single' || p.mode === 'unstar_single');
                                         if (shazamLastData && !skipRestore) shazamRenderTrackList(shazamLastData);
                                     }
                                 }).catch(() => {});
                             }
-                            var hasPendingRestoreRerender = Object.keys(shazamActionPending || {}).length > 0;
+                            var hasPendingRestoreRerender = shazamAnyRowActionPending();
                             var skipRestoreRerender = hasPendingRestoreRerender || (p.mode === 'star_single' || p.mode === 'unstar_single');
                             if (shazamLastData && !skipRestoreRerender) {
                                 shazamRenderTrackList(shazamLastData);
@@ -2683,7 +2699,7 @@ function shazamRenderTrackList(data) {
         const manualCheckDismissed = !!shazamDismissedManualCheck[key];
         const isNonExtendedVersion = soundeoTitle && /\((original\s+mix|radio\s+edit|radio\s+version|short\s+version)\)/i.test(soundeoTitle.trim()) && !/extended/i.test(soundeoTitle.trim());
         const showManualCheck = isTodl && !isDismissed && isSynced && !manualCheckDismissed && isNonExtendedVersion;
-        const isPending = !!shazamActionPending[key];
+        const isPending = shazamRowActionPending(key);
         // Queue position for row: star queue has key; search queue has artist+title
         const starQueueIdx = (shazamCurrentStarQueue || []).findIndex(function (q) {
             var qk = (q.key || (q.artist + ' - ' + q.title)).trim();
@@ -4300,7 +4316,7 @@ async function shazamSyncFavoritesFromSoundeo() {
 function shazamPollProgress() {
     fetch('/api/shazam-sync/progress').then(r => r.json()).then(p => {
         shazamCurrentProgress = p;
-        var hasPendingSingle = Object.keys(shazamActionPending || {}).length > 0;
+        var hasPendingSingle = shazamAnyRowActionPending();
         var inSingleStarUnstar = p.mode === 'star_single' || p.mode === 'unstar_single';
         var skipQueueBarUpdates = hasPendingSingle || inSingleStarUnstar;
         if (skipQueueBarUpdates && (shazamProgressPollCount || 0) % 10 === 0) {
@@ -4322,8 +4338,8 @@ function shazamPollProgress() {
         const el = document.getElementById('shazamProgress');
         const stopBtn = document.getElementById('shazamSyncStopBtn');
         const doneMsg = p.stopped
-            ? `Stopped. Favorited: ${p.done || 0}, Failed: ${p.failed || 0}`
-            : (p.error ? `Error: ${p.error}` : `Done. Favorited: ${p.done || 0}, Failed: ${p.failed || 0}`);
+            ? `Stopped. Favorited: ${p.done || 0}${shazamFailedSuffix(p.failed)}`
+            : (p.error ? `Error: ${p.error}` : `Done. Favorited: ${p.done || 0}${shazamFailedSuffix(p.failed)}`);
         if (el) {
             if (p.running) {
                 const label = (p.mode === 'star_batch' || p.mode === 'star_single') ? 'Starring' : (p.mode === 'unstar_single' ? 'Unstarring' : (p.mode === 'search_global' ? 'Search' : (p.mode === 'sync_favorites' ? 'Sync favorites' : (p.mode === 'sync_single' ? 'Find & star' : 'Syncing'))));
@@ -4335,7 +4351,7 @@ function shazamPollProgress() {
                 el.textContent = text;
             } else {
                 const endMsg = (p.mode === 'star_batch' || p.mode === 'star_single')
-                    ? (p.stopped ? `Stopped. Starred: ${p.done || 0}, Failed: ${p.failed || 0}` : (p.error ? `Error: ${p.error}` : `Done. Starred: ${p.done || 0}, Failed: ${p.failed || 0}`))
+                    ? (p.stopped ? `Stopped. Starred: ${p.done || 0}${shazamFailedSuffix(p.failed)}` : (p.error ? `Error: ${p.error}` : `Done. Starred: ${p.done || 0}${shazamFailedSuffix(p.failed)}`))
                     : (p.mode === 'unstar_single' ? (p.error ? 'Error: ' + p.error : (p.message || `Done. Unstarred: ${p.done || 0}`)) : (p.mode === 'sync_favorites' ? (p.error ? 'Error: ' + p.error : (p.message || 'Done.')) : doneMsg));
                 el.textContent = endMsg;
             }
@@ -4367,14 +4383,14 @@ function shazamPollProgress() {
                 fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
                     if (data && !data.compare_running) {
                         shazamApplyStatus(data);
-                        var hasPendingStatus = Object.keys(shazamActionPending || {}).length > 0;
+                        var hasPendingStatus = shazamAnyRowActionPending();
                         var skipRerender = hasPendingStatus || (shazamCurrentProgress.mode === 'star_single' || shazamCurrentProgress.mode === 'unstar_single');
                         if (shazamLastData && !skipRerender) shazamRenderTrackList(shazamLastData);
                     }
                 }).catch(() => {});
             }
             if (shazamLastData) {
-                var hasPending = Object.keys(shazamActionPending || {}).length > 0;
+                var hasPending = shazamAnyRowActionPending();
                 var skipFullRerender = hasPending || (p.mode === 'star_single' || p.mode === 'unstar_single');
                 if (!skipFullRerender) {
                     shazamRenderTrackList(shazamLastData);
@@ -4662,8 +4678,8 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 async function shazamDownloadTrack(key) {
-    if (shazamActionPending[key]) return;
-    shazamActionPending[key] = true;
+    if (shazamPendingDownload[key]) return;
+    shazamPendingDownload[key] = true;
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
     try {
         const res = await fetch('/api/shazam-sync/download-track', {
@@ -4674,7 +4690,7 @@ async function shazamDownloadTrack(key) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {
             alert(data.error || 'Download failed');
-            delete shazamActionPending[key];
+            delete shazamPendingDownload[key];
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
             return;
         }
@@ -4690,10 +4706,10 @@ async function shazamDownloadTrack(key) {
             shazamShowSyncProgress(msg);
             shazamStartDownloadPoll();
         }
-        delete shazamActionPending[key];
+        delete shazamPendingDownload[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
     } catch (e) {
-        delete shazamActionPending[key];
+        delete shazamPendingDownload[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
         alert('Error: ' + e.message);
     }
@@ -4749,14 +4765,17 @@ function shazamPollDownloadProgress() {
                 const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
                 if (viewLogBtn) viewLogBtn.style.display = 'none';
             } else {
-                el.textContent = dp.error || dp.message || `Done. ${dp.done || 0} downloaded, ${dp.failed || 0} failed.`;
+                var dlDone = dp.done || 0;
+                var dlFail = dp.failed || 0;
+                var dlSummary = 'Done. ' + dlDone + ' downloaded' + (dlFail > 0 ? ', ' + dlFail + ' failed.' : '.');
+                el.textContent = dp.error || dp.message || dlSummary;
                 const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
                 if (viewLogBtn) viewLogBtn.style.display = (dp.error ? 'inline-block' : 'none');
                 if (shazamDownloadPollInterval) {
                     clearInterval(shazamDownloadPollInterval);
                     shazamDownloadPollInterval = null;
                 }
-                if (dp.current_key) delete shazamActionPending[dp.current_key];
+                if (dp.current_key) delete shazamPendingDownload[dp.current_key];
                 shazamLoadStatus();
                 setTimeout(shazamHideSyncProgress, 2500);
             }

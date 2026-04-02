@@ -2588,7 +2588,9 @@ def _run_download_queue_worker():
         status['download_last_run'] = {'done': done, 'failed': failed, 'results': results[-20:], 'no_credits': no_credits}
         save_status_cache(status)
     app._shazam_download_progress['running'] = False
-    app._shazam_download_progress['message'] = f'Done. {done} downloaded, {failed} failed.'
+    app._shazam_download_progress['message'] = (
+        f'Done. {done} downloaded, {failed} failed.' if failed else f'Done. {done} downloaded.'
+    )
     if no_credits:
         app._shazam_download_progress['error'] = 'To be able to download you need to purchase premium account.'
     elif failed > 0 and results:
