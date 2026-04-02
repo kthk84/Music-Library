@@ -1282,10 +1282,19 @@ function shazamTrackKeyMatches(serverKey, rowKey) {
 function shazamTrackKeyInHaveLocally(trackKey) {
     if (!trackKey || !shazamLastData || !Array.isArray(shazamLastData.have_locally)) return false;
     var list = shazamLastData.have_locally;
+    var variants = shazamKeyVariants(trackKey);
+    var variantSet = {};
+    for (var v = 0; v < variants.length; v++) {
+        var q = variants[v];
+        if (!q) continue;
+        variantSet[q] = true;
+        variantSet[q.toLowerCase()] = true;
+    }
     for (var i = 0; i < list.length; i++) {
         var t = list[i];
         var rowKey = ((t.artist || '') + ' - ' + (t.title || '')).trim();
         if (!rowKey) continue;
+        if (variantSet[rowKey] || variantSet[rowKey.toLowerCase()]) return true;
         if (shazamTrackKeyMatches(trackKey, rowKey)) return true;
     }
     return false;
@@ -2605,7 +2614,7 @@ function shazamBarUpdateActions() {
     var isLocalFile = !!(shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64));
     var inHaveList = key ? shazamTrackKeyInHaveLocally(key) : false;
     var haveFileUi = isLocalFile || inHaveList;
-    var downloadOutlineSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+    var downloadOutlineSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
     var downloadWorkerBusy = !!(key && shazamDownloadProgressSnapshot.running && shazamTrackKeyMatches(shazamDownloadProgressSnapshot.current_key, key));
     var downloadBusy = !!(key && shazamPendingDownload[key]) || downloadWorkerBusy;
     dlBtn.classList.remove('shazam-bar-action-active', 'shazam-bar-dl-have', 'shazam-bar-dl-pending');
@@ -4840,9 +4849,12 @@ async function shazamDownloadTrack(key) {
                 msg = 'Downloading 1/' + shazamCurrentDownloadQueue.length + (data.message ? ': ' + data.message : '…');
             }
             shazamShowSyncProgress(msg);
-            shazamStartDownloadPoll();
+        } else if (data.status === 'queued') {
+            shazamShowSyncProgress(data.message || 'Download queued…');
         }
-        delete shazamPendingDownload[key];
+        /* Poll for both started and queued — otherwise pending UI clears before the worker reports current_key. */
+        shazamStartDownloadPoll();
+        shazamPollDownloadProgress();
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
         shazamBarUpdateActions();
     } catch (e) {
@@ -4893,12 +4905,19 @@ function shazamPollDownloadProgress() {
         }
         var prevDlSnap = { running: shazamDownloadProgressSnapshot.running, current_key: shazamDownloadProgressSnapshot.current_key };
         shazamMergeDownloadProgressFromPayload(data);
+        const dp = data.download_progress;
+        /* Any key that already has a row in results is done (success or fail) — clear client pending so the playbar/row never sit in a fake “busy” or blank gap. */
+        if (dp && Array.isArray(dp.results)) {
+            dp.results.forEach(function (r) {
+                if (r && r.key) delete shazamPendingDownload[r.key];
+            });
+        }
         var dlSnapChanged = prevDlSnap.running !== shazamDownloadProgressSnapshot.running || prevDlSnap.current_key !== shazamDownloadProgressSnapshot.current_key;
         if (dlSnapChanged && shazamLastData) {
             shazamRenderTrackList(shazamLastData);
-            shazamBarUpdateActions();
         }
-        const dp = data.download_progress;
+        /* Playbar download state reads shazamDownloadProgressSnapshot — refresh every poll so spinner/have state never goes blank between ticks. */
+        shazamBarUpdateActions();
         const el = document.getElementById('shazamProgress');
         if (el && dp) {
             var queueLen = (data.download_queue && data.download_queue.length) ? data.download_queue.length : (dp.total || 0);
@@ -4921,6 +4940,8 @@ function shazamPollDownloadProgress() {
                     shazamDownloadPollInterval = null;
                 }
                 if (dp.current_key) delete shazamPendingDownload[dp.current_key];
+                if (shazamLastData) shazamRenderTrackList(shazamLastData);
+                shazamBarUpdateActions();
                 shazamLoadStatus();
                 setTimeout(shazamHideSyncProgress, 2500);
             }
@@ -4960,7 +4981,12 @@ async function shazamDownloadAllToDownload() {
         }
         if (data.status === 'started') {
             shazamShowSyncProgress(data.message || `Downloading ${keys.length} tracks…`);
+        } else if (data.status === 'queued') {
+            shazamShowSyncProgress(data.message || 'Download queued…');
+        }
+        if (data.status === 'started' || data.status === 'queued') {
             shazamStartDownloadPoll();
+            shazamPollDownloadProgress();
         }
     } catch (e) {
         alert('Error: ' + e.message);

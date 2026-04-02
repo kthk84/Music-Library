@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SoundBridge</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=11">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=12">
 </head>
 <body>
     <!-- Icon definitions (hidden) -->
@@ -279,7 +279,7 @@
         </div>
         <div id="shazamBarActions" class="shazam-bar-actions" style="display: none;" aria-label="Track actions">
             <button type="button" id="shazamBarStarBtn" class="shazam-bar-action-btn" onclick="shazamBarToggleStar()" title="Star" aria-label="Star on Soundeo"></button>
-            <button type="button" id="shazamBarDownloadBtn" class="shazam-bar-action-btn" onclick="shazamBarDownload()" title="Download" aria-label="Download AIFF"></button>
+            <button type="button" id="shazamBarDownloadBtn" class="shazam-bar-action-btn" onclick="shazamBarDownload()" title="Download" aria-label="Download AIFF"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>
             <button type="button" id="shazamBarSkipBtn" class="shazam-bar-action-btn" onclick="shazamBarSkip()" title="Skip" aria-label="Skip track"></button>
         </div>
         <button type="button" id="shazamBarClose" class="shazam-bar-close" title="Stop and close" aria-label="Stop and close" onclick="shazamPlayerBarClose()">×</button>
@@ -288,7 +288,7 @@
     <!-- Context menu for play button (Open file location / Open on Soundeo) -->
     <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=40"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=42"></script>
 <script>
 (function() {
     if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {
