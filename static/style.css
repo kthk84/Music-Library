@@ -2238,9 +2238,23 @@ button[onclick*="revertLookup"] {
     color: var(--text);
     border-color: var(--text-tertiary);
 }
+.shazam-bar-action-btn:active:not(:disabled) {
+    transform: scale(0.96);
+}
+.shazam-bar-action-btn:focus {
+    outline: none;
+}
+.shazam-bar-action-btn:focus-visible:not(:disabled) {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+/* Disabled = readable muted chrome (not 35% opacity wash next to solid download state) */
 .shazam-bar-action-btn:disabled {
-    opacity: 0.35;
+    opacity: 1;
     cursor: not-allowed;
+    color: var(--text-tertiary);
+    border-color: var(--border);
+    background: var(--bg-tertiary);
 }
 .shazam-bar-action-btn.shazam-bar-action-active {
     color: var(--accent);
@@ -2262,8 +2276,10 @@ button[onclick*="revertLookup"] {
     opacity: 1;
     cursor: default;
     background: var(--bg-secondary);
-    border-color: var(--text-tertiary);
-    color: var(--text-secondary);
+    border-color: var(--accent);
+    color: var(--text);
+    box-shadow: 0 0 0 1px rgba(17, 17, 17, 0.1);
+    transform: none;
 }
 /* Playbar (and any non-row) spinners: full border + animation — row rules override */
 .shazam-btn-spinner {
@@ -2395,24 +2411,50 @@ button[onclick*="revertLookup"] {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    transition: all 0.15s;
+    transition: background-color 0.08s ease, border-color 0.08s ease, color 0.08s ease, transform 0.06s ease;
     font-size: var(--text-xs);
     vertical-align: middle;
 }
-.shazam-row-action-btn:hover {
+.shazam-row-action-btn:focus {
+    outline: none;
+}
+.shazam-row-action-btn:focus-visible:not(:disabled):not(.shazam-row-action-inactive) {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+    z-index: 1;
+    position: relative;
+}
+/* Hover only when the control is actually interactive */
+.shazam-row-action-btn:hover:not(:disabled):not(.shazam-row-action-inactive) {
     color: var(--text);
     border-color: var(--text-tertiary);
     background: var(--bg-secondary);
 }
-.shazam-dismiss-action:hover {
+.shazam-row-action-btn:active:not(:disabled):not(.shazam-row-action-inactive) {
+    transform: scale(0.94);
+}
+.shazam-dismiss-action:hover:not(:disabled):not(.shazam-row-action-inactive) {
     color: var(--danger);
     border-color: var(--danger);
 }
-.shazam-sync-action:hover {
+.shazam-sync-action:hover:not(:disabled):not(.shazam-row-action-inactive) {
     color: var(--accent);
     border-color: var(--accent);
 }
-.shazam-star-action:hover {
+.shazam-star-action:hover:not(:disabled):not(.shazam-row-action-inactive) {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.shazam-download-action:hover:not(:disabled):not(.shazam-row-action-inactive):not(.shazam-download-have):not(.shazam-download-action-pending):not(.shazam-download-blocked) {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--bg-secondary);
+}
+.shazam-search-action:hover:not(:disabled):not(.shazam-row-action-inactive) {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.shazam-skip-action:hover:not(:disabled):not(.shazam-row-action-inactive) {
     color: var(--accent);
     border-color: var(--accent);
 }
@@ -2460,10 +2502,13 @@ button[onclick*="revertLookup"] {
     pointer-events: none;
     cursor: default;
     opacity: 1;
+    background: var(--bg-secondary);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(17, 17, 17, 0.12);
 }
 .shazam-download-action.shazam-download-action-pending .shazam-btn-spinner {
-    border-color: rgba(26, 26, 26, 0.25);
-    border-top-color: #1a1a1a;
+    border-color: rgba(26, 26, 26, 0.2);
+    border-top-color: var(--accent);
 }
 .shazam-queue-inline-spinner {
     flex-shrink: 0;
@@ -2492,15 +2537,18 @@ button[onclick*="revertLookup"] {
 }
 .shazam-queue-label {
     font-size: var(--text-xs);
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
+    font-weight: 500;
     vertical-align: middle;
 }
 .shazam-remove-queue {
-    width: 20px;
-    height: 20px;
-    font-size: 14px;
+    width: 22px;
+    height: 22px;
+    min-width: 22px;
+    font-size: 13px;
     line-height: 1;
-    color: var(--text-tertiary);
+    color: var(--text-secondary);
+    flex-shrink: 0;
 }
 .shazam-remove-queue:hover {
     color: var(--danger);
@@ -2526,7 +2574,10 @@ button[onclick*="revertLookup"] {
 }
 .shazam-star-action-pending {
     pointer-events: none;
-    opacity: 0.9;
+    opacity: 1;
+    background: var(--bg-secondary);
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px rgba(17, 17, 17, 0.1);
 }
 .shazam-star-action-pending .shazam-btn-spinner {
     animation-duration: 2s;
