@@ -2262,12 +2262,22 @@ button[onclick*="revertLookup"] {
     border-color: var(--text-tertiary);
     color: var(--text-secondary);
 }
-.shazam-bar-action-btn .shazam-bar-dl-spinner {
-    width: 14px;
-    height: 14px;
-    border-width: 2px;
-    border-color: rgba(26, 26, 26, 0.22);
+/* Playbar (and any non-row) spinners: full border + animation — row rules override */
+.shazam-btn-spinner {
+    display: inline-block;
+    box-sizing: border-box;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(26, 26, 26, 0.22);
     border-top-color: #1a1a1a;
+    border-radius: 50%;
+    animation: shazam-spin 0.65s linear infinite;
+    vertical-align: middle;
+    flex-shrink: 0;
+}
+.shazam-bar-action-btn .shazam-bar-dl-spinner {
+    width: 15px;
+    height: 15px;
 }
 
 /* Cover art column in track table */
@@ -2490,16 +2500,14 @@ button[onclick*="revertLookup"] {
     animation: shazam-spin 1s linear infinite;
     color: var(--positive);
 }
-/* Spinner inside star/unstar (and other) action button while request is pending */
+/* Spinner inside row action buttons (darker ring on light button) */
 .shazam-row-action-btn .shazam-btn-spinner {
-    display: inline-block;
     width: 12px;
     height: 12px;
-    border: 2px solid rgba(255, 255, 255, 0.35);
-    border-top-color: currentColor;
+    border: 2px solid rgba(26, 26, 26, 0.2);
+    border-top-color: #1a1a1a;
     border-radius: 50%;
     animation: shazam-spin 0.6s linear infinite;
-    vertical-align: middle;
 }
 .shazam-star-action-pending {
     pointer-events: none;

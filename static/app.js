@@ -1278,6 +1278,19 @@ function shazamTrackKeyMatches(serverKey, rowKey) {
     return false;
 }
 
+/** True if this track key is in the current have_locally list (playing Soundeo preview still counts as “have file”). */
+function shazamTrackKeyInHaveLocally(trackKey) {
+    if (!trackKey || !shazamLastData || !Array.isArray(shazamLastData.have_locally)) return false;
+    var list = shazamLastData.have_locally;
+    for (var i = 0; i < list.length; i++) {
+        var t = list[i];
+        var rowKey = ((t.artist || '') + ' - ' + (t.title || '')).trim();
+        if (!rowKey) continue;
+        if (shazamTrackKeyMatches(trackKey, rowKey)) return true;
+    }
+    return false;
+}
+
 function shazamRowActionPending(key) {
     return !!(shazamActionPending[key] || shazamPendingDownload[key]);
 }
@@ -1897,6 +1910,7 @@ function shazamApplyStatus(data) {
         shazamShowCompareProgress(false);
     }
     shazamRestoreProgressIfRunning();
+    shazamBarUpdateActions();
 }
 
 /** True when a single-track star/unstar action is in flight. Uses the lifecycle flag, NOT shazamCurrentProgress (which gets cleared before the bar is hidden). */
@@ -2564,17 +2578,19 @@ function shazamBarUpdateActions() {
     }
     starBtn.disabled = !url || dismissed;
 
-    var isLocalFile = shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64);
+    var isLocalFile = !!(shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64));
+    var inHaveList = key ? shazamTrackKeyInHaveLocally(key) : false;
+    var haveFileUi = isLocalFile || inHaveList;
     var downloadOutlineSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
     var downloadWorkerBusy = !!(key && shazamDownloadProgressSnapshot.running && shazamTrackKeyMatches(shazamDownloadProgressSnapshot.current_key, key));
     var downloadBusy = !!(key && shazamPendingDownload[key]) || downloadWorkerBusy;
     dlBtn.classList.remove('shazam-bar-action-active', 'shazam-bar-dl-have', 'shazam-bar-dl-pending');
     if (downloadBusy) {
-        dlBtn.innerHTML = '<span class="shazam-btn-spinner shazam-bar-dl-spinner" title="Downloading…"></span>';
+        dlBtn.innerHTML = '<span class="shazam-btn-spinner shazam-bar-dl-spinner" title="Downloading…" role="status" aria-label="Downloading"></span>';
         dlBtn.disabled = true;
         dlBtn.title = 'Downloading…';
         dlBtn.classList.add('shazam-bar-dl-pending');
-    } else if (isLocalFile) {
+    } else if (haveFileUi) {
         dlBtn.innerHTML = shazamSvgDownloadHaveWhite(15);
         dlBtn.disabled = true;
         dlBtn.title = 'Downloaded — have locally';
