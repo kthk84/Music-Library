@@ -2712,7 +2712,27 @@ function shazamBarSkip() {
         }
     }
     if (!a && !t) return;
-    shazamSkipSingleTrack(a, t);
+    var prevRow = null;
+    if (shazamPlayingBtn && shazamPlayingBtn.isConnected) {
+        prevRow = shazamPlayingBtn.closest('tr');
+    }
+    if (!prevRow) {
+        var playingEl = document.querySelector('#shazamTrackList .shazam-play-btn.playing');
+        if (playingEl) prevRow = playingEl.closest('tr');
+    }
+    var playNextKey = null;
+    if (prevRow) {
+        var nr = prevRow.nextElementSibling;
+        while (nr) {
+            var nb = nr.querySelector('.shazam-play-btn');
+            if (nb) {
+                playNextKey = (nb.getAttribute('data-track-key') || nb.dataset.trackKey || '').trim() || null;
+                break;
+            }
+            nr = nr.nextElementSibling;
+        }
+    }
+    shazamSkipSingleTrack(a, t, { fromPlaybar: true, playNextKey: playNextKey });
 }
 
 function shazamApplyFilters(merged) {
@@ -3582,7 +3602,10 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
     }
 }
 
-async function shazamSkipSingleTrack(artist, title) {
+async function shazamSkipSingleTrack(artist, title, opts) {
+    opts = opts || {};
+    const fromPlaybar = !!opts.fromPlaybar;
+    const playNextKey = opts.playNextKey != null ? opts.playNextKey : null;
     const key = `${artist} - ${title}`;
     const keyLower = key.toLowerCase();
     if (shazamActionPending[key]) return;
@@ -3604,6 +3627,31 @@ async function shazamSkipSingleTrack(artist, title) {
         }
     }
 
+    function shazamStopPlaybarAfterSkip() {
+        shazamCancelNextBuffer();
+        if (shazamAudioEl) shazamAudioEl.pause();
+        shazamCurrentlyPlaying = null;
+        shazamPlayerBarHide();
+    }
+
+    function shazamTryPlayNextAfterSkip() {
+        if (!fromPlaybar) return;
+        if (playNextKey) {
+            var nextBtn = shazamFindPlayBtnByTrackKey(playNextKey);
+            if (nextBtn) {
+                if (nextBtn.classList.contains('shazam-soundeo-play') && !nextBtn.dataset.dirB64 && !nextBtn.dataset.pathB64) {
+                    shazamToggleSoundeoPlay(nextBtn);
+                } else {
+                    shazamTogglePlay(nextBtn);
+                }
+            } else {
+                shazamStopPlaybarAfterSkip();
+            }
+        } else {
+            shazamStopPlaybarAfterSkip();
+        }
+    }
+
     try {
         const res = await fetch('/api/shazam-sync/skip-track', {
             method: 'POST',
@@ -3614,6 +3662,7 @@ async function shazamSkipSingleTrack(artist, title) {
         if (res.ok) {
             delete shazamActionPending[key];
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            shazamTryPlayNextAfterSkip();
             return;
         }
         reverted = true;
