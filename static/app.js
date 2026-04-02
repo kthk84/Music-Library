@@ -3611,6 +3611,34 @@ async function shazamSkipSingleTrack(artist, title, opts) {
     if (shazamActionPending[key]) return;
     shazamActionPending[key] = true;
 
+    /* Playbar skip: stop audio immediately. Optimistic re-render removes the row but leaves shazamAudioEl playing until the fetch returns — user hears the skipped track the whole time. */
+    if (fromPlaybar) {
+        shazamCancelNextBuffer();
+        if (shazamAudioEl) {
+            shazamAudioEl.onended = null;
+            shazamAudioEl.onerror = null;
+            if (shazamBarTimeUpdate) {
+                shazamAudioEl.removeEventListener('timeupdate', shazamBarTimeUpdate);
+                shazamBarTimeUpdate = null;
+            }
+            if (shazamBarEnded) {
+                shazamAudioEl.removeEventListener('ended', shazamBarEnded);
+                shazamBarEnded = null;
+            }
+            shazamAudioEl.pause();
+            shazamAudioEl.src = '';
+        }
+        releaseShazamProxy();
+        shazamCurrentlyPlaying = null;
+        var _playingInList = document.querySelector('#shazamTrackList .shazam-play-btn.playing');
+        if (_playingInList) {
+            _playingInList.innerHTML = PLAY_ICON_ROW;
+            _playingInList.classList.remove('playing');
+        }
+        shazamPlayingBtn = null;
+        shazamPlayerBarHide();
+    }
+
     // Optimistic update: move track to skipped so UI updates immediately
     let reverted = false;
     if (shazamLastData) {
@@ -3634,13 +3662,13 @@ async function shazamSkipSingleTrack(artist, title, opts) {
         shazamPlayerBarHide();
     }
 
-    function shazamTryPlayNextAfterSkip() {
+    async function shazamTryPlayNextAfterSkip() {
         if (!fromPlaybar) return;
         if (playNextKey) {
             var nextBtn = shazamFindPlayBtnByTrackKey(playNextKey);
             if (nextBtn) {
                 if (nextBtn.classList.contains('shazam-soundeo-play') && !nextBtn.dataset.dirB64 && !nextBtn.dataset.pathB64) {
-                    shazamToggleSoundeoPlay(nextBtn);
+                    await shazamToggleSoundeoPlay(nextBtn);
                 } else {
                     shazamTogglePlay(nextBtn);
                 }
@@ -3662,7 +3690,7 @@ async function shazamSkipSingleTrack(artist, title, opts) {
         if (res.ok) {
             delete shazamActionPending[key];
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
-            shazamTryPlayNextAfterSkip();
+            await shazamTryPlayNextAfterSkip();
             return;
         }
         reverted = true;
