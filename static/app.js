@@ -2542,8 +2542,9 @@ function shazamPlayerBarPrev() {
 /** White download-arrow icon for “have locally” on solid black button (sync table + playbar). */
 function shazamSvgDownloadHaveWhite(size) {
     var n = size != null ? size : 16;
+    var sw = n <= 16 ? '2.65' : '2.35';
     return (
-        '<svg class="shazam-download-have-icon" width="' + n + '" height="' + n + '" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<svg class="shazam-download-have-icon" width="' + n + '" height="' + n + '" viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="' + sw + '" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
         '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>' +
         '</svg>'
     );
@@ -2591,7 +2592,7 @@ function shazamBarUpdateActions() {
         dlBtn.title = 'Downloading…';
         dlBtn.classList.add('shazam-bar-dl-pending');
     } else if (haveFileUi) {
-        dlBtn.innerHTML = shazamSvgDownloadHaveWhite(15);
+        dlBtn.innerHTML = shazamSvgDownloadHaveWhite(16);
         dlBtn.disabled = true;
         dlBtn.title = 'Downloaded — have locally';
         dlBtn.classList.add('shazam-bar-dl-have');
@@ -2929,7 +2930,7 @@ function shazamRenderTrackList(data) {
             const downloadSvg = downloadBusyRow
                 ? '<span class="shazam-btn-spinner" title="Downloading…"></span>'
                 : downloadHave
-                    ? shazamSvgDownloadHaveWhite(16)
+                    ? shazamSvgDownloadHaveWhite(17)
                     : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
             const downloadBtnDisabled = downloadBusyRow || downloadHave ? ' disabled' : '';
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadHaveClass}${downloadPendingClass}${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}"${downloadBtnDisabled}>${downloadSvg}</button>`;

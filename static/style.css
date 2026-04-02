@@ -13,6 +13,9 @@
     --accent: #111111;
     --accent-muted: #666666;
     --positive: #22c55e;
+    /* Download “have locally”: solid black control + white glyph (table + playbar) */
+    --shazam-dl-have-bg: #000000;
+    --shazam-dl-have-fg: #ffffff;
     --negative: #dc2626;
     --positive-bg: rgba(34, 197, 94, 0.08);
     --negative-bg: rgba(220, 38, 38, 0.08);
@@ -2244,16 +2247,16 @@ button[onclick*="revertLookup"] {
     border-color: var(--accent);
 }
 .shazam-bar-action-btn.shazam-bar-dl-have {
-    background: #1a1a1a;
-    color: #fff;
-    border-color: #1a1a1a;
+    background: var(--shazam-dl-have-bg);
+    color: var(--shazam-dl-have-fg);
+    border-color: var(--shazam-dl-have-bg);
     cursor: default;
 }
 .shazam-bar-action-btn.shazam-bar-dl-have:disabled {
     opacity: 1;
-    background: #1a1a1a;
-    color: #fff;
-    border-color: #1a1a1a;
+    background: var(--shazam-dl-have-bg);
+    color: var(--shazam-dl-have-fg);
+    border-color: var(--shazam-dl-have-bg);
 }
 .shazam-bar-action-btn.shazam-bar-dl-pending:disabled {
     opacity: 1;
@@ -2425,21 +2428,33 @@ button[onclick*="revertLookup"] {
 .shazam-download-action:not(.shazam-row-action-inactive) {
     color: #1a1a1a;
 }
-.shazam-download-action.shazam-download-have {
-    background: #1a1a1a;
-    color: #fff;
-    border-color: #1a1a1a;
+.shazam-download-action.shazam-download-have,
+.shazam-download-action.shazam-download-have:disabled {
+    background: var(--shazam-dl-have-bg);
+    color: var(--shazam-dl-have-fg);
+    border-color: var(--shazam-dl-have-bg);
     opacity: 1;
     pointer-events: none;
     cursor: default;
+    -webkit-text-fill-color: var(--shazam-dl-have-fg);
 }
-.shazam-download-action.shazam-download-have:hover {
-    background: #1a1a1a;
-    color: #fff;
-    border-color: #1a1a1a;
+.shazam-download-action.shazam-download-have:hover,
+.shazam-download-action.shazam-download-have:disabled:hover {
+    background: var(--shazam-dl-have-bg);
+    color: var(--shazam-dl-have-fg);
+    border-color: var(--shazam-dl-have-bg);
+}
+.shazam-row-dismissed .shazam-download-action.shazam-download-have,
+.shazam-row-dismissed .shazam-download-action.shazam-download-have:disabled {
+    background: var(--shazam-dl-have-bg);
+    border-color: var(--shazam-dl-have-bg);
+    color: var(--shazam-dl-have-fg);
+    opacity: 1;
 }
 .shazam-download-action.shazam-download-have .shazam-download-have-icon {
     display: block;
+    flex-shrink: 0;
+    stroke: var(--shazam-dl-have-fg);
 }
 .shazam-download-action.shazam-download-action-pending {
     pointer-events: none;
