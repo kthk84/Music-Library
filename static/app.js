@@ -1251,6 +1251,32 @@ let shazamNotFound = {};
 let shazamActionPending = {};
 /** In-flight download request per track key (separate from star/search so download can queue while starring). */
 let shazamPendingDownload = {};
+/** Server download worker: which track key is actively downloading (from status download_progress). */
+let shazamDownloadProgressSnapshot = { running: false, current_key: null };
+
+function shazamMergeDownloadProgressFromPayload(data) {
+    if (!data || data.download_progress === undefined) return;
+    var dp = data.download_progress;
+    shazamDownloadProgressSnapshot = {
+        running: !!(dp && dp.running),
+        current_key: (dp && dp.running && dp.current_key) ? String(dp.current_key).trim() : null
+    };
+}
+
+/** True if server download_progress.current_key refers to the same track as row key (variant-aware). */
+function shazamTrackKeyMatches(serverKey, rowKey) {
+    if (!serverKey || !rowKey) return false;
+    var sk = String(serverKey).trim();
+    var rk = String(rowKey).trim();
+    if (sk === rk) return true;
+    if (sk.toLowerCase() === rk.toLowerCase()) return true;
+    var variants = shazamKeyVariants(rk);
+    for (var i = 0; i < variants.length; i++) {
+        var v = variants[i];
+        if (v === sk || v.toLowerCase() === sk.toLowerCase()) return true;
+    }
+    return false;
+}
 
 function shazamRowActionPending(key) {
     return !!(shazamActionPending[key] || shazamPendingDownload[key]);
@@ -1854,6 +1880,7 @@ function shazamApplyStatus(data) {
         shazamNotFound = {};
         Object.assign(shazamNotFound, data.not_found);
     }
+    shazamMergeDownloadProgressFromPayload(data);
     shazamRenderTrackList(data);
     if (data.download_queue && Array.isArray(data.download_queue)) {
         shazamCurrentDownloadQueue = data.download_queue;
@@ -2498,13 +2525,12 @@ function shazamPlayerBarPrev() {
     shazamPlayPrevTrack();
 }
 
-/** Filled circle + check for “downloaded / have locally” (sync table + playbar). */
-function shazamSvgDownloadComplete(size) {
+/** White download-arrow icon for “have locally” on solid black button (sync table + playbar). */
+function shazamSvgDownloadHaveWhite(size) {
     var n = size != null ? size : 16;
     return (
-        '<svg class="shazam-download-complete-icon" width="' + n + '" height="' + n + '" viewBox="0 0 24 24" aria-hidden="true">' +
-        '<circle cx="12" cy="12" r="10" fill="currentColor"/>' +
-        '<path d="M8 12.4L10.4 14.8L16.2 9" stroke="var(--shazam-download-complete-check, #fff)" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<svg class="shazam-download-have-icon" width="' + n + '" height="' + n + '" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>' +
         '</svg>'
     );
 }
@@ -2539,13 +2565,25 @@ function shazamBarUpdateActions() {
     starBtn.disabled = !url || dismissed;
 
     var isLocalFile = shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64);
-    var downloadFilledSvg = shazamSvgDownloadComplete(15);
     var downloadOutlineSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-    dlBtn.innerHTML = isLocalFile ? downloadFilledSvg : downloadOutlineSvg;
-    dlBtn.disabled = isLocalFile || !url;
-    dlBtn.title = isLocalFile ? 'Downloaded — have locally' : (url ? 'Download AIFF' : 'No Soundeo link');
-    if (isLocalFile) dlBtn.classList.add('shazam-bar-action-active', 'shazam-bar-dl-have');
-    else dlBtn.classList.remove('shazam-bar-action-active', 'shazam-bar-dl-have');
+    var downloadWorkerBusy = !!(key && shazamDownloadProgressSnapshot.running && shazamTrackKeyMatches(shazamDownloadProgressSnapshot.current_key, key));
+    var downloadBusy = !!(key && shazamPendingDownload[key]) || downloadWorkerBusy;
+    dlBtn.classList.remove('shazam-bar-action-active', 'shazam-bar-dl-have', 'shazam-bar-dl-pending');
+    if (downloadBusy) {
+        dlBtn.innerHTML = '<span class="shazam-btn-spinner shazam-bar-dl-spinner" title="Downloading…"></span>';
+        dlBtn.disabled = true;
+        dlBtn.title = 'Downloading…';
+        dlBtn.classList.add('shazam-bar-dl-pending');
+    } else if (isLocalFile) {
+        dlBtn.innerHTML = shazamSvgDownloadHaveWhite(15);
+        dlBtn.disabled = true;
+        dlBtn.title = 'Downloaded — have locally';
+        dlBtn.classList.add('shazam-bar-dl-have');
+    } else {
+        dlBtn.innerHTML = downloadOutlineSvg;
+        dlBtn.disabled = !url;
+        dlBtn.title = url ? 'Download AIFF' : 'No Soundeo link';
+    }
 
     var skipSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="6" y2="18"/><line x1="10" y1="6" x2="10" y2="18"/><polygon points="14 8 14 16 20 12"/></svg>';
     skipBtn.innerHTML = skipSvg;
@@ -2711,6 +2749,7 @@ function shazamRenderTrackList(data) {
         const isNonExtendedVersion = soundeoTitle && /\((original\s+mix|radio\s+edit|radio\s+version|short\s+version)\)/i.test(soundeoTitle.trim()) && !/extended/i.test(soundeoTitle.trim());
         const showManualCheck = isTodl && !isDismissed && isSynced && !manualCheckDismissed && isNonExtendedVersion;
         const isPending = shazamRowActionPending(key);
+        const starOnlyPending = !!shazamActionPending[key];
         // Queue position for row: star queue has key; search queue has artist+title
         const starQueueIdx = (shazamCurrentStarQueue || []).findIndex(function (q) {
             var qk = (q.key || (q.artist + ' - ' + q.title)).trim();
@@ -2747,8 +2786,9 @@ function shazamRenderTrackList(data) {
         const isCurrentTrack = !!(shazamCurrentProgress.running && currentKey && (currentKey === key || currentKey.toLowerCase() === keyLower));
 
         // Dot colours: have+starred = green, have+not starred = teal; both live-update when star status changes (shazamSetStarredLive + re-render)
-        // Spinner at start of row when this track is being processed (server current_key or request pending); no hourglass in actions – buttons stay visible
-        const showRowSpinner = isCurrentTrack || isPending;
+        // Spinner at start of row when this track is being processed (sync current_key, row pending, or active download worker)
+        const downloadWorkerActive = !!(shazamDownloadProgressSnapshot.running && shazamTrackKeyMatches(shazamDownloadProgressSnapshot.current_key, key));
+        const showRowSpinner = isCurrentTrack || isPending || downloadWorkerActive;
         let statusCell = '';
         if (showRowSpinner) {
             statusCell = '<td class="status-cell"><span class="status-spinner" title="Processing…"></span></td>';
@@ -2821,8 +2861,8 @@ function shazamRenderTrackList(data) {
         const starToggleTitle = isDismissed ? 'Undo dismiss (re-star on Soundeo)' : (starred ? 'Remove from Soundeo favorites (unstar)' : (!isSynced ? 'Find link first (Search)' : 'Add to Soundeo favorites'));
         const starToggleSvg = (starred && !isDismissed) ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>' : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
         const starToggleDataAttrs = (starToggleAction === 'star') ? ` data-track-url="${safeAttr(url || '')}"` : ` data-url="${safeAttr(url || '')}"`;
-        const starBtnContent = isPending ? '<span class="shazam-btn-spinner" title="Processing…"></span>' : starToggleSvg;
-        const starBtnDisabled = isPending ? ' disabled' : '';
+        const starBtnContent = starOnlyPending ? '<span class="shazam-btn-spinner" title="Processing…"></span>' : starToggleSvg;
+        const starBtnDisabled = starOnlyPending ? ' disabled' : '';
 
         let actionsCell = '<td class="shazam-actions-col">';
         if (inAnyQueue) {
@@ -2838,7 +2878,8 @@ function shazamRenderTrackList(data) {
             if (inUnstarQueue) titleParts.push('Unstar ' + unstarQueuePos + '/' + unstarQueueTotal);
             if (inDownloadQueue) titleParts.push('Download ' + downloadQueuePos + '/' + downloadQueueTotal);
             var queueTitle = titleParts.join(', ');
-            actionsCell += '<span class="shazam-queue-replacement" title="' + escapeHtml(queueTitle) + '"><span class="shazam-queue-label">' + escapeHtml(queueShort) + '</span>';
+            var downloadActiveOnRow = inDownloadQueue && shazamDownloadProgressSnapshot.running && shazamTrackKeyMatches(shazamDownloadProgressSnapshot.current_key, key);
+            actionsCell += '<span class="shazam-queue-replacement" title="' + escapeHtml(queueTitle) + '">' + (downloadActiveOnRow ? '<span class="shazam-btn-spinner shazam-queue-inline-spinner" title="Downloading…"></span>' : '') + '<span class="shazam-queue-label">' + escapeHtml(queueShort) + '</span>';
             if (inStarQueue) {
                 actionsCell += '<button type="button" class="shazam-row-action-btn shazam-remove-queue" data-queue="star" data-key="' + safeAttr(key) + '" data-artist="' + safeAttr(row.artist) + '" data-title="' + safeAttr(row.title) + '" title="Remove from star queue">\u00d7</button>';
             }
@@ -2854,15 +2895,28 @@ function shazamRenderTrackList(data) {
             actionsCell += '</span>';
         } else {
             /* Order: star toggle, download, search, then conditional (clear dismissed / undo / skip) */
-            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-star-action${starToggleInactive}${isPending ? ' shazam-star-action-pending' : ''}" data-action="${starToggleAction}" data-key="${safeAttr(key)}"${starToggleDataAttrs} data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="${escapeHtml(isPending ? 'Processing…' : starToggleTitle)}"${starBtnDisabled}>${starBtnContent}</button>`;
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-star-action${starToggleInactive}${starOnlyPending ? ' shazam-star-action-pending' : ''}" data-action="${starToggleAction}" data-key="${safeAttr(key)}"${starToggleDataAttrs} data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="${escapeHtml(starOnlyPending ? 'Processing…' : starToggleTitle)}"${starBtnDisabled}>${starBtnContent}</button>`;
             const downloadHave = row.status === 'have';
             const downloadInactive = (row.status === 'skipped' || !url) ? inactive : '';
             const downloadHaveClass = downloadHave ? ' shazam-download-have' : '';
-            const downloadTitle = downloadHave ? 'Downloaded — have locally' : row.status === 'skipped' ? 'Skipped' : !url ? 'No Soundeo link' : 'Download AIFF';
-            const downloadSvg = downloadHave
-                ? shazamSvgDownloadComplete(16)
-                : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadHaveClass}${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}">${downloadSvg}</button>`;
+            const downloadBusyRow = !!(shazamPendingDownload[key] || (shazamDownloadProgressSnapshot.running && shazamTrackKeyMatches(shazamDownloadProgressSnapshot.current_key, key)));
+            const downloadPendingClass = downloadBusyRow ? ' shazam-download-action-pending' : '';
+            const downloadTitle = downloadBusyRow
+                ? 'Downloading…'
+                : downloadHave
+                    ? 'Downloaded — have locally'
+                    : row.status === 'skipped'
+                        ? 'Skipped'
+                        : !url
+                            ? 'No Soundeo link'
+                            : 'Download AIFF';
+            const downloadSvg = downloadBusyRow
+                ? '<span class="shazam-btn-spinner" title="Downloading…"></span>'
+                : downloadHave
+                    ? shazamSvgDownloadHaveWhite(16)
+                    : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+            const downloadBtnDisabled = downloadBusyRow || downloadHave ? ' disabled' : '';
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadHaveClass}${downloadPendingClass}${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}"${downloadBtnDisabled}>${downloadSvg}</button>`;
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
             if (isDismissed) {
                 actionsCell += `<button type="button" class="shazam-row-action-btn shazam-clear-dismissed" data-action="clear_dismissed" data-key="${safeAttr(key)}" title="Reset to: have locally, not starred on Soundeo (removes strikethrough, link visible again)">Remove strikethrough</button>`;
@@ -4697,6 +4751,7 @@ async function shazamDownloadTrack(key) {
     if (shazamPendingDownload[key]) return;
     shazamPendingDownload[key] = true;
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    shazamBarUpdateActions();
     try {
         const res = await fetch('/api/shazam-sync/download-track', {
             method: 'POST',
@@ -4708,6 +4763,7 @@ async function shazamDownloadTrack(key) {
             alert(data.error || 'Download failed');
             delete shazamPendingDownload[key];
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            shazamBarUpdateActions();
             return;
         }
         if (data.download_queue && Array.isArray(data.download_queue)) {
@@ -4724,9 +4780,11 @@ async function shazamDownloadTrack(key) {
         }
         delete shazamPendingDownload[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        shazamBarUpdateActions();
     } catch (e) {
         delete shazamPendingDownload[key];
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        shazamBarUpdateActions();
         alert('Error: ' + e.message);
     }
 }
@@ -4768,6 +4826,13 @@ function shazamPollDownloadProgress() {
         if (data.download_queue && Array.isArray(data.download_queue)) {
             shazamCurrentDownloadQueue = data.download_queue;
             shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+        }
+        var prevDlSnap = { running: shazamDownloadProgressSnapshot.running, current_key: shazamDownloadProgressSnapshot.current_key };
+        shazamMergeDownloadProgressFromPayload(data);
+        var dlSnapChanged = prevDlSnap.running !== shazamDownloadProgressSnapshot.running || prevDlSnap.current_key !== shazamDownloadProgressSnapshot.current_key;
+        if (dlSnapChanged && shazamLastData) {
+            shazamRenderTrackList(shazamLastData);
+            shazamBarUpdateActions();
         }
         const dp = data.download_progress;
         const el = document.getElementById('shazamProgress');
