@@ -13,6 +13,7 @@
     --accent: #111111;
     --accent-muted: #666666;
     --positive: #22c55e;
+    --shazam-download-complete-check: #ffffff;
     --negative: #dc2626;
     --positive-bg: rgba(34, 197, 94, 0.08);
     --negative-bg: rgba(220, 38, 38, 0.08);
@@ -101,6 +102,51 @@ body {
 }
 .connection-banner a { color: var(--accent); font-weight: 500; }
 .connection-banner code { font-size: var(--text-xs); background: var(--bg-tertiary); padding: 2px 6px; border-radius: var(--r-sm); }
+
+/* No-credits download-blocked banner */
+.shazam-no-credits-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-3);
+    margin-bottom: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    background: #431407;
+    border: 1px solid #d97706;
+    border-radius: var(--r-md);
+    color: #fed7aa;
+    font-size: var(--text-sm);
+    animation: shazam-banner-in 0.2s ease;
+}
+@keyframes shazam-banner-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.shazam-no-credits-icon {
+    font-size: 16px;
+    line-height: 1.2;
+    flex-shrink: 0;
+    color: #d97706;
+}
+.shazam-no-credits-msg {
+    flex: 1;
+    line-height: 1.5;
+}
+.shazam-no-credits-msg strong { color: #fbbf24; }
+.shazam-no-credits-msg a { color: #fbbf24; font-weight: 600; text-decoration: underline; }
+.shazam-no-credits-msg a:hover { color: #fde68a; }
+.shazam-no-credits-dismiss {
+    background: none;
+    border: none;
+    color: #d97706;
+    font-size: 18px;
+    line-height: 1;
+    padding: 0 2px;
+    cursor: pointer;
+    flex-shrink: 0;
+    opacity: 0.7;
+    transition: opacity 0.15s;
+}
+.shazam-no-credits-dismiss:hover { opacity: 1; }
 
 /* ========== Header (merged with tabs) ========== */
 header {
@@ -1777,6 +1823,17 @@ button[onclick*="revertLookup"] {
 .shazam-track-table .status-cell .status-dot.status-have-starred {
     background: var(--positive);
 }
+/* Download blocked — no credits */
+.shazam-track-table .status-cell .status-dot.status-download-blocked {
+    background: #d97706;
+    color: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
 /* Hover: show that dots have a tooltip (title) explaining meaning */
 .shazam-track-table .status-cell .status-dot[title]:hover {
     cursor: help;
@@ -2115,6 +2172,111 @@ button[onclick*="revertLookup"] {
     color: var(--text);
 }
 
+/* Player bar prev/next skip buttons */
+.shazam-bar-skip-btn {
+    width: 30px;
+    height: 30px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    border-radius: var(--r-sm);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.12s, background 0.12s;
+}
+.shazam-bar-skip-btn:hover {
+    color: var(--text);
+    background: var(--bg-tertiary);
+}
+.shazam-bar-skip-btn svg {
+    pointer-events: none;
+}
+
+/* Player bar cover art thumbnail */
+.shazam-bar-cover {
+    width: 36px;
+    height: 36px;
+    border-radius: var(--r-sm);
+    flex-shrink: 0;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+}
+.shazam-bar-cover-placeholder {
+    background-color: var(--bg-tertiary);
+    background-image: none !important;
+}
+
+/* Player bar action buttons (star, download, skip) */
+.shazam-bar-actions {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.shazam-bar-action-btn {
+    width: 30px;
+    height: 30px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.shazam-bar-action-btn:hover:not(:disabled) {
+    background: var(--bg-tertiary);
+    color: var(--text);
+    border-color: var(--text-tertiary);
+}
+.shazam-bar-action-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+.shazam-bar-action-btn.shazam-bar-action-active {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.shazam-bar-action-btn.shazam-bar-dl-have {
+    color: var(--positive);
+    border-color: var(--positive);
+    cursor: default;
+}
+.shazam-bar-action-btn.shazam-bar-dl-have:disabled {
+    opacity: 1;
+    color: var(--positive);
+    border-color: var(--positive);
+}
+
+/* Cover art column in track table */
+.shazam-cover-col {
+    width: 36px;
+    padding: 2px 4px 2px 8px !important;
+    vertical-align: middle;
+}
+.track-cover {
+    width: 28px;
+    height: 28px;
+    border-radius: 3px;
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    display: inline-block;
+    vertical-align: middle;
+    flex-shrink: 0;
+}
+.track-cover-placeholder {
+    background-color: var(--bg-tertiary);
+    background-image: none !important;
+}
+
 /* External link button: 24px circular */
 .shazam-external-link-btn {
     width: 24px;
@@ -2237,6 +2399,23 @@ button[onclick*="revertLookup"] {
 }
 .shazam-download-action:not(.shazam-row-action-inactive) {
     color: #1a1a1a;
+}
+.shazam-download-action.shazam-download-have {
+    color: var(--positive, #22c55e);
+    opacity: 1;
+    pointer-events: none;
+    cursor: default;
+}
+.shazam-download-action.shazam-download-have .shazam-download-complete-icon {
+    display: block;
+    vertical-align: middle;
+}
+.shazam-download-action.shazam-download-blocked {
+    color: #d97706;
+}
+.shazam-download-action.shazam-download-blocked:hover {
+    color: #b45309;
+    background: rgba(217, 119, 6, 0.12);
 }
 /* Queue state replaces action buttons in same cell width */
 .shazam-queue-replacement {

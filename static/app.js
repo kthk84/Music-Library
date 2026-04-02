@@ -2498,6 +2498,17 @@ function shazamPlayerBarPrev() {
     shazamPlayPrevTrack();
 }
 
+/** Filled circle + check for “downloaded / have locally” (sync table + playbar). */
+function shazamSvgDownloadComplete(size) {
+    var n = size != null ? size : 16;
+    return (
+        '<svg class="shazam-download-complete-icon" width="' + n + '" height="' + n + '" viewBox="0 0 24 24" aria-hidden="true">' +
+        '<circle cx="12" cy="12" r="10" fill="currentColor"/>' +
+        '<path d="M8 12.4L10.4 14.8L16.2 9" stroke="var(--shazam-download-complete-check, #fff)" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '</svg>'
+    );
+}
+
 /** Update the player bar action buttons (star / download / skip) to match current track state. */
 function shazamBarUpdateActions() {
     var actionsEl = document.getElementById('shazamBarActions');
@@ -2528,7 +2539,7 @@ function shazamBarUpdateActions() {
     starBtn.disabled = !url || dismissed;
 
     var isLocalFile = shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64);
-    var downloadFilledSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5l-4-4 1.41-1.41L10 13.67l6.59-6.59L18 8.5l-8 8z"/></svg>';
+    var downloadFilledSvg = shazamSvgDownloadComplete(15);
     var downloadOutlineSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
     dlBtn.innerHTML = isLocalFile ? downloadFilledSvg : downloadOutlineSvg;
     dlBtn.disabled = isLocalFile || !url;
@@ -2844,9 +2855,14 @@ function shazamRenderTrackList(data) {
         } else {
             /* Order: star toggle, download, search, then conditional (clear dismissed / undo / skip) */
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-star-action${starToggleInactive}${isPending ? ' shazam-star-action-pending' : ''}" data-action="${starToggleAction}" data-key="${safeAttr(key)}"${starToggleDataAttrs} data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="${escapeHtml(isPending ? 'Processing…' : starToggleTitle)}"${starBtnDisabled}>${starBtnContent}</button>`;
-            const downloadInactive = (row.status === 'have' || row.status === 'skipped' || !url) ? inactive : '';
-            const downloadTitle = row.status === 'have' ? 'Have locally (download not needed)' : row.status === 'skipped' ? 'Skipped' : !url ? 'No Soundeo link' : 'Download AIFF';
-            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></button>`;
+            const downloadHave = row.status === 'have';
+            const downloadInactive = (row.status === 'skipped' || !url) ? inactive : '';
+            const downloadHaveClass = downloadHave ? ' shazam-download-have' : '';
+            const downloadTitle = downloadHave ? 'Downloaded — have locally' : row.status === 'skipped' ? 'Skipped' : !url ? 'No Soundeo link' : 'Download AIFF';
+            const downloadSvg = downloadHave
+                ? shazamSvgDownloadComplete(16)
+                : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadHaveClass}${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}">${downloadSvg}</button>`;
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
             if (isDismissed) {
                 actionsCell += `<button type="button" class="shazam-row-action-btn shazam-clear-dismissed" data-action="clear_dismissed" data-key="${safeAttr(key)}" title="Reset to: have locally, not starred on Soundeo (removes strikethrough, link visible again)">Remove strikethrough</button>`;
