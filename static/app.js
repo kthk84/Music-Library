@@ -2091,6 +2091,26 @@ let shazamBarSoundeoUrl = null;
 let shazamBarArtist = null;
 let shazamBarTitle = null;
 
+/**
+ * Fill playbar artist/title from the row play button. Uses getAttribute because
+ * data-title → dataset.title is unreliable in some browsers; falls back to
+ * parsing data-track-key ("Artist - Title").
+ */
+function shazamBarSyncMetaFromPlayBtn(playBtn) {
+    if (!playBtn) return;
+    var a = (playBtn.getAttribute('data-artist') || '').trim();
+    var t = (playBtn.getAttribute('data-title') || '').trim();
+    var tk = (playBtn.getAttribute('data-track-key') || String(playBtn.dataset.trackKey || '')).trim();
+    var sep = ' - ';
+    var ix = tk.indexOf(sep);
+    if (ix !== -1) {
+        if (!a) a = tk.slice(0, ix).trim();
+        if (!t) t = tk.slice(ix + sep.length).trim();
+    }
+    shazamBarArtist = a;
+    shazamBarTitle = t;
+}
+
 function releaseShazamProxy() {
     if (!shazamCurrentProxyId) return;
     const pid = shazamCurrentProxyId;
@@ -2363,10 +2383,9 @@ function shazamPlayerBarShow(label) {
     }
     const playBtn = shazamPlayingBtn;
     if (playBtn) {
-        shazamBarKey = playBtn.dataset.trackKey || '';
-        shazamBarSoundeoUrl = playBtn.dataset.soundeoUrl || '';
-        shazamBarArtist = playBtn.dataset.artist || '';
-        shazamBarTitle = playBtn.dataset.title || '';
+        shazamBarKey = (playBtn.getAttribute('data-track-key') || playBtn.dataset.trackKey || '').trim();
+        shazamBarSoundeoUrl = (playBtn.getAttribute('data-soundeo-url') || playBtn.dataset.soundeoUrl || '').trim();
+        shazamBarSyncMetaFromPlayBtn(playBtn);
     }
     const barCover = document.getElementById('shazamBarCover');
     if (barCover) {
@@ -2560,6 +2579,10 @@ function shazamBarUpdateActions() {
     var skipBtn = document.getElementById('shazamBarSkipBtn');
     if (!starBtn || !dlBtn || !skipBtn) return;
 
+    if (shazamPlayingBtn && shazamPlayingBtn.isConnected) {
+        shazamBarSyncMetaFromPlayBtn(shazamPlayingBtn);
+    }
+
     var key = shazamBarKey || '';
     var url = shazamBarSoundeoUrl || '';
     var keyVariants = key ? shazamKeyVariants(key) : [];
@@ -2608,7 +2631,13 @@ function shazamBarUpdateActions() {
     var skipSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="6" y2="18"/><line x1="10" y1="6" x2="10" y2="18"/><polygon points="14 8 14 16 20 12"/></svg>';
     skipBtn.innerHTML = skipSvg;
     skipBtn.title = 'Skip track';
-    skipBtn.disabled = !shazamBarArtist && !shazamBarTitle;
+    var sa = (shazamBarArtist || '').trim();
+    var st = (shazamBarTitle || '').trim();
+    var skipEnabled = !!(sa || st);
+    if (!skipEnabled && key) {
+        skipEnabled = key.indexOf(' - ') !== -1;
+    }
+    skipBtn.disabled = !skipEnabled;
 }
 
 function shazamBarToggleStar() {
@@ -2629,8 +2658,21 @@ function shazamBarDownload() {
 }
 
 function shazamBarSkip() {
-    if (!shazamBarArtist && !shazamBarTitle) return;
-    shazamSkipSingleTrack(shazamBarArtist, shazamBarTitle);
+    if (shazamPlayingBtn && shazamPlayingBtn.isConnected) {
+        shazamBarSyncMetaFromPlayBtn(shazamPlayingBtn);
+    }
+    var a = (shazamBarArtist || '').trim();
+    var t = (shazamBarTitle || '').trim();
+    if (!a && !t && shazamBarKey) {
+        var sep = ' - ';
+        var ix = String(shazamBarKey).indexOf(sep);
+        if (ix !== -1) {
+            a = String(shazamBarKey).slice(0, ix).trim();
+            t = String(shazamBarKey).slice(ix + sep.length).trim();
+        }
+    }
+    if (!a && !t) return;
+    shazamSkipSingleTrack(a, t);
 }
 
 function shazamApplyFilters(merged) {
