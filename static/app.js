@@ -1308,6 +1308,16 @@ function shazamAnyRowActionPending() {
     return Object.keys(shazamActionPending || {}).length > 0 || Object.keys(shazamPendingDownload || {}).length > 0;
 }
 
+/** Clear per-row action pending for a track key (and lowercase alias keys). Matches progress poll behavior. */
+function shazamClearActionPendingForKey(k) {
+    if (!k) return;
+    delete shazamActionPending[k];
+    var kl = (k || '').toLowerCase();
+    Object.keys(shazamActionPending).forEach(function (pk) {
+        if ((pk || '').toLowerCase() === kl) delete shazamActionPending[pk];
+    });
+}
+
 /** Omit "N failed" when N is 0 so the bar does not read "0 failed". */
 function shazamFailedSuffix(failed) {
     var f = Number(failed) || 0;
@@ -2597,10 +2607,29 @@ function shazamBarUpdateActions() {
     var keyVariants = key ? shazamKeyVariants(key) : [];
     var starred = keyVariants.some(function (k) { return shazamStarred[k]; });
     var dismissed = keyVariants.some(function (k) { return shazamDismissed[k]; });
+    var starBusy = false;
+    if (key) {
+        starBusy = keyVariants.some(function (k) { return shazamActionPending[k]; });
+        if (!starBusy) {
+            Object.keys(shazamActionPending || {}).forEach(function (pk) {
+                if (shazamActionPending[pk] && shazamTrackKeyMatches(pk, key)) starBusy = true;
+            });
+        }
+    }
 
     var starFilledSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
     var starOutlineSvg = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
-    if (starred && !dismissed) {
+    starBtn.classList.remove('shazam-bar-star-pending');
+    starBtn.removeAttribute('aria-busy');
+    if (starBusy) {
+        var starBusyLabel = starred && !dismissed ? 'Unstarring' : 'Starring';
+        starBtn.innerHTML = '<span class="shazam-btn-spinner shazam-bar-star-spinner" title="' + starBusyLabel + '…" role="status" aria-label="' + starBusyLabel + '"></span>';
+        starBtn.disabled = true;
+        starBtn.title = (starred && !dismissed) ? 'Removing from favorites…' : 'Adding to favorites…';
+        starBtn.setAttribute('aria-busy', 'true');
+        starBtn.classList.add('shazam-bar-star-pending');
+        starBtn.classList.remove('shazam-bar-action-active');
+    } else if (starred && !dismissed) {
         starBtn.innerHTML = starFilledSvg;
         starBtn.title = 'Remove from Soundeo favorites (unstar)';
         starBtn.classList.add('shazam-bar-action-active');
@@ -2609,7 +2638,9 @@ function shazamBarUpdateActions() {
         starBtn.title = url ? 'Add to Soundeo favorites' : 'Find link first (Search)';
         starBtn.classList.remove('shazam-bar-action-active');
     }
-    starBtn.disabled = !url || dismissed;
+    if (!starBusy) {
+        starBtn.disabled = !url || dismissed;
+    }
 
     var isLocalFile = !!(shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64));
     var inHaveList = key ? shazamTrackKeyInHaveLocally(key) : false;
@@ -3356,6 +3387,7 @@ async function shazamUnstarTrack(key, trackUrl, artist, title) {
     if (shazamActionPending[key]) return;
     shazamActionPending[key] = true;
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    shazamBarUpdateActions();
     try {
         const res = await fetch('/api/shazam-sync/unstar-track', {
             method: 'POST',
@@ -3365,8 +3397,9 @@ async function shazamUnstarTrack(key, trackUrl, artist, title) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG);
-            delete shazamActionPending[key];
+            shazamClearActionPendingForKey(key);
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            shazamBarUpdateActions();
             return;
         }
         var unstarQueue = data.unstar_queue || [];
@@ -3380,14 +3413,12 @@ async function shazamUnstarTrack(key, trackUrl, artist, title) {
         } else {
             shazamApplyQueueState(shazamCurrentStarQueue, shazamCurrentSearchQueue, unstarQueue);
         }
-        if (data.status === 'queued') {
-            delete shazamActionPending[key];
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
-        }
+        shazamBarUpdateActions();
     } catch (e) {
         alert('Error: ' + (e.message || 'Request failed'));
-        delete shazamActionPending[key];
+        shazamClearActionPendingForKey(key);
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        shazamBarUpdateActions();
     }
 }
 
@@ -3474,7 +3505,12 @@ async function shazamRemoveFromQueue(btn) {
             shazamCurrentUnstarQueue = data.unstar_queue || [];
         }
         shazamApplyQueueState(shazamCurrentStarQueue, shazamCurrentSearchQueue, shazamCurrentUnstarQueue);
+        if (queue === 'star' || queue === 'unstar') {
+            var rk = (key || ((artist || '') + ' - ' + (title || ''))).trim();
+            if (rk) shazamClearActionPendingForKey(rk);
+        }
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        shazamBarUpdateActions();
     } catch (e) {
         alert('Error: ' + (e.message || 'Request failed'));
     }
@@ -3510,6 +3546,7 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
     if (shazamActionPending[key]) return;
     shazamActionPending[key] = true;
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
+    shazamBarUpdateActions();
     try {
         const res = await fetch('/api/shazam-sync/star-track', {
             method: 'POST',
@@ -3519,8 +3556,9 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {
             alert(data.error || SHAZAM_ACTION_REJECTED_MSG || 'Could not star track');
-            delete shazamActionPending[key];
+            shazamClearActionPendingForKey(key);
             if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            shazamBarUpdateActions();
             return;
         }
         var starQueue = data.star_queue || [];
@@ -3535,13 +3573,11 @@ async function shazamStarTrack(key, trackUrl, artist, title) {
         } else {
             shazamApplyQueueState(starQueue, shazamCurrentSearchQueue, data.unstar_queue !== undefined ? data.unstar_queue : shazamCurrentUnstarQueue);
         }
-        if (data.status === 'queued') {
-            delete shazamActionPending[key];
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
-        }
+        shazamBarUpdateActions();
     } catch (e) {
-        delete shazamActionPending[key];
+        shazamClearActionPendingForKey(key);
         if (shazamLastData) shazamRenderTrackList(shazamLastData);
+        shazamBarUpdateActions();
         alert('Error: ' + (e.message || 'Request failed'));
     }
 }
@@ -4499,25 +4535,18 @@ function shazamPollProgress() {
             }
         }
         var completedKey = p.key || p.current_key;
-        function clearPendingForKey(k) {
-            if (!k) return;
-            delete shazamActionPending[k];
-            var kl = (k || '').toLowerCase();
-            Object.keys(shazamActionPending).forEach(function (pk) {
-                if ((pk || '').toLowerCase() === kl) delete shazamActionPending[pk];
-            });
-        }
         if (!p.running && p.mode === 'star_single' && completedKey) {
+            shazamClearActionPendingForKey(completedKey);
             if (p.starred === true || p.done === 1) {
                 shazamSetStarredLive(completedKey, true);
                 if (p.url) shazamSetUrlLive(completedKey, p.url);
             }
-            clearPendingForKey(completedKey);
         }
         if (!p.running && p.mode === 'unstar_single' && completedKey) {
+            shazamClearActionPendingForKey(completedKey);
             shazamSetStarredLive(completedKey, false);
-            clearPendingForKey(completedKey);
         }
+        shazamBarUpdateActions();
         shazamSetProgressClickable(p.running && !!p.current_key);
         if (p.running) {
             shazamProgressPollCount = (shazamProgressPollCount || 0) + 1;
