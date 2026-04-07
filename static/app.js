@@ -1436,26 +1436,46 @@ function shazamTrackKeyMatches(serverKey, rowKey) {
     return false;
 }
 
-/** True if this track key is in the current have_locally list (playing Soundeo preview still counts as “have file”). */
+/**
+ * True if have_locally has an entry with the same Artist - Title as this key (case-insensitive).
+ * Intentionally strict: no fuzzy/cross-variant match, so a To DL row is never shown as “have”
+ * just because another local file looks similar (e.g. different remix).
+ */
 function shazamTrackKeyInHaveLocally(trackKey) {
     if (!trackKey || !shazamLastData || !Array.isArray(shazamLastData.have_locally)) return false;
+    var tkl = String(trackKey).trim().toLowerCase();
+    if (!tkl) return false;
     var list = shazamLastData.have_locally;
-    var variants = shazamKeyVariants(trackKey);
-    var variantSet = {};
-    for (var v = 0; v < variants.length; v++) {
-        var q = variants[v];
-        if (!q) continue;
-        variantSet[q] = true;
-        variantSet[q.toLowerCase()] = true;
-    }
     for (var i = 0; i < list.length; i++) {
         var t = list[i];
         var rowKey = ((t.artist || '') + ' - ' + (t.title || '')).trim();
-        if (!rowKey) continue;
-        if (variantSet[rowKey] || variantSet[rowKey.toLowerCase()]) return true;
-        if (shazamTrackKeyMatches(trackKey, rowKey)) return true;
+        if (rowKey.toLowerCase() === tkl) return true;
     }
     return false;
+}
+
+/** Base64-encode a filesystem path for open-file-location API (UTF-8). */
+function shazamPathB64FromFilepath(filepath) {
+    if (!filepath) return '';
+    var pathNorm = String(filepath).replace(/\\/g, '/');
+    try {
+        return pathNorm ? btoa(unescape(encodeURIComponent(pathNorm))) : '';
+    } catch (e) {
+        return '';
+    }
+}
+
+/** Find have_locally filepath for exact key match; return path_b64 or ''. */
+function shazamPathB64ForHaveKey(trackKey) {
+    if (!trackKey || !shazamLastData || !Array.isArray(shazamLastData.have_locally)) return '';
+    var tkl = String(trackKey).trim().toLowerCase();
+    var list = shazamLastData.have_locally;
+    for (var i = 0; i < list.length; i++) {
+        var t = list[i];
+        var rowKey = ((t.artist || '') + ' - ' + (t.title || '')).trim();
+        if (rowKey.toLowerCase() === tkl && t.filepath) return shazamPathB64FromFilepath(t.filepath);
+    }
+    return '';
 }
 
 function shazamRowActionPending(key) {
@@ -2888,8 +2908,8 @@ function shazamBarUpdateActions() {
         dlBtn.classList.add('shazam-bar-dl-pending');
     } else if (haveFileUi) {
         dlBtn.innerHTML = shazamSvgDownloadHaveWhite(16);
-        dlBtn.disabled = true;
-        dlBtn.title = 'Downloaded — have locally';
+        dlBtn.disabled = false;
+        dlBtn.title = 'Have locally — click: Download again or Show locally';
         dlBtn.removeAttribute('aria-busy');
         dlBtn.classList.add('shazam-bar-dl-have');
     } else {
@@ -2923,8 +2943,25 @@ function shazamBarToggleStar() {
     }
 }
 
-function shazamBarDownload() {
-    if (!shazamBarKey || !shazamBarSoundeoUrl) return;
+function shazamBarDownload(ev) {
+    if (!shazamBarKey) return;
+    var dlBtn = document.getElementById('shazamBarDownloadBtn');
+    var isHave = dlBtn && dlBtn.classList.contains('shazam-bar-dl-have');
+    if (isHave) {
+        var pathB64 = '';
+        if (shazamPlayingBtn && shazamPlayingBtn.dataset && (shazamPlayingBtn.dataset.pathB64 || '').trim()) {
+            pathB64 = (shazamPlayingBtn.dataset.pathB64 || '').trim();
+        }
+        if (!pathB64) pathB64 = shazamPathB64ForHaveKey(shazamBarKey);
+        var posEv = ev;
+        if (!posEv || typeof posEv.clientX !== 'number') {
+            var r = dlBtn.getBoundingClientRect();
+            posEv = { clientX: r.left + r.width / 2, clientY: r.bottom + 6 };
+        }
+        shazamDownloadHaveMenuAt(posEv, shazamBarKey, pathB64);
+        return;
+    }
+    if (!shazamBarSoundeoUrl) return;
     shazamDownloadTrack(shazamBarKey);
 }
 
@@ -3178,11 +3215,17 @@ function shazamRenderTrackList(data) {
             const manualIcon = showManualCheck
                 ? '<span class="manual-check-icon" title="Soundeo link is Original Mix / Radio Edit \u2013 check for Extended" data-track-key="' + escapedKey + '" onclick="shazamDismissManualCheck(this)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg></span>'
                 : '';
-            const sPct = soundeoMatchScore != null ? Math.round(soundeoMatchScore * 100) : null;
+            var _rawSc = soundeoMatchScore != null ? Number(soundeoMatchScore) : NaN;
+            const sPct = soundeoMatchScore != null && !Number.isNaN(_rawSc)
+                ? Math.min(100, Math.round(_rawSc > 1 ? _rawSc : _rawSc * 100))
+                : null;
             const scoreHtml = sPct != null ? '<span class="shazam-match-pct">' + sPct + '%</span>' : '';
             matchCell = '<td class="shazam-match-col">' + (scoreHtml || manualIcon || '\u2014') + '</td>';
         } else {
-            const pct = score != null ? Math.round(score * 100) : null;
+            var _rawHave = score != null ? Number(score) : NaN;
+            const pct = score != null && !Number.isNaN(_rawHave)
+                ? Math.min(100, Math.round(_rawHave > 1 ? _rawHave : _rawHave * 100))
+                : null;
             matchCell = '<td class="shazam-match-col">' + (pct != null ? '<span class="shazam-match-pct">' + pct + '%</span>' : '\u2014') + '</td>';
         }
 
@@ -3262,10 +3305,13 @@ function shazamRenderTrackList(data) {
             const downloadHaveClass = downloadHave ? ' shazam-download-have' : '';
             const downloadBusyRow = !!(shazamPendingDownload[key] || (shazamDownloadProgressSnapshot.running && shazamTrackKeyMatches(shazamDownloadProgressSnapshot.current_key, key)));
             const downloadPendingClass = downloadBusyRow ? ' shazam-download-action-pending' : '';
+            const downloadPathB64 = downloadHave
+                ? (row.filepath ? shazamPathB64FromFilepath(row.filepath) : shazamPathB64ForHaveKey(key))
+                : '';
             const downloadTitle = downloadBusyRow
                 ? 'Downloading…'
                 : downloadHave
-                    ? 'Downloaded — have locally'
+                    ? 'Have locally — click: Download again or Show locally'
                     : row.status === 'skipped'
                         ? 'Skipped'
                         : !url
@@ -3276,9 +3322,10 @@ function shazamRenderTrackList(data) {
                 : downloadHave
                     ? shazamSvgDownloadHaveWhite(17)
                     : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-            const downloadBtnDisabled = downloadBusyRow || downloadHave ? ' disabled' : '';
+            const downloadBtnDisabled = downloadBusyRow ? ' disabled' : '';
             const dlAriaBusy = downloadBusyRow ? ' aria-busy="true"' : '';
-            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadHaveClass}${downloadPendingClass}${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}"${downloadBtnDisabled}${dlAriaBusy}>${downloadSvg}</button>`;
+            const dlPathAttr = downloadPathB64 ? ` data-path-b64="${safeAttr(downloadPathB64)}"` : '';
+            actionsCell += `<button type="button" class="shazam-row-action-btn shazam-download-action${downloadHaveClass}${downloadPendingClass}${downloadInactive}" data-action="download" data-key="${safeAttr(key)}" title="${escapeHtml(downloadTitle)}"${downloadBtnDisabled}${dlAriaBusy}${dlPathAttr}>${downloadSvg}</button>`;
             actionsCell += `<button type="button" class="shazam-row-action-btn shazam-search-action${searchInactive}" data-action="search" data-key="${safeAttr(key)}" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>`;
             if (isDismissed) {
                 actionsCell += `<button type="button" class="shazam-row-action-btn shazam-clear-dismissed" data-action="clear_dismissed" data-key="${safeAttr(key)}" title="Reset to: have locally, not starred on Soundeo (removes strikethrough, link visible again)">Remove strikethrough</button>`;
@@ -4656,6 +4703,109 @@ function shazamScrollCurrentRowToCenter(highlight) {
     }
 }
 
+/** Click black “have” download button: menu — Download again / Show locally. */
+function shazamDownloadHaveMenuClose() {
+    var menu = document.getElementById('shazamDownloadHaveMenu');
+    if (menu) {
+        menu.style.display = 'none';
+        menu.innerHTML = '';
+    }
+    document.removeEventListener('click', shazamDownloadHaveMenuClose);
+}
+
+function shazamOpenPathB64InFinder(pathB64) {
+    if (!pathB64) return;
+    fetch('/api/shazam-sync/open-file-location', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path_b64: pathB64 }),
+    })
+        .then(r => r.json())
+        .then(d => {
+            if (d.error) alert(d.error);
+            else if (d.warning) alert('Show locally: ' + d.warning);
+        })
+        .catch(() => {});
+}
+
+/**
+ * @param {MouseEvent} ev
+ * @param {string} key Track key
+ * @param {string} pathB64 Full file path as from btoa(utf-8 path)
+ */
+function shazamDownloadHaveMenuAt(ev, key, pathB64) {
+    var menu = document.getElementById('shazamDownloadHaveMenu');
+    if (!menu || !ev) return;
+    shazamDownloadHaveMenuClose();
+    menu.innerHTML = '';
+
+    var keyLower = (key || '').toLowerCase();
+    var keyNorm = key && key.indexOf(' (') !== -1 ? key.substring(0, key.indexOf(' (')).trim() : key;
+    var keyNormLower = (keyNorm || '').toLowerCase();
+    var keyDeep = (shazamKeyVariants(key || '') || []).slice(-1)[0] || null;
+    var trackUrl = shazamLookupMap(shazamTrackUrls, key, keyLower, keyNorm, keyNormLower, keyDeep)
+        || (shazamLastData && shazamLastData.urls ? shazamLookupMap(shazamLastData.urls, key, keyLower, keyNorm, keyNormLower, keyDeep) : undefined)
+        || null;
+
+    var items = [];
+    items.push({
+        label: 'Download again',
+        disabled: !trackUrl,
+        action: function () {
+            if (trackUrl) shazamDownloadTrack(key);
+        },
+    });
+    if (pathB64) {
+        items.push({
+            label: 'Show locally',
+            disabled: false,
+            action: function () { shazamOpenPathB64InFinder(pathB64); },
+        });
+    }
+
+    items.forEach(function (item) {
+        var span = document.createElement('button');
+        span.type = 'button';
+        span.className = 'shazam-play-context-menu-item';
+        span.textContent = item.label;
+        if (item.disabled) {
+            span.disabled = true;
+            span.classList.add('shazam-context-menu-item-disabled');
+        } else {
+            span.addEventListener('click', function (e) {
+                e.preventDefault();
+                item.action();
+                shazamDownloadHaveMenuClose();
+            });
+        }
+        menu.appendChild(span);
+    });
+
+    menu.style.display = 'block';
+    var pad = 8;
+    var x = ev.clientX;
+    var y = ev.clientY;
+    menu.style.left = '-9999px';
+    menu.style.top = '0px';
+    var rect = menu.getBoundingClientRect();
+    if (x + rect.width + pad > window.innerWidth) x = window.innerWidth - rect.width - pad;
+    if (y + rect.height + pad > window.innerHeight) y = window.innerHeight - rect.height - pad;
+    if (x < pad) x = pad;
+    if (y < pad) y = pad;
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    setTimeout(function () { document.addEventListener('click', shazamDownloadHaveMenuClose); }, 0);
+}
+
+function shazamDownloadHaveMenuFromButton(ev, btn) {
+    if (!btn || !ev) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    var key = (btn.dataset.key || '').trim();
+    var pathB64 = (btn.dataset.pathB64 || '').trim();
+    shazamDownloadHaveMenuAt(ev, key, pathB64);
+}
+
 /** Decode base64 path (same encoding as backend: UTF-8 then b64). Returns path string or empty. */
 function shazamDecodePathB64(pathB64) {
     if (!pathB64) return '';
@@ -4671,6 +4821,7 @@ function shazamDecodePathB64(pathB64) {
 
 /** Right-click play icon: show context menu with "Open file location" and/or "Open on Soundeo" based on context. */
 function shazamPlayContextMenu(ev, btn) {
+    shazamDownloadHaveMenuClose();
     const menu = document.getElementById('shazamPlayContextMenu');
     if (!menu) return;
     menu.innerHTML = '';
@@ -5210,6 +5361,10 @@ document.addEventListener('DOMContentLoaded', function () {
         } else if (action === 'star') {
             shazamStarTrack(btn.dataset.key, btn.dataset.trackUrl, btn.dataset.artist, btn.dataset.title);
         } else if (action === 'download') {
+            if (btn.classList.contains('shazam-download-have') && !btn.classList.contains('shazam-download-action-pending')) {
+                shazamDownloadHaveMenuFromButton(e, btn);
+                return;
+            }
             shazamDownloadTrack(btn.dataset.key);
         }
     });

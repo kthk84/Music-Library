@@ -1511,6 +1511,12 @@ button[onclick*="revertLookup"] {
 .shazam-play-context-menu-item:hover {
     background: var(--bg-secondary);
 }
+.shazam-context-menu-item-disabled,
+.shazam-play-context-menu-item.shazam-context-menu-item-disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    pointer-events: none;
+}
 .shazam-play-context-menu-path {
     padding: var(--sp-2) var(--sp-3);
     font-size: 11px;
@@ -2269,17 +2275,21 @@ button[onclick*="revertLookup"] {
     color: var(--accent);
     border-color: var(--accent);
 }
-.shazam-bar-action-btn.shazam-bar-dl-have {
+.shazam-bar-action-btn.shazam-bar-dl-have:not(:disabled) {
     background: var(--shazam-dl-have-bg);
     color: var(--shazam-dl-have-fg);
     border-color: var(--shazam-dl-have-bg);
-    cursor: default;
+    cursor: pointer;
+}
+.shazam-bar-action-btn.shazam-bar-dl-have:not(:disabled):hover {
+    filter: brightness(1.08);
 }
 .shazam-bar-action-btn.shazam-bar-dl-have:disabled {
     opacity: 1;
     background: var(--shazam-dl-have-bg, #000000);
     color: var(--shazam-dl-have-fg, #ffffff);
     border-color: var(--shazam-dl-have-bg, #000000);
+    cursor: default;
 }
 .shazam-bar-action-btn.shazam-bar-dl-pending:disabled,
 .shazam-bar-action-btn.shazam-bar-star-pending:disabled {
@@ -2512,7 +2522,18 @@ button[onclick*="revertLookup"] {
 .shazam-download-action:not(.shazam-row-action-inactive) {
     color: #1a1a1a;
 }
-.shazam-download-action.shazam-download-have,
+.shazam-download-action.shazam-download-have:not(:disabled) {
+    background: var(--shazam-dl-have-bg);
+    color: var(--shazam-dl-have-fg);
+    border-color: var(--shazam-dl-have-bg);
+    opacity: 1;
+    pointer-events: auto;
+    cursor: pointer;
+    -webkit-text-fill-color: var(--shazam-dl-have-fg);
+}
+.shazam-download-action.shazam-download-have:not(:disabled):hover {
+    filter: brightness(1.08);
+}
 .shazam-download-action.shazam-download-have:disabled {
     background: var(--shazam-dl-have-bg);
     color: var(--shazam-dl-have-fg);
@@ -2522,11 +2543,11 @@ button[onclick*="revertLookup"] {
     cursor: default;
     -webkit-text-fill-color: var(--shazam-dl-have-fg);
 }
-.shazam-download-action.shazam-download-have:hover,
 .shazam-download-action.shazam-download-have:disabled:hover {
     background: var(--shazam-dl-have-bg);
     color: var(--shazam-dl-have-fg);
     border-color: var(--shazam-dl-have-bg);
+    filter: none;
 }
 .shazam-row-dismissed .shazam-download-action.shazam-download-have,
 .shazam-row-dismissed .shazam-download-action.shazam-download-have:disabled {
