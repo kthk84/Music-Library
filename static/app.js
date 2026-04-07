@@ -3120,6 +3120,29 @@ function shazamApplyFilters(merged) {
     return out;
 }
 
+/** Clears inline pointer-events from hover “nudge” helpers — safe to call anytime (idempotent). */
+function shazamClearPointerEventNudgeResiduals() {
+    var wrap = document.getElementById('shazamTrackList');
+    if (wrap) wrap.style.pointerEvents = '';
+    var bar = document.getElementById('shazamPlayerBar');
+    if (bar) {
+        var ch = bar.children;
+        for (var i = 0; i < ch.length; i++) {
+            ch[i].style.pointerEvents = '';
+        }
+    }
+}
+
+var shazamPointerNudgeSafetyTimer = null;
+/** If rAF is delayed (background tab) or a callback throws, none can stick — clear shortly after last nudge. */
+function shazamSchedulePointerNudgeSafetyClear() {
+    if (shazamPointerNudgeSafetyTimer) clearTimeout(shazamPointerNudgeSafetyTimer);
+    shazamPointerNudgeSafetyTimer = setTimeout(function () {
+        shazamPointerNudgeSafetyTimer = null;
+        shazamClearPointerEventNudgeResiduals();
+    }, 400);
+}
+
 /**
  * Full table innerHTML replaces nodes under the cursor; Chromium often keeps a stale :hover chain
  * until the pointer moves. Briefly toggling pointer-events on the list wrapper forces a hit-test
@@ -3131,11 +3154,8 @@ function shazamNudgeHoverAfterTrackTableReplace() {
     wrap.style.pointerEvents = 'none';
     requestAnimationFrame(function () {
         requestAnimationFrame(function () {
-            /* Always clear inline style — do not restore a captured "prev". Multiple nudges in one
-             * turn (e.g. barUpdate → render+barUpdate → barUpdate after download) can run while
-             * pointer-events is still "none"; a second nudge would save prev==="none" and a later
-             * rAF would leave the UI stuck non-interactive. */
-            wrap.style.pointerEvents = '';
+            shazamClearPointerEventNudgeResiduals();
+            shazamSchedulePointerNudgeSafetyClear();
         });
     });
 }
@@ -3156,12 +3176,8 @@ function shazamNudgeHoverAfterPlaybarUpdate() {
     if (!toRestore.length) return;
     requestAnimationFrame(function () {
         requestAnimationFrame(function () {
-            for (var j = 0; j < toRestore.length; j++) {
-                /* Same as track-list nudge: never restore a captured previous value — overlapping
-                 * nudges (download does barUpdate → render+barUpdate → barUpdate) can read
-                 * pointer-events==="none" and re-apply it after a good restore. */
-                toRestore[j].style.pointerEvents = '';
-            }
+            shazamClearPointerEventNudgeResiduals();
+            shazamSchedulePointerNudgeSafetyClear();
         });
     });
 }
@@ -5319,6 +5335,10 @@ document.addEventListener('DOMContentLoaded', function () {
             });
         }
         shazamBootstrapLoad();
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') shazamClearPointerEventNudgeResiduals();
+        });
+        window.shazamClearPointerEventNudgeResiduals = shazamClearPointerEventNudgeResiduals;
         var favoritesDropdownWrap = document.querySelector('.favorites-dropdown-wrap');
         var favoritesDropdownBtn = document.getElementById('shazamFavoritesDropdownBtn');
         var favoritesDropdownMenu = document.getElementById('shazamFavoritesDropdownMenu');
