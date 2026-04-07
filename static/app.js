@@ -3386,7 +3386,9 @@ function shazamKeyVariants(key) {
     const keyLower = key.toLowerCase();
     const keyNorm = key.indexOf(' (') !== -1 ? key.substring(0, key.indexOf(' (')).trim() : key;
     const keyNormLower = keyNorm.toLowerCase();
-    const keyDeep = (() => { let s = keyNormLower.replace(/ & /g, ', '); const d = s.indexOf(' - '); if (d !== -1) { const arts = s.substring(0, d).split(', ').map(a => a.trim()).filter(Boolean).sort().join(', '); s = arts + ' - ' + s.substring(d + 3); } return s; })();
+    // Fold diacritics so 'Âme' matches 'Ame' (backend deep normalization also folds).
+    const keyNormFold = (keyNormLower.normalize ? keyNormLower.normalize('NFKD') : keyNormLower).replace(/[\u0300-\u036f]/g, '');
+    const keyDeep = (() => { let s = keyNormFold.replace(/ & /g, ', '); const d = s.indexOf(' - '); if (d !== -1) { const arts = s.substring(0, d).split(', ').map(a => a.trim()).filter(Boolean).sort().join(', '); s = arts + ' - ' + s.substring(d + 3); } return s; })();
     return [key, keyLower, keyNorm, keyNormLower, keyDeep];
 }
 
