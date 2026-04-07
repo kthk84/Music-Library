@@ -3668,7 +3668,11 @@ def _start_next_single_search():
     if not artist and not title:
         _start_next_single_search()
         return
-    app._shazam_sync_progress = {'running': True, 'message': f'Searching: {artist} - {title}', 'mode': 'search_single'}
+    _ss_key = f"{artist} - {title}"
+    app._shazam_sync_progress = {
+        'running': True, 'message': f'Searching: {artist} - {title}', 'mode': 'search_single',
+        'current_key': _ss_key,
+    }
     thread = threading.Thread(target=_run_search_soundeo_single, args=(artist, title), daemon=True)
     thread.start()
 
@@ -3685,10 +3689,16 @@ def _run_search_soundeo_single(artist: str, title: str):
     key = f"{artist} - {title}"
 
     try:
-        app._shazam_sync_progress = {'running': True, 'message': f'Searching: {artist} - {title}', 'mode': 'search_single'}
+        app._shazam_sync_progress = {
+            'running': True, 'message': f'Searching: {artist} - {title}', 'mode': 'search_single',
+            'current_key': key,
+        }
         driver = _get_driver(headless=not headed, use_persistent_profile=True)
         if not load_cookies(driver, cookies_path):
-            app._shazam_sync_progress = {'running': False, 'error': 'No saved session. Save Soundeo session first.', 'mode': 'search_single'}
+            app._shazam_sync_progress = {
+                'running': False, 'error': 'No saved session. Save Soundeo session first.', 'mode': 'search_single',
+                'key': key, 'current_key': key,
+            }
             _graceful_quit(driver)
             _start_next_single_search()
             return
@@ -3813,22 +3823,27 @@ def _run_search_soundeo_single(artist: str, title: str):
             _prog_cover_hashes = {}
             if key in status.get('cover_hashes', {}):
                 _prog_cover_hashes[key] = status['cover_hashes'][key]
-            app._shazam_sync_progress = {
+            _found_prog = {
                 'running': False, 'done': 1, 'key': key, 'url': out[0],
                 'soundeo_title': (out[1] if len(out) > 1 else '') or key,
                 'starred': starred,
                 'cover_hashes': _prog_cover_hashes,
                 'message': f'Found: {artist} - {title}', 'mode': 'search_single',
+                'current_key': key,
             }
+            if match_sc is not None:
+                _found_prog['soundeo_match_score'] = round(match_sc, 3)
+            app._shazam_sync_progress = _found_prog
         else:
             err = 'Soundeo session expired. Save session again.' if not_logged_in else 'Not found on Soundeo'
             app._shazam_sync_progress = {
                 'running': False, 'done': 0, 'failed': 1, 'key': key,
                 'error': err, 'message': err if not_logged_in else f'Not found: {artist} - {title}', 'mode': 'search_single',
+                'current_key': key,
             }
         _start_next_single_search()
     except Exception as e:
-        app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'search_single'}
+        app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'search_single', 'key': key}
         _start_next_single_search()
 
 
@@ -4090,7 +4105,10 @@ def shazam_search_soundeo_single():
             })
         app._shazam_single_search_queue = queue_after
     a, t = next_item['artist'], next_item['title']
-    app._shazam_sync_progress = {'running': True, 'message': f'Searching: {a} - {t}', 'mode': 'search_single'}
+    _sk = f"{a} - {t}"
+    app._shazam_sync_progress = {
+        'running': True, 'message': f'Searching: {a} - {t}', 'mode': 'search_single', 'current_key': _sk,
+    }
     thread = threading.Thread(target=_run_search_soundeo_single, args=(a, t), daemon=True)
     thread.start()
     return jsonify({'status': 'started', 'message': f'Searching Soundeo for: {a} - {t}', 'single_search_queue': [{'artist': q['artist'], 'title': q['title']} for q in queue_after]})
