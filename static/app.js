@@ -2398,6 +2398,53 @@ function shazamFindPlayBtnByTrackKey(trackKey) {
     return null;
 }
 
+/** Same identity as shazamCurrentlyPlaying (local stream URL or raw Soundeo track page URL). */
+function shazamPlayBtnPlaybackKey(btn) {
+    if (!btn) return null;
+    var dB64 = (btn.dataset.dirB64 || '').trim();
+    var f = btn.dataset.file;
+    var pB64 = (btn.dataset.pathB64 || '').trim();
+    if (dB64 || pB64) {
+        return (dB64 && f != null)
+            ? '/api/shazam-sync/stream-file?dir=' + encodeURIComponent(dB64) + '&file=' + encodeURIComponent(f)
+            : (pB64 ? '/api/shazam-sync/stream-file?path=' + encodeURIComponent(pB64) : null);
+    }
+    var su = (btn.getAttribute('data-soundeo-url') || (btn.dataset && btn.dataset.soundeoUrl) || '').trim();
+    return su || null;
+}
+
+/**
+ * After innerHTML rebuild, shazamPlayingBtn may be detached but still truthy; dataset on detached
+ * nodes made the bar show "have file" for the wrong track. Re-find the row button by current stream.
+ */
+function shazamReattachPlayingButton() {
+    if (!shazamCurrentlyPlaying || !shazamAudioEl) return false;
+    var list = document.getElementById('shazamTrackList');
+    if (!list) return false;
+    if (shazamPlayingBtn && shazamPlayingBtn.isConnected && shazamPlayBtnPlaybackKey(shazamPlayingBtn) === shazamCurrentlyPlaying) {
+        return true;
+    }
+    var all = list.querySelectorAll('.shazam-play-btn');
+    for (var i = 0; i < all.length; i++) {
+        var pk = shazamPlayBtnPlaybackKey(all[i]);
+        if (pk && pk === shazamCurrentlyPlaying) {
+            shazamPlayingBtn = all[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Align playbar track key / Soundeo URL / artist-title with the DOM row for what's playing. */
+function shazamSyncBarMetaFromPlayingButton() {
+    if (!shazamReattachPlayingButton()) return;
+    var pb = shazamPlayingBtn;
+    if (!pb || !pb.isConnected) return;
+    shazamBarKey = (pb.getAttribute('data-track-key') || pb.dataset.trackKey || '').trim();
+    shazamBarSoundeoUrl = (pb.getAttribute('data-soundeo-url') || pb.dataset.soundeoUrl || '').trim();
+    shazamBarSyncMetaFromPlayBtn(pb);
+}
+
 /** Cancel any pending next-track prefetch and release its resources. */
 function shazamCancelNextBuffer() {
     var buf = shazamNextBuffer;
@@ -2844,15 +2891,14 @@ function shazamSvgDownloadHaveWhite(size) {
 function shazamBarUpdateActions() {
     var actionsEl = document.getElementById('shazamBarActions');
     if (!actionsEl) return;
+    if (shazamCurrentlyPlaying && shazamAudioEl) {
+        shazamSyncBarMetaFromPlayingButton();
+    }
     actionsEl.style.display = shazamBarKey ? '' : 'none';
     var starBtn = document.getElementById('shazamBarStarBtn');
     var dlBtn = document.getElementById('shazamBarDownloadBtn');
     var skipBtn = document.getElementById('shazamBarSkipBtn');
     if (!starBtn || !dlBtn || !skipBtn) return;
-
-    if (shazamPlayingBtn && shazamPlayingBtn.isConnected) {
-        shazamBarSyncMetaFromPlayBtn(shazamPlayingBtn);
-    }
 
     var key = shazamBarKey || '';
     var url = shazamBarSoundeoUrl || '';
@@ -2894,7 +2940,7 @@ function shazamBarUpdateActions() {
         starBtn.disabled = !url || dismissed;
     }
 
-    var isLocalFile = !!(shazamPlayingBtn && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64));
+    var isLocalFile = !!(shazamPlayingBtn && shazamPlayingBtn.isConnected && (shazamPlayingBtn.dataset.dirB64 || shazamPlayingBtn.dataset.pathB64));
     var inHaveList = key ? shazamTrackKeyInHaveLocally(key) : false;
     var haveFileUi = isLocalFile || inHaveList;
     var downloadOutlineSvg = '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
@@ -2934,6 +2980,7 @@ function shazamBarUpdateActions() {
 }
 
 function shazamBarToggleStar() {
+    if (shazamCurrentlyPlaying && shazamAudioEl) shazamSyncBarMetaFromPlayingButton();
     if (!shazamBarKey) return;
     var keyVariants = shazamKeyVariants(shazamBarKey);
     var starred = keyVariants.some(function (k) { return shazamStarred[k]; });
@@ -2946,6 +2993,7 @@ function shazamBarToggleStar() {
 }
 
 function shazamBarDownload(ev) {
+    if (shazamCurrentlyPlaying && shazamAudioEl) shazamSyncBarMetaFromPlayingButton();
     if (!shazamBarKey) return;
     var dlBtn = document.getElementById('shazamBarDownloadBtn');
     var isHave = dlBtn && dlBtn.classList.contains('shazam-bar-dl-have');
@@ -3399,26 +3447,18 @@ function shazamRenderTrackList(data) {
     el.innerHTML = html;
     if (selectionBar) selectionBar.style.display = 'none';
     shazamUpdateSelectionCount();
+    var foundPlaying = null;
     if (shazamCurrentlyPlaying && shazamAudioEl) {
         const allPlayBtns = el.querySelectorAll('.shazam-play-btn');
         for (const b of allPlayBtns) {
-            const dB64 = (b.dataset.dirB64 || '').trim();
-            const f = b.dataset.file;
-            const pB64 = (b.dataset.pathB64 || '').trim();
-            let bKey;
-            if (dB64 || pB64) {
-                bKey = (dB64 && f != null)
-                    ? '/api/shazam-sync/stream-file?dir=' + encodeURIComponent(dB64) + '&file=' + encodeURIComponent(f)
-                    : (pB64 ? '/api/shazam-sync/stream-file?path=' + encodeURIComponent(pB64) : null);
-            } else {
-                bKey = b.dataset.soundeoUrl || null;
-            }
-            if (bKey && bKey === shazamCurrentlyPlaying) {
-                shazamPlayingBtn = b;
+            const pk = shazamPlayBtnPlaybackKey(b);
+            if (pk && pk === shazamCurrentlyPlaying) {
+                foundPlaying = b;
                 break;
             }
         }
     }
+    shazamPlayingBtn = foundPlaying;
     shazamBarUpdateActions();
     shazamNudgeHoverAfterTrackTableReplace();
     shazamRestoreSyncProgress(progressCaptured);
