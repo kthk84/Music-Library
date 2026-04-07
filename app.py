@@ -4535,7 +4535,17 @@ def _set_url_and_track_id(status: Dict, key: str, url: str, cookies_path: Option
     """Set track URL and resolve/store track ID so we have both (URL for preview/crawler, ID for HTTP). Single source of truth: status cache."""
     if not url or not key:
         return
+    # Before we set, capture whether this key already had a persisted "found" URL.
+    had_url = bool(_get_url_for_key(status, key))
     _set_url_variants(status, key, url)
+    # Ensure durability: if a URL is set outside the explicit Search flow (e.g. favorites sync),
+    # record it as a "found" outcome so it survives rebuilds/restarts via search_outcomes replay.
+    if not had_url:
+        try:
+            from shazam_cache import log_search_outcome
+            log_search_outcome(key, found=True, url=url, status_to_update=status)
+        except Exception:
+            pass
     if not cookies_path:
         return
     key_lower = key.lower() if isinstance(key, str) else ''
