@@ -387,6 +387,60 @@ def save_status_cache(status: Dict) -> None:
 _MAX_SEARCH_OUTCOMES = 100_000
 
 
+def _strip_all_parens(key: str) -> str:
+    """Remove all (...) and [...] segments, collapse spaces. Mirrors app._strip_all_parens."""
+    import re
+    s = (key or "").strip()
+    s = re.sub(r'\s*\([^)]*\)\s*', ' ', s)
+    s = re.sub(r'\s*\[[^\]]*\]\s*', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s or key or ""
+
+
+def _deep_norm_key(key: str) -> str:
+    """Deep normalize: strip parens, lowercase, unify '&'/',' separators, sort artists. Mirrors app._deep_norm_key."""
+    s = _strip_all_parens(key).lower().replace(' & ', ', ')
+    if ' - ' in s:
+        artist_part, title_part = s.split(' - ', 1)
+        artists = sorted(a.strip() for a in artist_part.split(', ') if a.strip())
+        s = ', '.join(artists) + ' - ' + title_part
+    return s
+
+
+def _url_key_variants(key: str) -> List[str]:
+    """Key variants used for stable URL persistence across refresh/rebuilds."""
+    if not key or not isinstance(key, str):
+        return []
+    k = key.strip()
+    if not k:
+        return []
+    norm = _strip_all_parens(k).strip()
+    deep = _deep_norm_key(k)
+    out = [
+        k,
+        k.lower(),
+        norm,
+        norm.lower(),
+        deep,
+        deep.lower(),
+    ]
+    # dot-stripped variants help match 'R.E.Zarin' style keys
+    out += [
+        norm.replace('.', ''),
+        norm.replace('.', '').lower(),
+        deep.replace('.', ''),
+        deep.replace('.', '').lower(),
+    ]
+    # Deduplicate while preserving order
+    seen = set()
+    out2 = []
+    for v in out:
+        if v and v not in seen:
+            seen.add(v)
+            out2.append(v)
+    return out2
+
+
 def _replay_search_outcomes(log: List[Dict], existing_urls: Optional[Dict] = None) -> tuple:
     """Replay search_outcomes list (newest per key wins). Returns (urls, not_found). Merge in existing_urls for keys not in log (e.g. sync-origin)."""
     urls = {}
@@ -399,8 +453,8 @@ def _replay_search_outcomes(log: List[Dict], existing_urls: Optional[Dict] = Non
         if action == "f":
             url = e.get("u")
             if url:
-                urls[key] = url
-                urls[key.lower()] = url
+                for vk in _url_key_variants(key):
+                    urls[vk] = url
                 not_found.pop(key, None)
                 not_found.pop(key.lower(), None)
         elif action == "n":
