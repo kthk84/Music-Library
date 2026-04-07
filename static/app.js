@@ -3043,6 +3043,23 @@ function shazamApplyFilters(merged) {
     return out;
 }
 
+/**
+ * Full table innerHTML replaces nodes under the cursor; Chromium often keeps a stale :hover chain
+ * until the pointer moves. Briefly toggling pointer-events on the list wrapper forces a hit-test
+ * so action buttons show rollover again while another row is busy (download/search/etc.).
+ */
+function shazamNudgeHoverAfterTrackTableReplace() {
+    var wrap = document.getElementById('shazamTrackList');
+    if (!wrap) return;
+    var prev = wrap.style.pointerEvents;
+    wrap.style.pointerEvents = 'none';
+    requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+            wrap.style.pointerEvents = prev || '';
+        });
+    });
+}
+
 function shazamRenderTrackList(data) {
     const progressCaptured = shazamCaptureSyncProgress();
     if (!data) data = {};
@@ -3388,6 +3405,7 @@ function shazamRenderTrackList(data) {
         }
     }
     shazamBarUpdateActions();
+    shazamNudgeHoverAfterTrackTableReplace();
     shazamRestoreSyncProgress(progressCaptured);
 }
 

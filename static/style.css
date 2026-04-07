@@ -1794,6 +1794,11 @@ button[onclick*="revertLookup"] {
     content-visibility: auto;
     contain-intrinsic-size: 32px;
 }
+/* Chromium: keep hovered/focused rows fully painted so child action buttons get correct :hover after updates */
+.shazam-track-table tbody tr:hover,
+.shazam-track-table tbody tr:focus-within {
+    content-visibility: visible;
+}
 .shazam-track-table tbody tr:hover {
     background: var(--bg-tertiary);
 }
