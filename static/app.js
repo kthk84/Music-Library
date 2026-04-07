@@ -2730,6 +2730,7 @@ function shazamPlayerBarPlayPause() {
         if (playPauseBtn) { playPauseBtn.innerHTML = PLAY_ICON_BAR; playPauseBtn.classList.add('paused'); }
         if (shazamPlayingBtn) { shazamPlayingBtn.innerHTML = PLAY_ICON_ROW; shazamPlayingBtn.classList.remove('playing'); }
     }
+    shazamNudgeHoverAfterPlaybarUpdate();
 }
 
 function shazamPlayerBarClose() {
@@ -2929,6 +2930,7 @@ function shazamBarUpdateActions() {
         skipEnabled = key.indexOf(' - ') !== -1;
     }
     skipBtn.disabled = !skipEnabled;
+    shazamNudgeHoverAfterPlaybarUpdate();
 }
 
 function shazamBarToggleStar() {
@@ -3056,6 +3058,19 @@ function shazamNudgeHoverAfterTrackTableReplace() {
     requestAnimationFrame(function () {
         requestAnimationFrame(function () {
             wrap.style.pointerEvents = prev || '';
+        });
+    });
+}
+
+/** Same hit-test refresh as the track table, for the fixed player bar after action/play DOM updates. */
+function shazamNudgeHoverAfterPlaybarUpdate() {
+    var bar = document.getElementById('shazamPlayerBar');
+    if (!bar || bar.style.display === 'none') return;
+    var prev = bar.style.pointerEvents;
+    bar.style.pointerEvents = 'none';
+    requestAnimationFrame(function () {
+        requestAnimationFrame(function () {
+            bar.style.pointerEvents = prev || '';
         });
     });
 }
