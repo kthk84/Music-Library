@@ -4628,6 +4628,17 @@ function shazamPollProgress() {
         if (shazamLastData && queuesNonEmpty && !skipRerenderForSingle) {
             shazamRenderTrackList(shazamLastData);
         }
+        // If server is idle but client still shows many "pending" spinners, clear stuck flags.
+        // This avoids a confusing state where rows spin forever even though no job/queue exists.
+        const dp = p.download_progress;
+        const serverIdle = !p.running && !queuesNonEmpty && !(dp && dp.running);
+        if (serverIdle && (Object.keys(shazamActionPending || {}).length > 0 || Object.keys(shazamPendingDownload || {}).length > 0)) {
+            shazamBarLog('POLL', 'server idle -> clear stuck pending', { actionPending: Object.keys(shazamActionPending || {}).length, dlPending: Object.keys(shazamPendingDownload || {}).length });
+            shazamActionPending = {};
+            shazamPendingDownload = {};
+            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            shazamBarUpdateActions();
+        }
         const el = document.getElementById('shazamProgress');
         const stopBtn = document.getElementById('shazamSyncStopBtn');
         const doneMsg = p.stopped
@@ -4688,7 +4699,6 @@ function shazamPollProgress() {
             Object.assign(shazamTrackUrls, p.urls);
         }
         // When no sync/search running but download queue has items, start the download worker (e.g. after Search finishes)
-        const dp = p.download_progress;
         if (!p.running && !shazamSingleBarActive && (p.download_queue || []).length > 0 && !(dp && dp.running)) {
             fetch('/api/shazam-sync/download-start-next', { method: 'POST' }).then(r => r.json()).then(function (d) {
                 if (d.started) {
