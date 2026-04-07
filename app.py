@@ -3173,8 +3173,7 @@ def shazam_sync_download_track():
     if not key:
         return jsonify({'error': 'Missing key'}), 400
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
-    urls = status.get('urls') or {}
-    if not (urls.get(key) or urls.get((key or '').lower())):
+    if not _get_url_for_key(status, key):
         return jsonify({'error': 'No Soundeo URL for this track'}), 400
     dest_dir = get_soundeo_download_folder()
     if not dest_dir or not os.path.isdir(dest_dir):
@@ -3203,9 +3202,8 @@ def shazam_sync_download_queue():
     if not dest_dir or not os.path.isdir(dest_dir):
         return jsonify({'error': 'Download folder not set. Choose one in Settings.'}), 400
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
-    urls = status.get('urls') or {}
     for k in keys:
-        if urls.get(k) or urls.get((k or '').lower()):
+        if _get_url_for_key(status, (k or '').strip()):
             _shazam_download_pending_append(k)
     download_queue = _shazam_download_full_queue()
     if not download_queue:
