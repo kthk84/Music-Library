@@ -3101,11 +3101,14 @@ function shazamApplyFilters(merged) {
 function shazamNudgeHoverAfterTrackTableReplace() {
     var wrap = document.getElementById('shazamTrackList');
     if (!wrap) return;
-    var prev = wrap.style.pointerEvents;
     wrap.style.pointerEvents = 'none';
     requestAnimationFrame(function () {
         requestAnimationFrame(function () {
-            wrap.style.pointerEvents = prev || '';
+            /* Always clear inline style — do not restore a captured "prev". Multiple nudges in one
+             * turn (e.g. barUpdate → render+barUpdate → barUpdate after download) can run while
+             * pointer-events is still "none"; a second nudge would save prev==="none" and a later
+             * rAF would leave the UI stuck non-interactive. */
+            wrap.style.pointerEvents = '';
         });
     });
 }
@@ -3116,19 +3119,21 @@ function shazamNudgeHoverAfterPlaybarUpdate() {
     if (!bar || bar.style.display === 'none') return;
     var actions = document.getElementById('shazamBarActions');
     var kids = bar.children;
-    var saved = [];
+    var toRestore = [];
     for (var i = 0; i < kids.length; i++) {
         var el = kids[i];
         if (el === actions) continue;
-        saved.push({ el: el, prev: el.style.pointerEvents });
+        toRestore.push(el);
         el.style.pointerEvents = 'none';
     }
-    if (!saved.length) return;
+    if (!toRestore.length) return;
     requestAnimationFrame(function () {
         requestAnimationFrame(function () {
-            for (var j = 0; j < saved.length; j++) {
-                var s = saved[j];
-                s.el.style.pointerEvents = s.prev || '';
+            for (var j = 0; j < toRestore.length; j++) {
+                /* Same as track-list nudge: never restore a captured previous value — overlapping
+                 * nudges (download does barUpdate → render+barUpdate → barUpdate) can read
+                 * pointer-events==="none" and re-apply it after a good restore. */
+                toRestore[j].style.pointerEvents = '';
             }
         });
     });
