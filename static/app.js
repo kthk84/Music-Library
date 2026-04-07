@@ -1210,7 +1210,7 @@ function shazamStartComparePoll(start) {
     }
     const t = start != null ? start : Date.now();
     setTimeout(function () { shazamComparePoll(t); }, 120);
-    shazamComparePollInterval = setInterval(function () { shazamComparePoll(t); }, 500);
+    shazamComparePollInterval = setInterval(function () { shazamComparePoll(t); }, 750);
 }
 
 /** Start download progress polling; always clears any existing interval first to avoid stacking. */
@@ -1934,7 +1934,7 @@ function shazamApplyStatus(data) {
         Object.assign(shazamNotFound, data.not_found);
     }
     shazamMergeDownloadProgressFromPayload(data);
-    shazamRenderTrackList(data);
+    shazamScheduleRenderTrackList(data, !shazamShouldThrottleTrackListRender(data));
     if (data.download_queue && Array.isArray(data.download_queue)) {
         shazamCurrentDownloadQueue = data.download_queue;
         if (!shazamSingleBarActive) shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
@@ -1990,7 +1990,7 @@ function shazamRestoreProgressIfRunning() {
                 shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
             }
             shazamSetProgressClickable(!!p.current_key);
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            if (shazamLastData) shazamScheduleRenderTrackList(shazamLastData, !shazamShouldThrottleTrackListRender());
             const barEl = document.getElementById('shazamSyncProgress');
             if (barEl && barEl.style.display === 'flex') {
                 shazamBarLog('RESTORE', 'progress bar already visible, skip SHOW_PROGRESS');
@@ -2054,20 +2054,18 @@ function shazamRestoreProgressIfRunning() {
                         shazamSetProgressClickable(p.running && !!p.current_key);
                         if (p.running) {
                             restorePollCount++;
-                            if (restorePollCount % 2 === 1) {
+                            var restoreStatusEvery = shazamShouldThrottleTrackListRender() ? 4 : 2;
+                            if (restorePollCount % restoreStatusEvery === 1) {
                                 fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
                                     if (data && !data.compare_running) {
                                         shazamApplyStatus(data);
-                                        var hasPendingRestore = shazamAnyRowActionPending();
-                                        var skipRestore = hasPendingRestore || (p.mode === 'star_single' || p.mode === 'unstar_single');
-                                        if (shazamLastData && !skipRestore) shazamRenderTrackList(shazamLastData);
                                     }
                                 }).catch(() => {});
                             }
                             var hasPendingRestoreRerender = shazamAnyRowActionPending();
                             var skipRestoreRerender = hasPendingRestoreRerender || (p.mode === 'star_single' || p.mode === 'unstar_single');
                             if (shazamLastData && !skipRestoreRerender) {
-                                shazamRenderTrackList(shazamLastData);
+                                shazamScheduleRenderTrackList(shazamLastData, !shazamShouldThrottleTrackListRender());
                                 if (shazamFollowCurrentRow && p.current_key) shazamScrollCurrentRowToCenter(false);
                             }
                         }
@@ -2106,6 +2104,70 @@ function shazamFormatRelativeTime(unixSec) {
 
 let shazamToDownloadTracks = [];
 let shazamLastData = null;
+
+/** Full table rebuild is expensive (~3k rows). Coalesce during long jobs so hover/cursor stay responsive. */
+const SHAZAM_TRACK_LIST_RENDER_MIN_MS = 900;
+let _shazamRenderListRaf = 0;
+let _shazamRenderListTimer = null;
+let _shazamRenderListLastAt = 0;
+
+function shazamShouldThrottleTrackListRender(statusPayload) {
+    var d = statusPayload || shazamLastData;
+    if (d && d.compare_running) return true;
+    var p = shazamCurrentProgress || {};
+    if (shazamDownloadProgressSnapshot && shazamDownloadProgressSnapshot.running) return true;
+    if (!p.running) return false;
+    var m = p.mode || '';
+    return (
+        m === 'search_global' || m === 'search_single' || m === 'sync_single' ||
+        m === 'star_batch' || m === 'sync_favorites'
+    );
+}
+
+function shazamCancelPendingTrackListRender() {
+    if (_shazamRenderListTimer) {
+        clearTimeout(_shazamRenderListTimer);
+        _shazamRenderListTimer = null;
+    }
+    if (_shazamRenderListRaf) {
+        cancelAnimationFrame(_shazamRenderListRaf);
+        _shazamRenderListRaf = 0;
+    }
+}
+
+/**
+ * Schedule a track table rebuild. Use force=true for filters, clicks, and job completion.
+ * When throttled, at most ~1 full render per SHAZAM_TRACK_LIST_RENDER_MIN_MS during compare/search/sync.
+ */
+function shazamScheduleRenderTrackList(data, force) {
+    var payload = data != null ? data : shazamLastData;
+    if (!payload) return;
+    var throttle = !force && shazamShouldThrottleTrackListRender(payload);
+    var flush = function () {
+        _shazamRenderListRaf = 0;
+        _shazamRenderListTimer = null;
+        var d = shazamLastData || payload;
+        if (!d) return;
+        shazamRenderTrackList(d);
+        _shazamRenderListLastAt = Date.now();
+    };
+    shazamCancelPendingTrackListRender();
+    if (!throttle) {
+        _shazamRenderListRaf = requestAnimationFrame(flush);
+        return;
+    }
+    var now = Date.now();
+    var wait = Math.max(0, SHAZAM_TRACK_LIST_RENDER_MIN_MS - (now - _shazamRenderListLastAt));
+    if (wait <= 0) {
+        _shazamRenderListRaf = requestAnimationFrame(flush);
+    } else {
+        _shazamRenderListTimer = setTimeout(function () {
+            _shazamRenderListTimer = null;
+            _shazamRenderListRaf = requestAnimationFrame(flush);
+        }, wait);
+    }
+}
+
 let shazamFilterTime = 'all';
 const SHAZAM_FILTER_STATUS_KEY = 'mp3cleaner_shazam_filter_status';
 const SHAZAM_FILTER_STATUS_VALUES = ['all', 'have', 'todl', 'skipped'];
@@ -3798,7 +3860,7 @@ async function shazamSyncSingleTrack(key, artist, title) {
                 const el = document.getElementById('shazamProgress');
                 if (el) el.textContent = p.running ? (p.message || 'Finding & starring…') : (p.error || p.message || 'Done.');
                 shazamSetProgressClickable(p.running && !!p.current_key);
-                if (p.running && shazamLastData) shazamRenderTrackList(shazamLastData);
+                if (p.running && shazamLastData) shazamScheduleRenderTrackList(shazamLastData, !shazamShouldThrottleTrackListRender());
                 if (!p.running) {
                     shazamCurrentProgress = {};
                     clearInterval(poll);
@@ -4657,7 +4719,7 @@ function shazamPollProgress() {
         var queuesNonEmpty = (p.star_queue || []).length > 0 || (p.single_search_queue || []).length > 0 || (p.unstar_queue || []).length > 0 || (p.download_queue || []).length > 0;
         var skipRerenderForSingle = hasPendingSingle || (p.running && (p.mode === 'star_single' || p.mode === 'unstar_single'));
         if (shazamLastData && queuesNonEmpty && !skipRerenderForSingle) {
-            shazamRenderTrackList(shazamLastData);
+            shazamScheduleRenderTrackList(shazamLastData, !shazamShouldThrottleTrackListRender());
         }
         // If server is idle but client still shows many "pending" spinners, clear stuck flags.
         // This avoids a confusing state where rows spin forever even though no job/queue exists.
@@ -4667,7 +4729,7 @@ function shazamPollProgress() {
             shazamBarLog('POLL', 'server idle -> clear stuck pending', { actionPending: Object.keys(shazamActionPending || {}).length, dlPending: Object.keys(shazamPendingDownload || {}).length });
             shazamActionPending = {};
             shazamPendingDownload = {};
-            if (shazamLastData) shazamRenderTrackList(shazamLastData);
+            if (shazamLastData) shazamScheduleRenderTrackList(shazamLastData, true);
             shazamBarUpdateActions();
         }
         const el = document.getElementById('shazamProgress');
@@ -4707,13 +4769,11 @@ function shazamPollProgress() {
         shazamSetProgressClickable(p.running && !!p.current_key);
         if (p.running) {
             shazamProgressPollCount = (shazamProgressPollCount || 0) + 1;
-            if (shazamProgressPollCount % 2 === 1) {
+            var statusPollEvery = shazamShouldThrottleTrackListRender() ? 4 : 2;
+            if (shazamProgressPollCount % statusPollEvery === 1) {
                 fetch('/api/shazam-sync/status').then(r => r.json()).then(data => {
                     if (data && !data.compare_running) {
                         shazamApplyStatus(data);
-                        var hasPendingStatus = shazamAnyRowActionPending();
-                        var skipRerender = hasPendingStatus || (shazamCurrentProgress.mode === 'star_single' || shazamCurrentProgress.mode === 'unstar_single');
-                        if (shazamLastData && !skipRerender) shazamRenderTrackList(shazamLastData);
                     }
                 }).catch(() => {});
             }
@@ -4721,7 +4781,7 @@ function shazamPollProgress() {
                 var hasPending = shazamAnyRowActionPending();
                 var skipFullRerender = hasPending || (p.mode === 'star_single' || p.mode === 'unstar_single');
                 if (!skipFullRerender) {
-                    shazamRenderTrackList(shazamLastData);
+                    shazamScheduleRenderTrackList(shazamLastData, !shazamShouldThrottleTrackListRender());
                 }
                 if (shazamFollowCurrentRow && p.current_key) shazamScrollCurrentRowToCenter(false);
             }
@@ -5135,13 +5195,13 @@ function shazamPollDownloadProgress() {
                 }
             });
             if (anyOkMoved) {
-                shazamRenderTrackList(shazamLastData);
+                shazamScheduleRenderTrackList(shazamLastData, !shazamShouldThrottleTrackListRender());
                 shazamBarUpdateActions();
             }
         }
         var dlSnapChanged = prevDlSnap.running !== shazamDownloadProgressSnapshot.running || prevDlSnap.current_key !== shazamDownloadProgressSnapshot.current_key;
         if (dlSnapChanged && shazamLastData) {
-            shazamRenderTrackList(shazamLastData);
+            shazamScheduleRenderTrackList(shazamLastData, !shazamShouldThrottleTrackListRender());
         }
         /* Playbar download state reads shazamDownloadProgressSnapshot — refresh every poll so spinner/have state never goes blank between ticks. */
         shazamBarUpdateActions();
@@ -5167,7 +5227,7 @@ function shazamPollDownloadProgress() {
                     shazamDownloadPollInterval = null;
                 }
                 if (dp.current_key) delete shazamPendingDownload[dp.current_key];
-                if (shazamLastData) shazamRenderTrackList(shazamLastData);
+                if (shazamLastData) shazamScheduleRenderTrackList(shazamLastData, true);
                 shazamBarUpdateActions();
                 shazamLoadStatus();
                 setTimeout(shazamHideSyncProgress, 2500);

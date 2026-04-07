@@ -1783,6 +1783,11 @@ button[onclick*="revertLookup"] {
 .shazam-track-table tr {
     height: 32px;
 }
+/* Skip layout/paint for off-screen rows so huge lists stay interactive during updates */
+.shazam-track-table tbody tr {
+    content-visibility: auto;
+    contain-intrinsic-size: 32px;
+}
 .shazam-track-table tbody tr:hover {
     background: var(--bg-tertiary);
 }
