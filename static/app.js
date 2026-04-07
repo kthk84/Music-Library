@@ -2863,7 +2863,7 @@ function shazamRenderTrackList(data) {
     const filtered = shazamApplyFilters(merged);
     const hasTodl = filtered.some(r => r.status === 'todl');
     const hasSkipped = filtered.some(r => r.status === 'skipped');
-    html += '<table class="shazam-track-table"><thead><tr><th></th><th>When</th><th>Artist</th><th>Title</th><th class="shazam-match-col">Match</th>';
+    html += '<table class="shazam-track-table"><thead><tr><th></th><th class="shazam-cover-col"></th><th>When</th><th>Artist</th><th>Title</th><th class="shazam-match-col">Match</th>';
     html += '<th></th><th>Actions</th>';
     html += '<th class="shazam-select-col">' + (hasTodl ? '<input type="checkbox" id="shazamSelectAll" onchange="shazamToggleSelectAll(this)" title="Select all" />' : '<span aria-hidden="true" style="display:inline-block;width:18px;height:18px;"></span>') + '</th>';
     html += '</tr></thead><tbody>';
@@ -2984,6 +2984,12 @@ function shazamRenderTrackList(data) {
             const pct = score != null ? Math.round(score * 100) : null;
             matchCell = '<td class="shazam-match-col">' + (pct != null ? '<span class="shazam-match-pct">' + pct + '%</span>' : '\u2014') + '</td>';
         }
+
+        // Cover thumbnail (overview list). Uses cover_hashes (key-variant aware).
+        const coverHash = _lu(shazamCoverHashes, key, keyLower, keyNorm, keyNormLower, keyDeep) || null;
+        const coverCell = coverHash
+            ? '<td class="shazam-cover-col"><span class="track-cover" style="background-image:url(\\'/api/shazam-sync/cover/' + coverHash + '\\');" aria-hidden="true"></span></td>'
+            : '<td class="shazam-cover-col"><span class="track-cover track-cover-placeholder" aria-hidden="true"></span></td>';
 
         const safeAttr = s => escapeHtml(s).replace(/'/g, '&#39;');
         const trackLabel = (soundeoTitle || key).replace(/"/g, '&quot;');
@@ -3107,7 +3113,7 @@ function shazamRenderTrackList(data) {
             }
         }
 
-        html += `<tr class="${rowClass}"${rowAttrs}>${statusCell}<td class="shazam-when">${escapeHtml(when)}</td><td>${escapeHtml(row.artist)}</td><td>${titleCellContent}</td>${matchCell}${playCell}${actionsCell}${selectCell}</tr>`;
+        html += `<tr class="${rowClass}"${rowAttrs}>${statusCell}${coverCell}<td class="shazam-when">${escapeHtml(when)}</td><td>${escapeHtml(row.artist)}</td><td>${titleCellContent}</td>${matchCell}${playCell}${actionsCell}${selectCell}</tr>`;
     });
     html += '</tbody></table>';
     el.innerHTML = html;
