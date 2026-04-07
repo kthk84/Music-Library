@@ -529,6 +529,70 @@ def _set_cover_hash_variants(status: dict, key: str, cover_hash: str) -> None:
             status['cover_hashes'][v] = cover_hash
 
 
+def _set_url_variants(status: Dict, key: str, url: str) -> None:
+    """Store track URL under multiple key variants so download never 'loses' a known link."""
+    if not status or not key or not url:
+        return
+    status.setdefault('urls', {})
+    k = (key or '').strip()
+    if not k:
+        return
+    variants = set()
+    variants.add(k)
+    variants.add(k.lower())
+    try:
+        norm = _strip_all_parens(k).strip()
+        if norm:
+            variants.add(norm)
+            variants.add(norm.lower())
+            norm_no_dots = norm.replace('.', '')
+            if norm_no_dots != norm:
+                variants.add(norm_no_dots)
+                variants.add(norm_no_dots.lower())
+    except Exception:
+        pass
+    try:
+        deep = _deep_norm_key(k)
+        if deep:
+            variants.add(deep)
+            variants.add(deep.lower())
+            deep_no_dots = deep.replace('.', '')
+            if deep_no_dots != deep:
+                variants.add(deep_no_dots)
+                variants.add(deep_no_dots.lower())
+    except Exception:
+        pass
+    for v in variants:
+        if v:
+            status['urls'][v] = url
+
+
+def _get_url_for_key(status: Dict, key: str) -> str:
+    """Variant-aware lookup of a saved Soundeo URL for a track key."""
+    urls = (status or {}).get('urls') or {}
+    if not key:
+        return ''
+    k = (key or '').strip()
+    if not k:
+        return ''
+    candidates = [
+        k,
+        k.lower(),
+        _strip_all_parens(k),
+        _strip_all_parens(k).lower(),
+        _deep_norm_key(k),
+        _deep_norm_key(k).lower(),
+        _strip_all_parens(k).replace('.', ''),
+        _strip_all_parens(k).replace('.', '').lower(),
+        _deep_norm_key(k).replace('.', ''),
+        _deep_norm_key(k).replace('.', '').lower(),
+    ]
+    for c in candidates:
+        if c and urls.get(c):
+            return urls.get(c) or ''
+    return ''
+
+
 def _cover_hashes_for_status(status: dict) -> dict:
     """Return cover_hashes dict: keys present in status that have a cached cover art file."""
     cover_dir = _get_cover_cache_dir()
@@ -2971,7 +3035,7 @@ def _run_download_queue_worker():
         app._shazam_download_progress['done'] = done
         app._shazam_download_progress['failed'] = failed
         dlog.info("download_queue: key=%s (%s/%s)", key[:60], i + 1, total)
-        track_url = urls.get(key) or urls.get(key.lower() if key else '')
+        track_url = _get_url_for_key(status, key)
         if not track_url:
             dlog.warning("download_queue: no URL for key=%s, skip", key[:60])
             failed += 1
@@ -4457,8 +4521,7 @@ def _set_url_and_track_id(status: Dict, key: str, url: str, cookies_path: Option
     """Set track URL and resolve/store track ID so we have both (URL for preview/crawler, ID for HTTP). Single source of truth: status cache."""
     if not url or not key:
         return
-    status.setdefault('urls', {})
-    status['urls'][key] = status['urls'][key.lower()] = url
+    _set_url_variants(status, key, url)
     if not cookies_path:
         return
     key_lower = key.lower() if isinstance(key, str) else ''
