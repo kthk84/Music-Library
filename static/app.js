@@ -4609,6 +4609,16 @@ async function shazamSyncFavoritesFromSoundeo() {
 function shazamPollProgress() {
     fetch('/api/shazam-sync/progress').then(r => r.json()).then(p => {
         shazamCurrentProgress = p;
+        // Apply incremental per-track updates ASAP so the list updates during the batch (not only at the end).
+        // Search global reports urls/not_found/titles/scores/starred in progress payload; merge before any re-render.
+        if (p && p.urls) Object.assign(shazamTrackUrls, p.urls);
+        if (p && p.soundeo_titles) Object.assign(shazamSoundeoTitles, p.soundeo_titles);
+        if (p && p.soundeo_match_scores && shazamLastData) {
+            shazamLastData.soundeo_match_scores = shazamLastData.soundeo_match_scores || {};
+            Object.assign(shazamLastData.soundeo_match_scores, p.soundeo_match_scores);
+        }
+        if (p && p.starred) Object.assign(shazamStarred, p.starred);
+        if (p && p.not_found) Object.assign(shazamNotFound, p.not_found);
         var hasPendingSingle = shazamAnyRowActionPending();
         var inSingleStarUnstar = p.mode === 'star_single' || p.mode === 'unstar_single';
         var skipQueueBarUpdates = hasPendingSingle || inSingleStarUnstar;
