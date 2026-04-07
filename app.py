@@ -3170,9 +3170,21 @@ def shazam_sync_download_track():
     from shazam_cache import load_status_cache
     data = request.get_json() or {}
     key = (data.get('key') or '').strip()
+    track_url = (data.get('track_url') or '').strip()
     if not key:
         return jsonify({'error': 'Missing key'}), 400
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
+    # If client already knows the Soundeo URL, persist it immediately (under key variants)
+    # so we can download even if this exact row key wasn't previously merged.
+    if track_url and track_url.startswith('http'):
+        try:
+            from config_shazam import get_soundeo_cookies_path
+            _set_url_and_track_id(status, key, track_url, get_soundeo_cookies_path())
+            from shazam_cache import save_status_cache
+            save_status_cache(status)
+            app._shazam_sync_status = status
+        except Exception:
+            pass
     if not _get_url_for_key(status, key):
         return jsonify({'error': 'No Soundeo URL for this track'}), 400
     dest_dir = get_soundeo_download_folder()

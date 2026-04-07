@@ -4997,10 +4997,15 @@ async function shazamDownloadTrack(key) {
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
     shazamBarUpdateActions();
     try {
+        var keyLower = (key || '').toLowerCase();
+        var keyNorm = key && key.indexOf(' (') !== -1 ? key.substring(0, key.indexOf(' (')).trim() : key;
+        var keyNormLower = (keyNorm || '').toLowerCase();
+        var keyDeep = (shazamKeyVariants(key || '') || []).slice(-1)[0] || null; // last variant is deep-normalized
+        var trackUrl = _lu(shazamTrackUrls, key, keyLower, keyNorm, keyNormLower, keyDeep) || null;
         const res = await fetch('/api/shazam-sync/download-track', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ key: key || '' })
+            body: JSON.stringify({ key: key || '', track_url: trackUrl || '' })
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok || data.error) {
