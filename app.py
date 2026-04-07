@@ -499,6 +499,36 @@ def _cache_cover_art(key: str, cover_url: str) -> Optional[str]:
     return None
 
 
+def _set_cover_hash_variants(status: dict, key: str, cover_hash: str) -> None:
+    """Store cover hash under multiple key variants so UI lookups always hit."""
+    if not status or not key or not cover_hash:
+        return
+    status.setdefault('cover_hashes', {})
+    k = (key or '').strip()
+    if not k:
+        return
+    variants = set()
+    variants.add(k)
+    variants.add(k.lower())
+    try:
+        norm = _strip_all_parens(k).strip()
+        if norm:
+            variants.add(norm)
+            variants.add(norm.lower())
+    except Exception:
+        pass
+    try:
+        deep = _deep_norm_key(k)
+        if deep:
+            variants.add(deep)
+            variants.add(deep.lower())
+    except Exception:
+        pass
+    for v in variants:
+        if v and v not in status['cover_hashes']:
+            status['cover_hashes'][v] = cover_hash
+
+
 def _cover_hashes_for_status(status: dict) -> dict:
     """Return cover_hashes dict: keys present in status that have a cached cover art file."""
     cover_dir = _get_cover_cache_dir()
@@ -3667,9 +3697,9 @@ def _run_search_soundeo_single(artist: str, title: str):
             if cover_url_single:
                 cover_hash = _cache_cover_art(key, cover_url_single)
                 if cover_hash:
-                    status['cover_hashes'][key] = cover_hash
+                    _set_cover_hash_variants(status, key, cover_hash)
                     if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status:
-                        app._shazam_sync_status.setdefault('cover_hashes', {})[key] = cover_hash
+                        _set_cover_hash_variants(app._shazam_sync_status, key, cover_hash)
             status['not_found'].pop(key, None)
             status['not_found'].pop(key.lower(), None)
             app._shazam_sync_status = status
@@ -3819,10 +3849,19 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
                 if cover_url:
                     try:
                         status.setdefault('cover_hashes', {})
-                        if current_key not in status['cover_hashes']:
+                        import re as _re_cover
+                        if cover_url and _re_cover.search(r'-\d+\.jpg$', cover_url):
+                            cover_url = _re_cover.sub(r'-\d+\.jpg$', '-500.jpg', cover_url)
+                        # Variant-safe check: if any variant already has a hash, skip caching.
+                        already = False
+                        for _k in (current_key, (current_key or '').lower(), _strip_all_parens(current_key or '').lower(), _deep_norm_key(current_key or '')):
+                            if _k and _k in (status.get('cover_hashes') or {}):
+                                already = True
+                                break
+                        if not already:
                             cover_hash = _cache_cover_art(current_key, cover_url)
                             if cover_hash:
-                                status['cover_hashes'][current_key] = cover_hash
+                                _set_cover_hash_variants(status, current_key, cover_hash)
                                 # Send only this key's cover hash in progress to keep payload small
                                 prog['cover_hashes'][current_key] = cover_hash
                     except Exception as _ce:
