@@ -2988,7 +2988,7 @@ function shazamRenderTrackList(data) {
         // Cover thumbnail (overview list). Uses cover_hashes (key-variant aware).
         const coverHash = _lu(shazamCoverHashes, key, keyLower, keyNorm, keyNormLower, keyDeep) || null;
         const coverCell = coverHash
-            ? '<td class="shazam-cover-col"><span class="track-cover" style="background-image:url(\\'/api/shazam-sync/cover/' + coverHash + '\\');" aria-hidden="true"></span></td>'
+            ? '<td class="shazam-cover-col"><span class="track-cover" style="background-image:url(/api/shazam-sync/cover/' + coverHash + ');" aria-hidden="true"></span></td>'
             : '<td class="shazam-cover-col"><span class="track-cover track-cover-placeholder" aria-hidden="true"></span></td>';
 
         const safeAttr = s => escapeHtml(s).replace(/'/g, '&#39;');
