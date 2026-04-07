@@ -3279,7 +3279,11 @@ def _strip_all_parens(key: str) -> str:
 
 def _deep_norm_key(key: str) -> str:
     """Deep normalize: strip parens, lowercase, unify '&'/','  separators, sort artists."""
-    s = _strip_all_parens(key).lower().replace(' & ', ', ')
+    import unicodedata
+    s = _strip_all_parens(key)
+    # Fold accents so 'Âme' matches 'Ame' across sources (Soundeo vs Shazam).
+    s = ''.join(ch for ch in unicodedata.normalize('NFKD', s) if not unicodedata.combining(ch))
+    s = s.lower().replace(' & ', ', ')
     if ' - ' in s:
         artist_part, title_part = s.split(' - ', 1)
         artists = sorted(a.strip() for a in artist_part.split(', ') if a.strip())
