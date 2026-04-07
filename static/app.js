@@ -1421,6 +1421,33 @@ function shazamMergeDownloadProgressFromPayload(data) {
     };
 }
 
+/**
+ * current/total for "Downloading …" sync bar — must match the visible download queue, not dp.done
+ * (done is cumulative across session; mixing done+1 with queue length produced e.g. 6/1).
+ */
+function shazamDownloadProgressFractionFromStatus(downloadQueue, currentKey, dp) {
+    var q = (downloadQueue && Array.isArray(downloadQueue)) ? downloadQueue : [];
+    var ck = (currentKey && String(currentKey).trim()) || '';
+    if (q.length > 0) {
+        var idx = 0;
+        if (ck) {
+            for (var i = 0; i < q.length; i++) {
+                if (shazamTrackKeyMatches(ck, q[i]) || String(q[i]).trim() === ck) {
+                    idx = i;
+                    break;
+                }
+            }
+        }
+        return { current: idx + 1, total: q.length };
+    }
+    if (dp && dp.total > 0) {
+        var batchTotal = dp.total;
+        var done = dp.done != null ? dp.done : 0;
+        return { current: Math.min(done + 1, batchTotal), total: batchTotal };
+    }
+    return { current: 1, total: 1 };
+}
+
 /** True if server download_progress.current_key refers to the same track as row key (variant-aware). */
 function shazamTrackKeyMatches(serverKey, rowKey) {
     if (!serverKey || !rowKey) return false;
@@ -5604,12 +5631,11 @@ function shazamPollDownloadProgress() {
         shazamBarUpdateActions();
         const el = document.getElementById('shazamProgress');
         if (el && dp) {
-            var queueLen = (data.download_queue && data.download_queue.length) ? data.download_queue.length : (dp.total || 0);
             if (dp.running) {
-                var total = Math.max(queueLen || 0, dp.total || 0) || 1;
-                var current = (dp.done || 0) + 1;
+                var qList = (data.download_queue && Array.isArray(data.download_queue)) ? data.download_queue : [];
+                var frac = shazamDownloadProgressFractionFromStatus(qList, dp.current_key, dp);
                 var trackSuffix = (dp.current_key ? ': ' + (dp.current_key.length > 50 ? dp.current_key.slice(0, 50) + '…' : dp.current_key) : '');
-                el.textContent = 'Downloading ' + current + '/' + total + trackSuffix;
+                el.textContent = 'Downloading ' + frac.current + '/' + frac.total + trackSuffix;
                 const viewLogBtn = document.getElementById('shazamDownloadViewLogBtn');
                 if (viewLogBtn) viewLogBtn.style.display = 'none';
             } else {

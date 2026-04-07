@@ -3154,9 +3154,10 @@ def _shazam_download_start_next() -> bool:
     if not getattr(app, '_shazam_download_progress', None):
         app._shazam_download_progress = {}
     prev_results = list(prev.get('results') or [])
+    # Message uses 1/batch_total so UI matches visible queue (prev_done is cumulative; showing prev_done+1/total looked like "6/1" when one track was queued).
     app._shazam_download_progress.update({
         'running': True, 'queue': [key], 'done': prev_done, 'failed': prev_failed, 'total': total,
-        'current_key': key, 'message': f'Downloading {prev_done + 1}/{total}: {key[:50]}...', 'results': prev_results,
+        'current_key': key, 'message': f'Downloading 1/{batch_total}: {key[:50]}...', 'results': prev_results,
     })
     thread = threading.Thread(target=_run_download_queue_worker, daemon=True)
     thread.start()
