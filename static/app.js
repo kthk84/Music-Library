@@ -3392,6 +3392,18 @@ function shazamKeyVariants(key) {
     return [key, keyLower, keyNorm, keyNormLower, keyDeep];
 }
 
+/** First truthy value from map for any key (same pattern as inline _lu in render paths). */
+function shazamLookupMap(map) {
+    if (!map) return undefined;
+    for (var i = 1; i < arguments.length; i++) {
+        var k = arguments[i];
+        if (k == null || k === '') continue;
+        var v = map[k];
+        if (v) return v;
+    }
+    return undefined;
+}
+
 /** Set starred state for a key and all display variants so row live-updates. */
 function shazamSetStarredLive(key, value) {
     var keys = shazamKeyVariants(key);
@@ -5003,7 +5015,9 @@ async function shazamDownloadTrack(key) {
         var keyNorm = key && key.indexOf(' (') !== -1 ? key.substring(0, key.indexOf(' (')).trim() : key;
         var keyNormLower = (keyNorm || '').toLowerCase();
         var keyDeep = (shazamKeyVariants(key || '') || []).slice(-1)[0] || null; // last variant is deep-normalized
-        var trackUrl = _lu(shazamTrackUrls, key, keyLower, keyNorm, keyNormLower, keyDeep) || null;
+        var trackUrl = shazamLookupMap(shazamTrackUrls, key, keyLower, keyNorm, keyNormLower, keyDeep)
+            || (shazamLastData && shazamLastData.urls ? shazamLookupMap(shazamLastData.urls, key, keyLower, keyNorm, keyNormLower, keyDeep) : undefined)
+            || null;
         const res = await fetch('/api/shazam-sync/download-track', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
