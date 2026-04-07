@@ -1254,6 +1254,27 @@ let shazamPendingDownload = {};
 /** Server download worker: which track key is actively downloading (from status download_progress). */
 let shazamDownloadProgressSnapshot = { running: false, current_key: null };
 
+/** Merge server status.cover_hashes into shazamCoverHashes (adds key variants so playbar lookup never misses). */
+function shazamMergeCoverHashes(coverHashes) {
+    if (!coverHashes || typeof coverHashes !== 'object') return;
+    Object.keys(coverHashes).forEach(function (k) {
+        var v = coverHashes[k];
+        if (!k || !v) return;
+        shazamCoverHashes[k] = v;
+        try {
+            var keys = shazamKeyVariants(k);
+            for (var i = 0; i < keys.length; i++) {
+                var kk = keys[i];
+                if (!kk) continue;
+                if (!shazamCoverHashes[kk]) shazamCoverHashes[kk] = v;
+            }
+        } catch (e) {
+            var kl = String(k).toLowerCase();
+            if (kl && !shazamCoverHashes[kl]) shazamCoverHashes[kl] = v;
+        }
+    });
+}
+
 function shazamMergeDownloadProgressFromPayload(data) {
     if (!data || data.download_progress === undefined) return;
     var dp = data.download_progress;
@@ -1905,7 +1926,7 @@ function shazamApplyStatus(data) {
         Object.assign(shazamSoundeoTitles, data.soundeo_titles);
     }
     if (data.cover_hashes && typeof data.cover_hashes === 'object') {
-        Object.assign(shazamCoverHashes, data.cover_hashes);
+        shazamMergeCoverHashes(data.cover_hashes);
     }
     // not_found: only replace when applying fresh server data (so reset/refresh shows grey). Never replace inside shazamRenderTrackList or we wipe per-row search updates.
     if (data.hasOwnProperty('not_found') && typeof data.not_found === 'object') {
@@ -2408,7 +2429,18 @@ function shazamPlayerBarShow(label) {
     }
     const barCover = document.getElementById('shazamBarCover');
     if (barCover) {
-        const hash = shazamBarKey ? (shazamCoverHashes[shazamBarKey] || shazamCoverHashes[(shazamBarKey || '').toLowerCase()] || null) : null;
+        var hash = null;
+        if (shazamBarKey) {
+            hash = shazamCoverHashes[shazamBarKey] || shazamCoverHashes[(shazamBarKey || '').toLowerCase()] || null;
+            if (!hash) {
+                try {
+                    var vks = shazamKeyVariants(shazamBarKey);
+                    for (var vi = 0; vi < vks.length; vi++) {
+                        if (shazamCoverHashes[vks[vi]]) { hash = shazamCoverHashes[vks[vi]]; break; }
+                    }
+                } catch (e) { /* ignore */ }
+            }
+        }
         if (hash) {
             barCover.style.backgroundImage = `url('/api/shazam-sync/cover/${hash}')`;
             barCover.classList.remove('shazam-bar-cover-placeholder');
@@ -2790,7 +2822,7 @@ function shazamRenderTrackList(data) {
         Object.assign(shazamSoundeoTitles, data.soundeo_titles);
     }
     if (data.cover_hashes && typeof data.cover_hashes === 'object') {
-        Object.assign(shazamCoverHashes, data.cover_hashes);
+        shazamMergeCoverHashes(data.cover_hashes);
     }
     const have = (data.have_locally || []).map(t => ({ ...t, status: 'have' }));
     const toDl = (data.to_download || []).map((t, i) => ({ ...t, status: 'todl', _idx: i }));
