@@ -5052,9 +5052,36 @@ function shazamPollDownloadProgress() {
         const dp = data.download_progress;
         /* Any key that already has a row in results is done (success or fail) — clear client pending so the playbar/row never sit in a fake “busy” or blank gap. */
         if (dp && Array.isArray(dp.results)) {
+            var anyOkMoved = false;
             dp.results.forEach(function (r) {
                 if (r && r.key) delete shazamPendingDownload[r.key];
+                // Optimistic: on success, move track from To DL → Have immediately so the UI updates even if another batch job is running.
+                if (r && r.ok && r.key && r.filepath && shazamLastData) {
+                    try {
+                        var k = String(r.key).trim();
+                        var parts = k.split(' - ', 1);
+                        var artist = parts[0] ? parts[0].trim() : '';
+                        var title = k.indexOf(' - ') !== -1 ? k.split(' - ', 2)[1].trim() : '';
+                        if (artist || title) {
+                            var toDl = (shazamLastData.to_download || []).slice();
+                            var toDl2 = toDl.filter(function (t) {
+                                var tk = ((t.artist || '').trim() + ' - ' + (t.title || '').trim()).trim();
+                                return !(tk === k || tk.toLowerCase() === k.toLowerCase());
+                            });
+                            if (toDl2.length !== toDl.length) {
+                                shazamLastData.to_download = toDl2;
+                                shazamLastData.to_download_count = toDl2.length;
+                                shazamLastData.have_locally = (shazamLastData.have_locally || []).concat([{ artist: artist, title: title, filepath: r.filepath }]);
+                                anyOkMoved = true;
+                            }
+                        }
+                    } catch (e) { /* ignore */ }
+                }
             });
+            if (anyOkMoved) {
+                shazamRenderTrackList(shazamLastData);
+                shazamBarUpdateActions();
+            }
         }
         var dlSnapChanged = prevDlSnap.running !== shazamDownloadProgressSnapshot.running || prevDlSnap.current_key !== shazamDownloadProgressSnapshot.current_key;
         if (dlSnapChanged && shazamLastData) {

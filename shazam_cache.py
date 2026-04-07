@@ -7,6 +7,7 @@ When running from a frozen bundle, data lives in ~/Library/Application Support/S
 import json
 import os
 import shutil
+import threading
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
@@ -15,6 +16,10 @@ from app_paths import get_project_root_for_data
 _PROJECT_ROOT = get_project_root_for_data(__file__)
 SHAZAM_CACHE_PATH = os.path.join(_PROJECT_ROOT, "shazam_cache.json")
 LOCAL_SCAN_CACHE_PATH = os.path.join(_PROJECT_ROOT, "local_scan_cache.json")
+
+# Serialize status cache reads/writes across threads to avoid lost updates
+# (download worker vs search/star/compare background jobs).
+_STATUS_CACHE_LOCK = threading.Lock()
 
 
 def _load_json(path: str, default: Any) -> Any:
@@ -276,37 +281,38 @@ STATUS_CACHE_PATH = os.path.join(_PROJECT_ROOT, "shazam_status_cache.json")
 
 def load_status_cache() -> Optional[Dict]:
     """Load last compare result for instant display. If main file has track lists but no search_outcomes/urls, merge in from .bak so dots (purple/orange) never disappear."""
-    status = _load_json(STATUS_CACHE_PATH, None)
-    if status is not None and not status.get("search_outcomes"):
-        _old_log_path = os.path.join(_PROJECT_ROOT, "shazam_search_log.json")
-        if os.path.exists(_old_log_path):
-            old_log = _load_json(_old_log_path, [])
-            if old_log:
-                status = dict(status)
-                status["search_outcomes"] = old_log
-                save_status_cache(status)
-                try:
-                    os.remove(_old_log_path)
-                except OSError:
-                    pass
-    if status is not None and (status.get("to_download") or status.get("have_locally")) and not (status.get("search_outcomes") or status.get("urls")):
-        bak = _load_json(STATUS_CACHE_PATH + ".bak", None)
-        if bak and isinstance(bak, dict) and (bak.get("search_outcomes") or bak.get("urls")):
-            if bak.get("search_outcomes"):
-                status = dict(status)
-                status["search_outcomes"] = list(bak["search_outcomes"])
-                status["urls"], status["not_found"] = _replay_search_outcomes(status["search_outcomes"], status.get("urls"))
-            else:
-                status = dict(status)
-                status["urls"] = dict(bak.get("urls") or {})
-                urls = status["urls"]
-                nf = dict(bak.get("not_found") or {})
-                status["not_found"] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
-            for key in ("track_ids", "starred", "soundeo_titles", "soundeo_match_scores", "dismissed_manual_check"):
-                if bak.get(key) and not status.get(key):
-                    v = bak[key]
-                    status[key] = list(v) if isinstance(v, list) else (dict(v) if isinstance(v, dict) else v)
-    return status
+    with _STATUS_CACHE_LOCK:
+        status = _load_json(STATUS_CACHE_PATH, None)
+        if status is not None and not status.get("search_outcomes"):
+            _old_log_path = os.path.join(_PROJECT_ROOT, "shazam_search_log.json")
+            if os.path.exists(_old_log_path):
+                old_log = _load_json(_old_log_path, [])
+                if old_log:
+                    status = dict(status)
+                    status["search_outcomes"] = old_log
+                    save_status_cache(status)
+                    try:
+                        os.remove(_old_log_path)
+                    except OSError:
+                        pass
+        if status is not None and (status.get("to_download") or status.get("have_locally")) and not (status.get("search_outcomes") or status.get("urls")):
+            bak = _load_json(STATUS_CACHE_PATH + ".bak", None)
+            if bak and isinstance(bak, dict) and (bak.get("search_outcomes") or bak.get("urls")):
+                if bak.get("search_outcomes"):
+                    status = dict(status)
+                    status["search_outcomes"] = list(bak["search_outcomes"])
+                    status["urls"], status["not_found"] = _replay_search_outcomes(status["search_outcomes"], status.get("urls"))
+                else:
+                    status = dict(status)
+                    status["urls"] = dict(bak.get("urls") or {})
+                    urls = status["urls"]
+                    nf = dict(bak.get("not_found") or {})
+                    status["not_found"] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
+                for key in ("track_ids", "starred", "soundeo_titles", "soundeo_match_scores", "dismissed_manual_check"):
+                    if bak.get(key) and not status.get(key):
+                        v = bak[key]
+                        status[key] = list(v) if isinstance(v, list) else (dict(v) if isinstance(v, dict) else v)
+        return status
 
 
 def save_status_cache(status: Dict) -> None:
@@ -314,7 +320,8 @@ def save_status_cache(status: Dict) -> None:
     Paper trail: never persist not_found for a track that has a URL (so status stays correct).
     When search_outcomes exists, urls/not_found are derived from it so batch search data is always consistent.
     Never wipe search_outcomes: if status has none, preserve from existing file, then from .bak, so dots never disappear."""
-    out = dict(status)
+    with _STATUS_CACHE_LOCK:
+        out = dict(status)
     # Guard against lost updates: long-running jobs may save an older snapshot of status after
     # downloads finished. Keep any existing have_locally entries (with filepath) and ensure those
     # tracks are not written back into to_download.
@@ -341,39 +348,39 @@ def save_status_cache(status: Dict) -> None:
     except Exception:
         pass
 
-    log = out.get('search_outcomes') or []
-    if not log:
-        existing = load_status_cache()
-        if existing:
-            existing_log = (existing.get('search_outcomes') or [])[:]
-            if existing_log:
-                out['search_outcomes'] = existing_log
-                log = existing_log
+        log = out.get('search_outcomes') or []
         if not log:
-            bak = _load_json(STATUS_CACHE_PATH + ".bak", None)
-            if bak and isinstance(bak, dict) and (bak.get('search_outcomes') or []):
-                out['search_outcomes'] = list(bak['search_outcomes'])
-                log = out['search_outcomes']
-                if bak.get('track_ids'):
-                    out.setdefault('track_ids', {}).update(bak.get('track_ids') or {})
-                if bak.get('starred'):
-                    out.setdefault('starred', {}).update(bak.get('starred') or {})
-                if bak.get('soundeo_titles'):
-                    out.setdefault('soundeo_titles', {}).update(bak.get('soundeo_titles') or {})
-    if log:
-        urls, nf = _replay_search_outcomes(log, out.get('urls'))
-        out['urls'] = urls
-        out['not_found'] = nf
-    urls = out.get('urls') or {}
-    nf = out.get('not_found') or {}
-    out['not_found'] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
-    # Keep one backup of previous version so status/context per track can be restored if lost
-    if os.path.exists(STATUS_CACHE_PATH) and os.path.getsize(STATUS_CACHE_PATH) > 0:
-        try:
-            shutil.copy2(STATUS_CACHE_PATH, STATUS_CACHE_PATH + ".bak")
-        except OSError:
-            pass
-    _save_json_atomic(STATUS_CACHE_PATH, out)
+            existing = load_status_cache()
+            if existing:
+                existing_log = (existing.get('search_outcomes') or [])[:]
+                if existing_log:
+                    out['search_outcomes'] = existing_log
+                    log = existing_log
+            if not log:
+                bak = _load_json(STATUS_CACHE_PATH + ".bak", None)
+                if bak and isinstance(bak, dict) and (bak.get('search_outcomes') or []):
+                    out['search_outcomes'] = list(bak['search_outcomes'])
+                    log = out['search_outcomes']
+                    if bak.get('track_ids'):
+                        out.setdefault('track_ids', {}).update(bak.get('track_ids') or {})
+                    if bak.get('starred'):
+                        out.setdefault('starred', {}).update(bak.get('starred') or {})
+                    if bak.get('soundeo_titles'):
+                        out.setdefault('soundeo_titles', {}).update(bak.get('soundeo_titles') or {})
+        if log:
+            urls, nf = _replay_search_outcomes(log, out.get('urls'))
+            out['urls'] = urls
+            out['not_found'] = nf
+        urls = out.get('urls') or {}
+        nf = out.get('not_found') or {}
+        out['not_found'] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
+        # Keep one backup of previous version so status/context per track can be restored if lost
+        if os.path.exists(STATUS_CACHE_PATH) and os.path.getsize(STATUS_CACHE_PATH) > 0:
+            try:
+                shutil.copy2(STATUS_CACHE_PATH, STATUS_CACHE_PATH + ".bak")
+            except OSError:
+                pass
+        _save_json_atomic(STATUS_CACHE_PATH, out)
 
 
 # --- Search outcomes: stored inside status cache (single source of truth) ---
