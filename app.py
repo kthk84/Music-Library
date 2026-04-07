@@ -3784,6 +3784,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
             'soundeo_titles': dict(existing.get('soundeo_titles', {})),
             'soundeo_match_scores': dict(existing.get('soundeo_match_scores', {})),
             'starred': dict(existing.get('starred', {})),
+            'cover_hashes': dict(existing.get('cover_hashes', {})),
         }
         if current_key is not None:
             prog['current_key'] = current_key
@@ -3814,6 +3815,18 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
                         "search_global key=%s url=%s starred=%s (blue star on Soundeo) status.starred updated",
                         current_key[:70], url[:60] if url else "", starred_val,
                     )
+                cover_url = kwargs.get('cover_url')
+                if cover_url:
+                    try:
+                        status.setdefault('cover_hashes', {})
+                        if current_key not in status['cover_hashes']:
+                            cover_hash = _cache_cover_art(current_key, cover_url)
+                            if cover_hash:
+                                status['cover_hashes'][current_key] = cover_hash
+                                # Send only this key's cover hash in progress to keep payload small
+                                prog['cover_hashes'][current_key] = cover_hash
+                    except Exception as _ce:
+                        logging.debug('search_global cover cache failed for %s: %s', current_key, _ce)
                 try:
                     save_status_cache(status)
                 except Exception as _se:

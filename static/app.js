@@ -4613,6 +4613,13 @@ function shazamPollProgress() {
         // Search global reports urls/not_found/titles/scores/starred in progress payload; merge before any re-render.
         if (p && p.urls) Object.assign(shazamTrackUrls, p.urls);
         if (p && p.soundeo_titles) Object.assign(shazamSoundeoTitles, p.soundeo_titles);
+        if (p && p.cover_hashes) {
+            if (shazamLastData) {
+                shazamLastData.cover_hashes = shazamLastData.cover_hashes || {};
+                Object.assign(shazamLastData.cover_hashes, p.cover_hashes);
+            }
+            shazamMergeCoverHashes(p.cover_hashes);
+        }
         if (p && p.soundeo_match_scores && shazamLastData) {
             shazamLastData.soundeo_match_scores = shazamLastData.soundeo_match_scores || {};
             Object.assign(shazamLastData.soundeo_match_scores, p.soundeo_match_scores);

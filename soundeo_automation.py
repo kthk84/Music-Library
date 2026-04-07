@@ -1624,6 +1624,8 @@ def run_search_tracks(
                         kwargs["soundeo_match_score"] = round(match_score, 3)
                     if starred_val is not None:
                         kwargs["starred"] = bool(starred_val)
+                    if cover_url:
+                        kwargs["cover_url"] = cover_url
                     on_progress(i + 1, len(tracks), f"Found: {artist} - {title}", url, key, **kwargs)
             else:
                 if results["done"] == 0 and _is_redirected_to_login(driver):
