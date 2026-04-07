@@ -315,6 +315,32 @@ def save_status_cache(status: Dict) -> None:
     When search_outcomes exists, urls/not_found are derived from it so batch search data is always consistent.
     Never wipe search_outcomes: if status has none, preserve from existing file, then from .bak, so dots never disappear."""
     out = dict(status)
+    # Guard against lost updates: long-running jobs may save an older snapshot of status after
+    # downloads finished. Keep any existing have_locally entries (with filepath) and ensure those
+    # tracks are not written back into to_download.
+    try:
+        existing_for_merge = _load_json(STATUS_CACHE_PATH, None)
+        if existing_for_merge and isinstance(existing_for_merge, dict):
+            def _k(t: Dict) -> tuple:
+                return (str(t.get("artist", "")).strip().lower(), str(t.get("title", "")).strip().lower())
+
+            have_now = list(out.get("have_locally") or [])
+            have_keys = {_k(h) for h in have_now if isinstance(h, dict)}
+
+            existing_have = [h for h in (existing_for_merge.get("have_locally") or []) if isinstance(h, dict) and h.get("filepath")]
+            for h in existing_have:
+                kk = _k(h)
+                if kk not in have_keys:
+                    have_now.append(h)
+                    have_keys.add(kk)
+            out["have_locally"] = have_now
+
+            to_dl_now = [t for t in (out.get("to_download") or []) if isinstance(t, dict) and _k(t) not in have_keys]
+            out["to_download"] = to_dl_now
+            out["to_download_count"] = len(to_dl_now)
+    except Exception:
+        pass
+
     log = out.get('search_outcomes') or []
     if not log:
         existing = load_status_cache()
