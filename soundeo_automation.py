@@ -95,6 +95,12 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
 
     opts = Options()
     cfg = get_soundeo_browser_config()
+    try:
+        # Optional: config flag to reduce focus stealing when launching headed Chrome
+        from config_shazam import load_config
+        _launch_bg = bool((load_config() or {}).get("soundeo_launch_in_background", True))
+    except Exception:
+        _launch_bg = True
 
     if cfg.get("mode") == "attach":
         addr = cfg.get("debugger_address", "127.0.0.1:9222")
@@ -117,6 +123,12 @@ def _get_driver(headless: bool = False, use_persistent_profile: bool = True):
                 o.add_argument("--profile-directory=" + profile_directory)
         if headless:
             o.add_argument("--headless=new")
+        else:
+            # Best-effort: avoid stealing focus when Chrome must be visible.
+            # On macOS Chrome can still activate, but starting minimized/off-screen reduces disruption.
+            if _launch_bg:
+                o.add_argument("--start-minimized")
+                o.add_argument("--window-position=-32000,-32000")
         o.add_argument("--window-size=1280,900")
         o.add_argument("--disable-gpu")
         o.add_argument("--no-sandbox")

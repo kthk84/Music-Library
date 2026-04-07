@@ -17,6 +17,9 @@ DEFAULT_CONFIG = {
     "soundeo_cookies_path": "",
     "shazam_db_path": "",
     "headed_mode": True,
+    # When headed_mode=True (visible Chrome), try to avoid stealing focus by launching minimized/off-screen.
+    # For true background automation, set headed_mode=False (headless) — login/cookies still use persistent profile.
+    "soundeo_launch_in_background": True,
     "stream_to_ui": True,
     # Search all: False = browser (Selenium), True = HTTP (no Chrome). Use True if browser path fails.
     "search_all_use_http": False,
