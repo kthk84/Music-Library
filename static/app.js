@@ -3114,11 +3114,22 @@ function shazamNudgeHoverAfterTrackTableReplace() {
 function shazamNudgeHoverAfterPlaybarUpdate() {
     var bar = document.getElementById('shazamPlayerBar');
     if (!bar || bar.style.display === 'none') return;
-    var prev = bar.style.pointerEvents;
-    bar.style.pointerEvents = 'none';
+    var actions = document.getElementById('shazamBarActions');
+    var kids = bar.children;
+    var saved = [];
+    for (var i = 0; i < kids.length; i++) {
+        var el = kids[i];
+        if (el === actions) continue;
+        saved.push({ el: el, prev: el.style.pointerEvents });
+        el.style.pointerEvents = 'none';
+    }
+    if (!saved.length) return;
     requestAnimationFrame(function () {
         requestAnimationFrame(function () {
-            bar.style.pointerEvents = prev || '';
+            for (var j = 0; j < saved.length; j++) {
+                var s = saved[j];
+                s.el.style.pointerEvents = s.prev || '';
+            }
         });
     });
 }
@@ -3790,6 +3801,7 @@ function shazamSetSoundeoMatchScoreLive(key, score) {
 async function shazamUnstarTrack(key, trackUrl, artist, title) {
     if (shazamActionPending[key]) return;
     shazamActionPending[key] = true;
+    shazamBarUpdateActions();
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
     shazamBarUpdateActions();
     try {
@@ -3949,6 +3961,7 @@ async function shazamUndismissTrack(key, trackUrl, artist, title) {
 async function shazamStarTrack(key, trackUrl, artist, title) {
     if (shazamActionPending[key]) return;
     shazamActionPending[key] = true;
+    shazamBarUpdateActions();
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
     shazamBarUpdateActions();
     try {
@@ -5446,6 +5459,7 @@ document.addEventListener('DOMContentLoaded', function () {
 async function shazamDownloadTrack(key) {
     if (shazamPendingDownload[key]) return;
     shazamPendingDownload[key] = true;
+    shazamBarUpdateActions();
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
     shazamBarUpdateActions();
     try {
