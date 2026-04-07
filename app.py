@@ -2795,7 +2795,27 @@ def _apply_download_to_status_and_cache(key: str, filepath: str) -> None:
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
     have = list(status.get('have_locally') or [])
     to_dl = list(status.get('to_download') or [])
-    key_lower = (artist.strip().lower(), title.strip().lower())
+
+    # Match to_download entries via deep-normalized key so downloads triggered by a Soundeo key
+    # (different artist order / extra mix suffix) still remove the correct Shazam entry.
+    raw_key = f"{artist} - {title}".strip(" -")
+    raw_deep = _deep_norm_key(raw_key) if raw_key else ""
+    matched_artist = artist
+    matched_title = title
+    matched_key = raw_key
+    if raw_deep and to_dl:
+        for t in to_dl:
+            try:
+                tk = f"{(t.get('artist') or '').strip()} - {(t.get('title') or '').strip()}".strip(" -")
+            except Exception:
+                tk = ""
+            if tk and _deep_norm_key(tk) == raw_deep:
+                matched_artist = (t.get('artist') or '').strip()
+                matched_title = (t.get('title') or '').strip()
+                matched_key = tk
+                break
+
+    key_lower = (matched_artist.strip().lower(), matched_title.strip().lower())
 
     found = False
     for h in have:
@@ -2804,14 +2824,21 @@ def _apply_download_to_status_and_cache(key: str, filepath: str) -> None:
             found = True
             break
     if not found:
-        have.append({'artist': artist, 'title': title, 'filepath': filepath})
-    to_dl = [t for t in to_dl if _track_key_norm(t) != key_lower]
+        have.append({'artist': matched_artist, 'title': matched_title, 'filepath': filepath})
+    # Remove any to_download entries that match this download by either exact norm or deep norm
+    if raw_deep:
+        to_dl = [t for t in to_dl if (_track_key_norm(t) != key_lower and _deep_norm_key(f"{(t.get('artist') or '').strip()} - {(t.get('title') or '').strip()}".strip(" -")) != raw_deep)]
+    else:
+        to_dl = [t for t in to_dl if _track_key_norm(t) != key_lower]
     status['have_locally'] = have
     status['to_download'] = to_dl
     status['to_download_count'] = len(to_dl)
     # Persist the exact filepath so reconciliation never needs fuzzy matching for downloaded tracks.
     status.setdefault('download_filepaths', {})[key] = filepath
     status['download_filepaths'][key.lower()] = filepath
+    if matched_key and matched_key != key:
+        status['download_filepaths'][matched_key] = filepath
+        status['download_filepaths'][matched_key.lower()] = filepath
     _merge_preserved_urls_into_status(status)
     app._shazam_sync_status = status
     save_status_cache(status)

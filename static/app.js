@@ -5059,14 +5059,22 @@ function shazamPollDownloadProgress() {
                 if (r && r.ok && r.key && r.filepath && shazamLastData) {
                     try {
                         var k = String(r.key).trim();
-                        var parts = k.split(' - ', 1);
-                        var artist = parts[0] ? parts[0].trim() : '';
-                        var title = k.indexOf(' - ') !== -1 ? k.split(' - ', 2)[1].trim() : '';
+                        var sep = ' - ';
+                        var ix = k.indexOf(sep);
+                        var artist = ix !== -1 ? k.slice(0, ix).trim() : '';
+                        var title = ix !== -1 ? k.slice(ix + sep.length).trim() : '';
                         if (artist || title) {
                             var toDl = (shazamLastData.to_download || []).slice();
                             var toDl2 = toDl.filter(function (t) {
                                 var tk = ((t.artist || '').trim() + ' - ' + (t.title || '').trim()).trim();
-                                return !(tk === k || tk.toLowerCase() === k.toLowerCase());
+                                // Also remove on deep-normalized key match (artist order + mix suffix)
+                                var tkLower = tk.toLowerCase();
+                                var kLower = k.toLowerCase();
+                                var tkNorm = tk.indexOf(' (') !== -1 ? tk.substring(0, tk.indexOf(' (')).trim() : tk;
+                                var kNorm = k.indexOf(' (') !== -1 ? k.substring(0, k.indexOf(' (')).trim() : k;
+                                var tkDeep = (() => { let s = tkNorm.toLowerCase().replace(/ & /g, ', '); const d = s.indexOf(' - '); if (d !== -1) { const arts = s.substring(0, d).split(', ').map(a => a.trim()).filter(Boolean).sort().join(', '); s = arts + ' - ' + s.substring(d + 3); } return s; })();
+                                var kDeep = (() => { let s = kNorm.toLowerCase().replace(/ & /g, ', '); const d = s.indexOf(' - '); if (d !== -1) { const arts = s.substring(0, d).split(', ').map(a => a.trim()).filter(Boolean).sort().join(', '); s = arts + ' - ' + s.substring(d + 3); } return s; })();
+                                return !(tk === k || tkLower === kLower || tkDeep === kDeep);
                             });
                             if (toDl2.length !== toDl.length) {
                                 shazamLastData.to_download = toDl2;
