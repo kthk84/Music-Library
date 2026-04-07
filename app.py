@@ -469,6 +469,48 @@ def is_compilation_album(album_name: str) -> bool:
     
     return False
 
+def _get_cover_cache_dir() -> str:
+    """Return (and create) the directory for locally cached cover art images."""
+    base = get_project_root_for_data(__file__)
+    path = os.path.join(base, "cover_cache")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _cache_cover_art(key: str, cover_url: str) -> Optional[str]:
+    """Download cover art from cover_url and cache it locally. Returns md5 hash or None."""
+    if not cover_url or not cover_url.startswith("http"):
+        return None
+    key_hash = hashlib.md5(key.encode("utf-8")).hexdigest()
+    cover_path = os.path.join(_get_cover_cache_dir(), key_hash + ".jpg")
+    if os.path.exists(cover_path):
+        return key_hash
+    try:
+        resp = requests.get(cover_url, timeout=10, headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://soundeo.com/",
+        })
+        if resp.status_code == 200 and resp.content:
+            with open(cover_path, "wb") as f:
+                f.write(resp.content)
+            return key_hash
+    except Exception as e:
+        logging.warning("_cache_cover_art: failed to download %s — %s", cover_url, e)
+    return None
+
+
+def _cover_hashes_for_status(status: dict) -> dict:
+    """Return cover_hashes dict: keys present in status that have a cached cover art file."""
+    cover_dir = _get_cover_cache_dir()
+    cover_hashes = {}
+    existing = status.get("cover_hashes") or {}
+    for key, key_hash in existing.items():
+        cover_path = os.path.join(cover_dir, key_hash + ".jpg")
+        if os.path.exists(cover_path):
+            cover_hashes[key] = key_hash
+    return cover_hashes
+
+
 def download_cover_art(url: str) -> Optional[str]:
     """Download cover art from URL and return as base64"""
     try:
@@ -1360,6 +1402,30 @@ def _rebuild_status_from_caches():
         return out
     local_scan = load_local_scan_cache()
     if not local_scan_cache_valid(local_scan, folder_paths):
+        # Local scan cache is stale/invalid (e.g. a download modified a folder).
+        # Fall back: merge any new Shazam tracks into the existing status rather than
+        # returning None and losing them. New tracks go to to_download; the existing
+        # have_locally split is preserved until the next full Compare.
+        old_status = load_status_cache()
+        if old_status and (old_status.get('to_download') or old_status.get('have_locally')):
+            existing_keys = set()
+            for t in old_status.get('to_download', []):
+                existing_keys.add((_track_key_norm(t)))
+            for t in old_status.get('have_locally', []):
+                existing_keys.add((_track_key_norm(t)))
+            for t in old_status.get('skipped_tracks', []):
+                existing_keys.add((_track_key_norm(t)))
+            new_tracks = [
+                {**({'shazamed_at': t['shazamed_at']} if t.get('shazamed_at') is not None else {}),
+                 'artist': t['artist'], 'title': t['title']}
+                for t in shazam_tracks if _track_key_norm(t) not in existing_keys
+            ]
+            if new_tracks or old_status.get('shazam_count', 0) != len(shazam_tracks):
+                out = dict(old_status)
+                out['to_download'] = _dedupe_tracks_by_key((old_status.get('to_download') or []) + new_tracks)
+                out['to_download_count'] = len(out['to_download'])
+                out['shazam_count'] = len(shazam_tracks)
+                return out
         return None
     local_tracks = local_scan.get('tracks', [])
     skipped = load_skip_list()
@@ -1419,6 +1485,8 @@ def _merge_preserved_urls_into_status(status: Dict) -> None:
     if old:
         if old.get('urls'):
             status['urls'] = {**(status.get('urls') or {}), **old['urls']}
+        if old.get('cover_hashes'):
+            status['cover_hashes'] = {**(status.get('cover_hashes') or {}), **old['cover_hashes']}
         if old.get('starred'):
             status['starred'] = {**(status.get('starred') or {}), **old['starred']}
         if old.get('dismissed_manual_check'):
@@ -1471,6 +1539,83 @@ def _add_starred_lowercase_aliases(status: Dict) -> Dict:
                     extra[dk] = v
         if extra:
             out[m] = {**data, **extra}
+    return out
+
+
+def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
+    """Move any to_download tracks that are already present in the local scan cache to have_locally.
+    Runs on every bootstrap so the status stays in sync without needing a full Compare.
+    For tracks downloaded via the app, use the stored filepath directly (no fuzzy matching needed)."""
+    from shazam_cache import load_local_scan_cache, save_status_cache
+    from local_scanner import _find_matching_local_track, compute_to_download
+
+    to_dl = list(status.get('to_download') or [])
+    if not to_dl:
+        return status
+
+    # Tracks downloaded through the app have exact filepath stored — check those first.
+    dl_paths = status.get('download_filepaths') or {}
+
+    local_cache = load_local_scan_cache()
+    local_tracks = (local_cache.get('tracks') or []) if local_cache else []
+    tw_idx = ex_map = lc = None
+    if local_tracks:
+        try:
+            _, tw_idx, ex_map, lc = compute_to_download([], local_tracks)
+        except Exception:
+            pass
+
+    have = list(status.get('have_locally') or [])
+    have_keys = {_track_key_norm(h) for h in have}
+
+    remaining_to_dl = []
+    changed = False
+    for t in to_dl:
+        if _track_key_norm(t) in have_keys:
+            remaining_to_dl.append(t)
+            continue
+
+        # Fast path: was downloaded through the app — filepath is known exactly.
+        track_key = f"{t['artist']} - {t['title']}"
+        known_fp = dl_paths.get(track_key) or dl_paths.get(track_key.lower())
+        if known_fp and os.path.exists(known_fp):
+            item = {'artist': t['artist'], 'title': t['title'], 'filepath': known_fp}
+            if t.get('shazamed_at') is not None:
+                item['shazamed_at'] = t['shazamed_at']
+            have.append(item)
+            have_keys.add(_track_key_norm(t))
+            changed = True
+            logging.info('_reconcile (exact): moved %s to have_locally (file: %s)', track_key, known_fp)
+            continue
+
+        # Slow path: fuzzy-match against local scan cache (for files not downloaded via app).
+        match = None
+        if local_tracks and tw_idx is not None:
+            try:
+                match, _ = _find_matching_local_track(t, local_tracks, title_word_index=tw_idx, exact_match_map=ex_map, local_canon=lc)
+            except Exception:
+                pass
+        if match and match.get('filepath') and os.path.exists(match['filepath']):
+            item = {'artist': t['artist'], 'title': t['title']}
+            if t.get('shazamed_at') is not None:
+                item['shazamed_at'] = t['shazamed_at']
+            item['filepath'] = match['filepath']
+            have.append(item)
+            have_keys.add(_track_key_norm(t))
+            changed = True
+            logging.info('_reconcile (fuzzy): moved %s to have_locally (file: %s)', _track_key_norm(t), match['filepath'])
+        else:
+            remaining_to_dl.append(t)
+
+    if not changed:
+        return status
+
+    out = dict(status)
+    out['have_locally'] = have
+    out['to_download'] = remaining_to_dl
+    out['to_download_count'] = len(remaining_to_dl)
+    app._shazam_sync_status = out
+    save_status_cache(out)
     return out
 
 
@@ -1539,17 +1684,20 @@ def _get_best_available_status():
     file_has_dot_state = bool((cached or {}).get('search_outcomes') or (cached or {}).get('urls'))
     if has_cached_data and file_has_dot_state and not _status_is_stale(cached):
         out = _sanitize_have_locally_filepaths(dict(cached))
+        out = _reconcile_to_download_with_local_cache(out)
         out = _apply_skip_list_to_status(out)
         app._shazam_sync_status = out
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
     if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status and not _status_is_stale(app._shazam_sync_status):
         out = _sanitize_have_locally_filepaths(dict(app._shazam_sync_status))
+        out = _reconcile_to_download_with_local_cache(out)
         out = _apply_skip_list_to_status(out)
         out = _apply_dot_state_from_file(out)
         return _add_starred_lowercase_aliases(out)
     if has_cached_data and not _status_is_stale(cached):
         out = _sanitize_have_locally_filepaths(dict(cached))
+        out = _reconcile_to_download_with_local_cache(out)
         out = _apply_skip_list_to_status(out)
         app._shazam_sync_status = out
         out = _apply_dot_state_from_file(out)
@@ -1647,6 +1795,27 @@ def shazam_sync_status():
     resp = jsonify(out)
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return resp
+
+
+@app.route('/api/shazam-sync/cover/<cover_hash>', methods=['GET'])
+def shazam_sync_cover(cover_hash: str):
+    """Serve cached Soundeo cover art by hash (used by the Shazam playbar)."""
+    # Validate: hashes are stored as lowercase hex md5/sha-like strings.
+    h = (cover_hash or '').strip().lower()
+    if not h or len(h) > 64 or any(c not in '0123456789abcdef' for c in h):
+        return Response("Invalid cover hash\n", status=400, mimetype='text/plain')
+
+    from app_paths import get_project_root_for_data
+    root = get_project_root_for_data(__file__)
+    cache_dir = os.path.join(root, 'cover_cache')
+    # Current cache format: <hash>.jpg (some older caches may have .png)
+    for ext, mime in (('.jpg', 'image/jpeg'), ('.jpeg', 'image/jpeg'), ('.png', 'image/png')):
+        fp = os.path.join(cache_dir, h + ext)
+        if os.path.isfile(fp):
+            resp = send_file(fp, mimetype=mime, conditional=True)
+            resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+            return resp
+    return Response("Not found\n", status=404, mimetype='text/plain')
 
 
 @app.route('/api/shazam-sync/export/local-filenames')
@@ -2016,6 +2185,10 @@ def shazam_open_file_location():
 
 _soundeo_preview_cache: Dict[str, dict] = {}
 _PREVIEW_CACHE_TTL = 24 * 3600
+# Local-file cache for pre-fetched Soundeo previews (downloaded to disk for gap-free playback)
+_soundeo_local_preview: Dict[str, dict] = {}  # track_url -> {path, mp3_url, ts}
+_SOUNDEO_PREVIEW_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'instance', 'soundeo_previews')
+_SOUNDEO_PREVIEW_TTL = 2 * 3600  # 2 hours
 
 
 def _extract_soundeo_preview_url(track_page_url: str) -> Optional[str]:
@@ -2067,6 +2240,146 @@ def _extract_soundeo_preview_url(track_page_url: str) -> Optional[str]:
         return None
 
 
+@app.route('/api/shazam-sync/cover/<key_hash>')
+def shazam_serve_cover(key_hash):
+    """Serve a locally cached cover art JPEG."""
+    import re as _re
+    if not _re.match(r'^[a-f0-9]{32}$', key_hash):
+        return ('', 404)
+    cover_path = os.path.join(_get_cover_cache_dir(), key_hash + '.jpg')
+    if not os.path.exists(cover_path):
+        return ('', 404)
+    return send_file(cover_path, mimetype='image/jpeg', max_age=86400)
+
+
+_cover_backfill_running = False
+_cover_backfill_progress = {'done': 0, 'total': 0, 'running': False}
+
+
+def _run_cover_backfill():
+    """Background thread: fetch og:image from Soundeo track pages for tracks missing cover art."""
+    global _cover_backfill_running, _cover_backfill_progress
+    try:
+        from shazam_cache import load_status_cache, save_status_cache
+        import re as _re
+
+        # Build an authenticated requests session with saved cookies
+        cookies_path = None
+        try:
+            from config_shazam import get_soundeo_cookies_path
+            cookies_path = get_soundeo_cookies_path()
+        except Exception:
+            pass
+        if not cookies_path:
+            cookies_path = os.path.join(os.path.dirname(__file__), 'soundeo_cookies.json')
+
+        session = requests.Session()
+        session.headers['User-Agent'] = (
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        if os.path.exists(cookies_path):
+            try:
+                raw_cookies = json.load(open(cookies_path))
+                for c in raw_cookies:
+                    if c.get('name') and c.get('value'):
+                        session.cookies.set(
+                            c['name'], c['value'],
+                            domain=c.get('domain', 'soundeo.com').lstrip('.')
+                        )
+            except Exception as e:
+                logging.warning('backfill_covers: could not load cookies: %s', e)
+
+        status = load_status_cache() or {}
+        urls = status.get('urls') or {}
+        cover_hashes = status.get('cover_hashes') or {}
+
+        # Tracks that have a Soundeo URL but no cached cover art
+        todo_raw = [(key, url) for key, url in urls.items() if key not in cover_hashes]
+
+        # Sort by newest Shazam date first so recently-added tracks get art immediately.
+        # Build a lookup: key -> shazamed_at from to_download + have_locally lists.
+        shazam_dates: dict = {}
+        for t in (status.get('to_download') or []) + (status.get('have_locally') or []):
+            k = f"{t.get('artist', '')} - {t.get('title', '')}"
+            ts = t.get('shazamed_at') or 0
+            if k not in shazam_dates or ts > shazam_dates[k]:
+                shazam_dates[k] = ts
+        todo = sorted(todo_raw, key=lambda x: shazam_dates.get(x[0], 0), reverse=True)
+
+        _cover_backfill_progress = {'done': 0, 'total': len(todo), 'running': True}
+        logging.info('cover_backfill: %d tracks need cover art', len(todo))
+
+        for i, (key, track_url) in enumerate(todo):
+            if not _cover_backfill_running:
+                break
+            try:
+                resp = session.get(track_url, timeout=12)
+                og_matches = _re.findall(
+                    r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', resp.text
+                )
+                if not og_matches:
+                    # fallback: any covers.sndstatic image, prefer the largest
+                    imgs = _re.findall(
+                        r'src="(https://covers\.sndstatic\.com/[^"]+)"', resp.text
+                    )
+                    if imgs:
+                        # upgrade to 500px
+                        og_matches = [_re.sub(r'-\d+\.jpg$', '-500.jpg', imgs[0])]
+                if og_matches:
+                    cover_url = og_matches[0]
+                    cover_hash = _cache_cover_art(key, cover_url)
+                    if cover_hash:
+                        status.setdefault('cover_hashes', {})[key] = cover_hash
+                        cover_hashes[key] = cover_hash
+                        # Update in-memory status
+                        mem = getattr(app, '_shazam_sync_status', None)
+                        if mem is not None:
+                            mem.setdefault('cover_hashes', {})[key] = cover_hash
+            except Exception as e:
+                logging.debug('cover_backfill: error for %s: %s', key, e)
+
+            _cover_backfill_progress['done'] = i + 1
+
+            # Save every 25 tracks
+            if (i + 1) % 25 == 0:
+                try:
+                    save_status_cache(status)
+                except Exception:
+                    pass
+            time.sleep(0.1)
+
+        # Final save
+        try:
+            save_status_cache(status)
+        except Exception:
+            pass
+        logging.info('cover_backfill: finished (%d/%d)', _cover_backfill_progress['done'], len(todo))
+    except Exception as e:
+        logging.error('cover_backfill thread error: %s', e)
+    finally:
+        _cover_backfill_running = False
+        _cover_backfill_progress['running'] = False
+
+
+@app.route('/api/shazam-sync/backfill-covers', methods=['POST'])
+def shazam_backfill_covers():
+    """Start a background job to fetch cover art for all tracks missing it."""
+    global _cover_backfill_running
+    if _cover_backfill_running:
+        return jsonify({'status': 'already_running', **_cover_backfill_progress})
+    _cover_backfill_running = True
+    t = threading.Thread(target=_run_cover_backfill, daemon=True)
+    t.start()
+    return jsonify({'status': 'started'})
+
+
+@app.route('/api/shazam-sync/backfill-covers/progress', methods=['GET'])
+def shazam_backfill_covers_progress():
+    """Return current backfill progress."""
+    return jsonify(_cover_backfill_progress)
+
+
 @app.route('/api/soundeo/preview-url')
 def soundeo_preview_url():
     """Get a playable audio preview URL for a Soundeo track. Cached for 24h."""
@@ -2084,6 +2397,61 @@ def soundeo_preview_url():
 
     _soundeo_preview_cache[track_url] = {'url': preview, 'ts': time.time()}
     return jsonify({'preview_url': preview})
+
+
+@app.route('/api/soundeo/prefetch-preview')
+def soundeo_prefetch_preview():
+    """Download a Soundeo preview MP3 to local disk for gap-free next-track playback.
+    Returns a local mp3_url served from disk — much faster to play back than a live proxy stream."""
+    track_url = request.args.get('track_url', '').strip()
+    if not track_url or 'soundeo.com' not in track_url:
+        return jsonify({'error': 'Missing or invalid track_url'}), 400
+
+    # Serve from disk if already cached and file still exists
+    cached = _soundeo_local_preview.get(track_url)
+    if cached and os.path.isfile(cached['path']) and (time.time() - cached['ts']) < _SOUNDEO_PREVIEW_TTL:
+        return jsonify({'mp3_url': cached['mp3_url']})
+
+    # Resolve the CDN preview URL (in-memory cache, 24h)
+    url_cached = _soundeo_preview_cache.get(track_url)
+    if url_cached and (time.time() - url_cached['ts']) < _PREVIEW_CACHE_TTL:
+        preview_url = url_cached['url']
+    else:
+        preview_url = _extract_soundeo_preview_url(track_url)
+        if not preview_url:
+            return jsonify({'error': 'Could not extract preview URL'}), 404
+        _soundeo_preview_cache[track_url] = {'url': preview_url, 'ts': time.time()}
+
+    import requests as req
+    preview_id = hashlib.sha256(track_url.encode()).hexdigest()[:24]
+    os.makedirs(_SOUNDEO_PREVIEW_DIR, exist_ok=True)
+    mp3_path = os.path.join(_SOUNDEO_PREVIEW_DIR, f'{preview_id}.mp3')
+    try:
+        resp = req.get(preview_url, timeout=20, headers={
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://soundeo.com/',
+        })
+        if resp.status_code != 200:
+            return jsonify({'error': f'Upstream returned {resp.status_code}'}), 502
+        with open(mp3_path, 'wb') as fh:
+            fh.write(resp.content)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+
+    mp3_url = f'/api/soundeo/preview-file/{preview_id}.mp3'
+    _soundeo_local_preview[track_url] = {'path': mp3_path, 'mp3_url': mp3_url, 'ts': time.time()}
+    return jsonify({'mp3_url': mp3_url})
+
+
+@app.route('/api/soundeo/preview-file/<preview_id>.mp3')
+def soundeo_serve_preview_file(preview_id: str):
+    """Serve a locally cached Soundeo preview MP3."""
+    if not preview_id or '..' in preview_id or '/' in preview_id or '\\' in preview_id:
+        return 'Invalid id', 400
+    mp3_path = os.path.join(_SOUNDEO_PREVIEW_DIR, f'{preview_id}.mp3')
+    if not os.path.isfile(mp3_path):
+        return 'Not found', 404
+    return send_file(mp3_path, mimetype='audio/mpeg', as_attachment=False, conditional=True)
 
 
 @app.route('/api/soundeo/stream-preview')
@@ -2441,6 +2809,9 @@ def _apply_download_to_status_and_cache(key: str, filepath: str) -> None:
     status['have_locally'] = have
     status['to_download'] = to_dl
     status['to_download_count'] = len(to_dl)
+    # Persist the exact filepath so reconciliation never needs fuzzy matching for downloaded tracks.
+    status.setdefault('download_filepaths', {})[key] = filepath
+    status['download_filepaths'][key.lower()] = filepath
     _merge_preserved_urls_into_status(status)
     app._shazam_sync_status = status
     save_status_cache(status)
@@ -2563,9 +2934,13 @@ def _run_download_queue_worker():
             if err == 'no_credits':
                 no_credits = True
                 dlog.warning("download_queue: no credits (premium redirect), stop")
-                app._shazam_download_progress['error'] = 'To be able to download you need to purchase premium account.'
-                app._shazam_download_progress['running'] = False
+                # Remaining keys (current + not-yet-attempted) are all blocked
+                blocked_keys = [key] + [k for k in keys[i + 1:]]
                 results.append({'key': key, 'ok': False, 'error': 'no_credits'})
+                app._shazam_download_progress['error'] = 'Download blocked: your Soundeo credits are depleted. Purchase Premium to continue.'
+                app._shazam_download_progress['running'] = False
+                app._shazam_download_progress['no_credits'] = True
+                app._shazam_download_progress['no_credits_keys'] = blocked_keys
                 app._shazam_download_progress['results'] = results
                 break
             failed += 1
@@ -2592,7 +2967,12 @@ def _run_download_queue_worker():
         f'Done. {done} downloaded, {failed} failed.' if failed else f'Done. {done} downloaded.'
     )
     if no_credits:
-        app._shazam_download_progress['error'] = 'To be able to download you need to purchase premium account.'
+        app._shazam_download_progress['error'] = 'Download blocked: your Soundeo credits are depleted. Purchase Premium to continue.'
+        # no_credits / no_credits_keys already set in the break branch above; preserve them here in case
+        # the loop exited via break and the fields were set, but set defaults in case they weren't
+        app._shazam_download_progress.setdefault('no_credits', True)
+        no_credits_keys = app._shazam_download_progress.get('no_credits_keys') or []
+        app._shazam_download_progress['no_credits_keys'] = no_credits_keys
     elif failed > 0 and results:
         # Show the last failure reason so the user sees why (e.g. "Download returned 403", "No saved session")
         last_failed = next((r for r in reversed(results) if not r.get('ok') and r.get('error')), None)
@@ -3213,6 +3593,7 @@ def _run_search_soundeo_single(artist: str, title: str):
             status.setdefault('soundeo_titles', {})
             status.setdefault('soundeo_match_scores', {})
             status.setdefault('not_found', {})
+            status.setdefault('cover_hashes', {})
             _set_url_and_track_id(status, key, out[0], cookies_path)
             title_val = (out[1] if len(out) > 1 else '') or key
             status['soundeo_titles'][key] = status['soundeo_titles'][key.lower()] = title_val
@@ -3220,11 +3601,56 @@ def _run_search_soundeo_single(artist: str, title: str):
             if match_sc is not None:
                 status['soundeo_match_scores'][key] = round(match_sc, 3)
                 status['soundeo_match_scores'][key.lower()] = round(match_sc, 3)
+            cover_url_single = out[3] if len(out) > 3 else None
+            # Upgrade 50px thumbnails from Selenium to 500px
+            import re as _re_cover
+            if cover_url_single and _re_cover.search(r'-\d+\.jpg$', cover_url_single):
+                cover_url_single = _re_cover.sub(r'-\d+\.jpg$', '-500.jpg', cover_url_single)
+            # If Selenium didn't get cover art, fetch it reliably via the track page (og:image)
+            track_url_for_cover = out[0]
+            if not cover_url_single and track_url_for_cover and 'soundeo.com' in track_url_for_cover:
+                try:
+                    _cover_session = requests.Session()
+                    _cover_session.headers['User-Agent'] = (
+                        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+                        'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                    )
+                    if os.path.exists(cookies_path):
+                        _raw_ck = json.load(open(cookies_path))
+                        for _c in _raw_ck:
+                            if _c.get('name') and _c.get('value'):
+                                _cover_session.cookies.set(
+                                    _c['name'], _c['value'],
+                                    domain=_c.get('domain', 'soundeo.com').lstrip('.')
+                                )
+                    _cover_resp = _cover_session.get(track_url_for_cover, timeout=12)
+                    _og = _re_cover.findall(
+                        r'<meta[^>]+property="og:image"[^>]+content="([^"]+)"', _cover_resp.text
+                    )
+                    if _og:
+                        cover_url_single = _og[0]
+                    else:
+                        _imgs = _re_cover.findall(
+                            r'src="(https://covers\.sndstatic\.com/[^"]+)"', _cover_resp.text
+                        )
+                        if _imgs:
+                            cover_url_single = _re_cover.sub(r'-\d+\.jpg$', '-500.jpg', _imgs[0])
+                except Exception as _e_cover:
+                    logging.debug('search_single cover fetch fallback failed for %s: %s', key, _e_cover)
+            if cover_url_single:
+                cover_hash = _cache_cover_art(key, cover_url_single)
+                if cover_hash:
+                    status['cover_hashes'][key] = cover_hash
+                    if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status:
+                        app._shazam_sync_status.setdefault('cover_hashes', {})[key] = cover_hash
             status['not_found'].pop(key, None)
             status['not_found'].pop(key.lower(), None)
             app._shazam_sync_status = status
             log_search_outcome(key, found=True, url=out[0], status_to_update=status)
-            save_status_cache(status)
+            try:
+                save_status_cache(status)
+            except Exception as _se:
+                logging.warning('save_status_cache failed after single-search found for %s: %s', key, _se)
         else:
             if not not_logged_in:
                 from shazam_cache import load_status_cache
@@ -3235,7 +3661,10 @@ def _run_search_soundeo_single(artist: str, title: str):
                 app._shazam_sync_status = status
                 from shazam_cache import log_search_outcome
                 log_search_outcome(key, found=False, status_to_update=status)
-                save_status_cache(status)
+                try:
+                    save_status_cache(status)
+                except Exception as _se:
+                    logging.warning('save_status_cache failed after single-search not-found for %s: %s', key, _se)
 
         if out:
             status.setdefault('starred', {})
@@ -3246,10 +3675,14 @@ def _run_search_soundeo_single(artist: str, title: str):
                 "search_single key=%s status.starred updated to %s (UI should show filled star if True)",
                 key[:70], starred,
             )
+            _prog_cover_hashes = {}
+            if key in status.get('cover_hashes', {}):
+                _prog_cover_hashes[key] = status['cover_hashes'][key]
             app._shazam_sync_progress = {
                 'running': False, 'done': 1, 'key': key, 'url': out[0],
                 'soundeo_title': (out[1] if len(out) > 1 else '') or key,
                 'starred': starred,
+                'cover_hashes': _prog_cover_hashes,
                 'message': f'Found: {artist} - {title}', 'mode': 'search_single',
             }
         else:
@@ -3354,12 +3787,18 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
                         "search_global key=%s url=%s starred=%s (blue star on Soundeo) status.starred updated",
                         current_key[:70], url[:60] if url else "", starred_val,
                     )
-                save_status_cache(status)
+                try:
+                    save_status_cache(status)
+                except Exception as _se:
+                    logging.warning('save_status_cache failed after found result for %s: %s', current_key, _se)
                 prog['urls'][current_key] = url
                 prog['urls'][current_key.lower()] = url
             elif 'Not found' in msg or 'not found' in msg.lower():
                 log_search_outcome(current_key, found=False, status_to_update=status)
-                save_status_cache(status)
+                try:
+                    save_status_cache(status)
+                except Exception as _se:
+                    logging.warning('save_status_cache failed after not-found result for %s: %s', current_key, _se)
                 prog['not_found'][current_key] = True
                 prog['not_found'][current_key.lower()] = True
         app._shazam_sync_progress = prog
@@ -3398,6 +3837,13 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
         for k, sc in (result.get('soundeo_match_scores') or {}).items():
             status['soundeo_match_scores'][k] = sc
             status['soundeo_match_scores'][k.lower()] = sc
+        # Cache cover art for found tracks (download in background, non-blocking per track)
+        status.setdefault('cover_hashes', {})
+        for k, curl in (result.get('cover_urls') or {}).items():
+            if curl and k not in status['cover_hashes']:
+                cover_hash = _cache_cover_art(k, curl)
+                if cover_hash:
+                    status['cover_hashes'][k] = cover_hash
         for k in list(status.get('not_found') or {}):
             if status['urls'].get(k) or status['urls'].get(k.lower() if isinstance(k, str) else None):
                 del status['not_found'][k]

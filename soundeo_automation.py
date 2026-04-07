@@ -591,7 +591,19 @@ def find_track_on_soundeo(
             time.sleep(delay)
 
     if overall_best_href and overall_best_score >= _MATCH_THRESHOLD:
-        return (overall_best_href, overall_best_text or "", overall_best_score)
+        # Try to extract cover art from the best matching link's nearest img element (Selenium).
+        cover_url = None
+        if overall_best_link:
+            try:
+                from selenium.webdriver.common.by import By as _By
+                parent = overall_best_link.find_element(_By.XPATH, './ancestor::*[.//img][1]')
+                img_el = parent.find_element(_By.CSS_SELECTOR, 'img')
+                src = (img_el.get_attribute('src') or '').strip()
+                if src.startswith('http'):
+                    cover_url = src
+            except Exception:
+                pass
+        return (overall_best_href, overall_best_text or "", overall_best_score, cover_url)
 
     return None
 
@@ -1576,11 +1588,14 @@ def run_search_tracks(
                 url = out[0] if isinstance(out, tuple) else out
                 display_text = (out[1] if isinstance(out, tuple) and len(out) > 1 else "") or ""
                 match_score = (out[2] if isinstance(out, tuple) and len(out) > 2 else None)
+                cover_url = (out[3] if isinstance(out, tuple) and len(out) > 3 else None)
                 results["done"] += 1
                 results["urls"][key] = url
                 results["soundeo_titles"][key] = display_text or key
                 if match_score is not None:
                     results["soundeo_match_scores"][key] = round(match_score, 3)
+                if cover_url:
+                    results.setdefault("cover_urls", {})[key] = cover_url
                 starred_val = None
                 try:
                     starred_val = soundeo_api_get_favorite_state(url, cookies_path)
@@ -1636,7 +1651,7 @@ def run_search_tracks_http(
     global _sync_stop_requested
     clear_sync_stop_request()
     skip_keys = skip_keys or set()
-    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "starred": {}, "stopped": False}
+    results = {"done": 0, "failed": 0, "errors": [], "urls": {}, "soundeo_titles": {}, "soundeo_match_scores": {}, "starred": {}, "cover_urls": {}, "stopped": False}
 
     if not os.path.exists(os.path.abspath(cookies_path)):
         return {"error": "No saved session. Save Soundeo session first in Settings."}
@@ -1661,6 +1676,7 @@ def run_search_tracks_http(
         best_url = None
         best_title = None
         best_score = -1
+        best_cover_url = None
         for q in _search_queries(artist, title):
             try:
                 search_results = soundeo_api_search(q, cookies_path)
@@ -1672,12 +1688,15 @@ def run_search_tracks_http(
                     best_score = score
                     best_url = r.get("href")
                     best_title = r.get("title") or key
+                    best_cover_url = r.get("cover_url")
 
         if best_url and best_score >= _MATCH_THRESHOLD:
             results["done"] += 1
             results["urls"][key] = best_url
             results["soundeo_titles"][key] = best_title or key
             results["soundeo_match_scores"][key] = round(best_score, 3)
+            if best_cover_url:
+                results["cover_urls"][key] = best_cover_url
             starred_val = None
             try:
                 starred_val = soundeo_api_get_favorite_state(best_url, cookies_path)
@@ -1918,14 +1937,38 @@ def soundeo_api_set_favorite(
     return r2 if r2.get("ok") else r
 
 
-def _parse_track_links_from_html(html: str) -> List[Tuple[str, str]]:
-    """Parse track links from Soundeo HTML. Returns list of (href, link_text)."""
+def _parse_track_links_from_html(html: str) -> List[Tuple[str, str, Optional[str]]]:
+    """Parse track links from Soundeo HTML. Returns list of (href, link_text, cover_url_or_None)."""
     import re
     import html as htmllib
-    links = re.findall(
-        r'<a[^>]+href="(/track/[^"]+)"[^>]*>([^<]+)</a>', html
+
+    link_pat = re.compile(r'<a[^>]+href="(/track/[^"]+)"[^>]*>([^<]+)</a>')
+    # Capture img src containing CDN/cover patterns (sndstatic, soundeo, covers, cdn, thumb)
+    img_pat = re.compile(
+        r'<img[^>]+src="(https?://[^"]*(?:sndstatic|soundeo|cover|thumb|cdn)[^"]*)"[^>]*>',
+        re.IGNORECASE,
     )
-    return [(href, htmllib.unescape(txt).strip()) for href, txt in links]
+
+    links = [(m.start(), m.group(1), htmllib.unescape(m.group(2)).strip()) for m in link_pat.finditer(html)]
+    imgs = [(m.start(), m.group(1)) for m in img_pat.finditer(html)]
+
+    WINDOW = 3000  # character window to search for a nearby image
+    results = []
+    for link_pos, href, txt in links:
+        cover_url = None
+        best_dist = WINDOW + 1
+        for img_pos, img_src in imgs:
+            dist = abs(img_pos - link_pos)
+            if dist < best_dist:
+                best_dist = dist
+                cover_url = img_src
+        if best_dist > WINDOW:
+            cover_url = None
+        # Upgrade thumbnail quality: search pages serve 50px, swap for 500px
+        if cover_url and re.search(r'-\d+\.jpg$', cover_url):
+            cover_url = re.sub(r'-\d+\.jpg$', '-500.jpg', cover_url)
+        results.append((href, txt, cover_url))
+    return results
 
 
 def soundeo_api_search(query: str, cookies_path: str) -> List[Dict]:
@@ -1952,7 +1995,7 @@ def soundeo_api_search(query: str, cookies_path: str) -> List[Dict]:
             fav_map[tid] = "favored" in cls
         results = []
         seen_ids = set()
-        for href, txt in links:
+        for href, txt, cover_url in links:
             tid = extract_track_id(href)
             if not tid or tid in seen_ids:
                 continue
@@ -1962,6 +2005,7 @@ def soundeo_api_search(query: str, cookies_path: str) -> List[Dict]:
                 "title": txt,
                 "href": f"{SOUNDEO_BASE}{href}",
                 "favored": fav_map.get(tid, False),
+                "cover_url": cover_url,
             })
         return results
 
@@ -2022,6 +2066,7 @@ def soundeo_api_search_and_favorite(
                 "display_text": best["title"],
                 "track_id": best["track_id"],
                 "already_favored": best["favored"],
+                "cover_url": best.get("cover_url"),
             }
 
     return {"ok": False, "error": f"Not found: {artist} - {title}"}

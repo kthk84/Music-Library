@@ -33,8 +33,11 @@ def _save_json(path: str, data: Any) -> None:
 
 
 def _save_json_atomic(path: str, data: Any) -> None:
-    """Write to temp file then rename for atomicity. Flush+fsync so data is on disk before rename."""
+    """Write to temp file then rename for atomicity. Flush+fsync so data is on disk before rename.
+    Falls back to a direct write if the atomic rename times out (e.g. transient macOS filesystem issue)."""
+    import logging as _log
     tmp = path + ".tmp." + str(os.getpid())
+    renamed = False
     try:
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -44,6 +47,21 @@ def _save_json_atomic(path: str, data: Any) -> None:
             except (OSError, AttributeError):
                 pass
         os.replace(tmp, path)
+        renamed = True
+    except Exception as _e:
+        if not renamed:
+            _log.warning('_save_json_atomic: atomic rename failed (%s) — falling back to direct write for %s', _e, os.path.basename(path))
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    try:
+                        os.fsync(f.fileno())
+                    except (OSError, AttributeError):
+                        pass
+            except Exception as _e2:
+                _log.error('_save_json_atomic: direct write also failed for %s: %s', os.path.basename(path), _e2)
+                raise
     finally:
         if os.path.exists(tmp):
             try:
