@@ -4205,7 +4205,6 @@ async function shazamSyncSingleTrack(key, artist, title) {
                                 });
                             }
                             shazamLoadStatus();
-                            shazamQueueSyncFavoritesAfterSearch();
                             shazamMaybeStartQueuedJob();
                         } else if (p.error) {
                             alert(p.error);
@@ -4393,13 +4392,6 @@ function shazamClearJobQueue() {
 
 function shazamRemoveQueuedJob(id) {
     shazamJobQueue = shazamJobQueue.filter(j => j.id !== id);
-    shazamRenderJobQueue();
-}
-
-/** Queue a Sync Favorites job so star state is fetched after a search (manual row search, search new, search unfound). */
-function shazamQueueSyncFavoritesAfterSearch() {
-    const timeRange = shazamScanRange || 'all';
-    shazamJobQueue.push({ id: ++shazamJobId, type: 'sync_favorites', label: 'Sync favorites', payload: { time_range: timeRange } });
     shazamRenderJobQueue();
 }
 
@@ -5263,7 +5255,6 @@ function shazamPollProgress() {
                 } else {
                     shazamHideSyncProgress();
                     shazamLoadStatus();
-                    if (p.mode === 'search_global') shazamQueueSyncFavoritesAfterSearch();
                     shazamMaybeStartQueuedJob();
                 }
             }
@@ -5872,7 +5863,6 @@ async function shazamSearchAllOnSoundeo(searchMode) {
                         shazamLastData.soundeo_match_scores = { ...(shazamLastData.soundeo_match_scores || {}), ...p.soundeo_match_scores };
                     }
                     if (shazamLastData) shazamRenderTrackList(shazamLastData);
-                    shazamQueueSyncFavoritesAfterSearch();
                 }
                 shazamLoadStatus();
                 shazamMaybeStartQueuedJob();
