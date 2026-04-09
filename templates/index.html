@@ -164,7 +164,7 @@
                     </div>
                     <div class="settings-toolbar-row">
                         <div class="favorites-dropdown-wrap toolbar-group">
-                            <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Crawl Soundeo favorites and sync starred state (manual; not run after Fetch Shazam / Search)" aria-haspopup="true" aria-expanded="false">
+                            <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Crawls your Soundeo /account/favorites list and syncs starred state for all matching app tracks. Manual only—not run after Fetch Shazam or Search. Search already updates star per track on each track page." aria-haspopup="true" aria-expanded="false">
                                 Sync favorites (Soundeo) <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
                             </button>
                             <div class="search-dropdown-menu" id="shazamFavoritesDropdownMenu" role="menu">
@@ -174,6 +174,7 @@
                                 <button type="button" class="search-dropdown-item" role="menuitem" data-scan-range="3_months">Last quarter</button>
                             </div>
                         </div>
+                        <span class="folder-hint" style="flex-basis:100%;margin-top:var(--sp-1);">Search updates favorite/star from each track’s Soundeo page. Sync favorites (above) crawls your full favorites list—manual only.</span>
                         <div class="rescan-dropdown-wrap toolbar-group">
                             <button type="button" id="shazamRescanDropdownBtn" class="btn btn-secondary btn-small" title="Rescan local folders" aria-haspopup="true" aria-expanded="false">
                                 Rescan <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
@@ -200,12 +201,12 @@
                 <div class="toolbar-group">
                     <button type="button" onclick="shazamFetchShazam()" class="btn btn-shazam" id="shazamFetchBtn"><span class="shazam-btn-icon" aria-hidden="true"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></span>Shazam</button>
                     <div class="search-dropdown-wrap toolbar-group">
-                        <button type="button" id="shazamSearchDropdownBtn" class="btn btn-secondary" title="Search: unfound (orange) or new (grey) tracks" aria-haspopup="true" aria-expanded="false">
+                        <button type="button" id="shazamSearchDropdownBtn" class="btn btn-secondary" title="Finds Soundeo links. For each found track, reads favorite/star on that track page and saves it in the app (per track, lightweight). Does not crawl your full favorites list—that is Settings → Sync favorites (Soundeo) only." aria-haspopup="true" aria-expanded="false">
                             Search <span class="search-dropdown-chevron" aria-hidden="true">▾</span>
                         </button>
                         <div class="search-dropdown-menu" id="shazamSearchDropdownMenu" role="menu">
-                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="new"><span class="status-dot status-no-link" aria-hidden="true"></span> Search New Shazam Entries on Soundeo</button>
-                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="unfound"><span class="status-dot status-not-found" aria-hidden="true"></span> Search Unfound Shazam Entries on Soundeo</button>
+                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="new" title="Per found track: link + star on track page. No full favorites crawl."><span class="status-dot status-no-link" aria-hidden="true"></span> Search New Shazam Entries on Soundeo</button>
+                            <button type="button" class="search-dropdown-item" role="menuitem" data-mode="unfound" title="Per found track: link + star on track page. No full favorites crawl."><span class="status-dot status-not-found" aria-hidden="true"></span> Search Unfound Shazam Entries on Soundeo</button>
                         </div>
                     </div>
                 </div>
