@@ -2200,13 +2200,8 @@ function shazamRestoreProgressIfRunning() {
                     .then(r => r.json())
                     .then(p => {
                         shazamCurrentProgress = p;
-                        var skipRestoreQueueBars = shazamAnyRowActionPending() || p.mode === 'star_single' || p.mode === 'unstar_single';
-                        if (skipRestoreQueueBars) {
-                            if (restorePollCount === 0 || restorePollCount % 10 === 0) shazamBarLog('RESTORE_POLL', 'skip APPLY_QUEUE', { mode: p.mode, pending: (Object.keys(shazamActionPending || {}).length + Object.keys(shazamPendingDownload || {}).length) });
-                        }
-                        if (!skipRestoreQueueBars) {
-                            shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
-                        }
+                        /* Always mirror server queues — skipping during star_single left stale pills (server popped current item, UI still showed it). */
+                        shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
                         if (p.download_queue && Array.isArray(p.download_queue)) {
                             shazamCurrentDownloadQueue = p.download_queue;
                             shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
@@ -5130,17 +5125,11 @@ function shazamPollProgress() {
         if (p && p.starred) Object.assign(shazamStarred, p.starred);
         if (p && p.not_found) Object.assign(shazamNotFound, p.not_found);
         var hasPendingSingle = shazamAnyRowActionPending();
-        var inSingleStarUnstar = p.mode === 'star_single' || p.mode === 'unstar_single';
-        var skipQueueBarUpdates = hasPendingSingle || inSingleStarUnstar;
-        if (skipQueueBarUpdates && (shazamProgressPollCount || 0) % 10 === 0) {
-            shazamBarLog('POLL', 'skip APPLY_QUEUE', { mode: p.mode, hasPending: hasPendingSingle });
-        }
-        if (!skipQueueBarUpdates) {
-            shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
-        }
+        /* Always sync queue bars from server (was skipped during single star/unstar → stale Star queue display). */
+        shazamApplyQueueState(p.star_queue || [], p.single_search_queue || [], p.unstar_queue || []);
         if (p.download_queue && Array.isArray(p.download_queue)) {
             shazamCurrentDownloadQueue = p.download_queue;
-            if (!skipQueueBarUpdates) shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
+            shazamRenderDownloadQueue(shazamCurrentDownloadQueue);
         }
         // Re-render track list whenever queue state changes so row-level "Star/Search/Unstar/Download queued X/Y" and × stay in sync (skip whenever any single-track action is pending to avoid spinner/hover flicker)
         var queuesNonEmpty = (p.star_queue || []).length > 0 || (p.single_search_queue || []).length > 0 || (p.unstar_queue || []).length > 0 || (p.download_queue || []).length > 0;

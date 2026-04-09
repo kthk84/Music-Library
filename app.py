@@ -4190,10 +4190,10 @@ def shazam_sync_run_soundeo():
 
 @app.route('/api/shazam-sync/stop', methods=['POST'])
 def shazam_sync_stop():
-    """Request the running Soundeo sync to stop after the current track."""
+    """Request stop: batch jobs exit after the current track; queued single star/unstar items are dropped when the current one finishes."""
     from soundeo_automation import request_sync_stop
     request_sync_stop()
-    return jsonify({'ok': True, 'message': 'Stop requested. Sync will stop after current track.'})
+    return jsonify({'ok': True, 'message': 'Stop requested. Current track finishes first; queued stars/unstars are then cancelled.'})
 
 
 @app.route('/api/shazam-sync/skip', methods=['POST'])
@@ -4378,8 +4378,26 @@ def _unstar_one_track_impl(key: str, track_url: str):
 
 def _start_next_single_unstar() -> None:
     """If unstar queue has items, pop one and run in background."""
+    from soundeo_automation import clear_sync_stop_request, is_sync_stop_requested
+
     unstar_lock = getattr(app, '_shazam_single_unstar_queue_lock', None)
     if unstar_lock is None:
+        return
+    if is_sync_stop_requested():
+        with unstar_lock:
+            app._shazam_single_unstar_queue = []
+        clear_sync_stop_request()
+        prog = getattr(app, '_shazam_sync_progress', None) or {}
+        key = prog.get('key') or prog.get('current_key')
+        app._shazam_sync_progress = {
+            'running': False,
+            'stopped': True,
+            'mode': 'unstar_single',
+            'message': 'Stopped. Remaining unstar queue cleared.',
+            'key': key,
+            'done': prog.get('done', 0),
+            'failed': prog.get('failed', 0),
+        }
         return
     with unstar_lock:
         queue = getattr(app, '_shazam_single_unstar_queue', None) or []
@@ -4819,6 +4837,7 @@ def _run_star_batch_background(tracks: List[Dict]) -> None:
     failed = 0
     for i, t in enumerate(tracks):
         if is_sync_stop_requested():
+            clear_sync_stop_request()
             app._shazam_sync_progress = {
                 'running': False, 'stopped': True, 'done': done, 'failed': failed,
                 'message': f'Stopped. Starred {done}, failed {failed}.',
@@ -4877,9 +4896,26 @@ def shazam_sync_star_batch():
 
 def _start_next_single_star() -> None:
     """If single-star queue has items, pop one and run it in a background thread."""
-    star_queue = getattr(app, '_shazam_single_star_queue', None) or []
+    from soundeo_automation import clear_sync_stop_request, is_sync_stop_requested
+
     star_lock = getattr(app, '_shazam_single_star_queue_lock', None)
     if star_lock is None:
+        return
+    if is_sync_stop_requested():
+        with star_lock:
+            app._shazam_single_star_queue = []
+        clear_sync_stop_request()
+        prog = getattr(app, '_shazam_sync_progress', None) or {}
+        key = prog.get('key') or prog.get('current_key')
+        app._shazam_sync_progress = {
+            'running': False,
+            'stopped': True,
+            'mode': 'star_single',
+            'message': 'Stopped. Remaining star queue cleared.',
+            'key': key,
+            'done': prog.get('done', 0),
+            'failed': prog.get('failed', 0),
+        }
         return
     with star_lock:
         star_queue = getattr(app, '_shazam_single_star_queue', None) or []
