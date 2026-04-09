@@ -1493,6 +1493,8 @@ def _rebuild_status_from_caches():
                 out['track_ids'] = dict(old['track_ids'])
             if old.get('search_outcomes'):
                 out['search_outcomes'] = list(old['search_outcomes'])
+            if old.get('cover_hashes'):
+                out['cover_hashes'] = dict(old['cover_hashes'])
         return out
     local_scan = load_local_scan_cache()
     if not local_scan_cache_valid(local_scan, folder_paths):
@@ -1568,6 +1570,8 @@ def _rebuild_status_from_caches():
             out['track_ids'] = dict(old['track_ids'])
         if old.get('search_outcomes'):
             out['search_outcomes'] = list(old['search_outcomes'])
+        if old.get('cover_hashes'):
+            out['cover_hashes'] = dict(old['cover_hashes'])
     return out
 
 
@@ -1616,7 +1620,7 @@ def _add_starred_lowercase_aliases(status: Dict) -> Dict:
     """Return a copy of status with lowercase + deep-normalized keys added to urls, starred, soundeo_titles so frontend matches Shazam vs Soundeo key variants.
     not_found: only add lowercase, never keyDeep — so orange (searched not found) is per exact track and grey dots appear for never-searched."""
     out = dict(status)
-    for m in ('urls', 'starred', 'soundeo_titles', 'dismissed', 'not_found'):
+    for m in ('urls', 'starred', 'soundeo_titles', 'dismissed', 'not_found', 'cover_hashes'):
         if m not in out or not out[m]:
             continue
         data = out[m]
@@ -1852,6 +1856,8 @@ def _get_best_available_status():
                 partial['not_found'] = dict(old['not_found'])
             if old.get('search_outcomes'):
                 partial['search_outcomes'] = list(old['search_outcomes'])
+            if old.get('cover_hashes'):
+                partial['cover_hashes'] = dict(old['cover_hashes'])
         app._shazam_sync_status = partial
         save_status_cache(partial)
         out = _apply_skip_list_to_status(dict(partial))
@@ -1909,6 +1915,11 @@ def shazam_sync_cover(cover_hash: str):
             resp = send_file(fp, mimetype=mime, conditional=True)
             resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
             return resp
+    logging.debug(
+        "shazam_sync_cover: no file for hash=%s in %s (tried .jpg/.jpeg/.png)",
+        h,
+        cache_dir,
+    )
     nf = Response("Not found\n", status=404, mimetype='text/plain')
     nf.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return nf
