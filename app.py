@@ -1897,11 +1897,11 @@ def shazam_sync_cover(cover_hash: str):
     # Validate: hashes are stored as lowercase hex md5/sha-like strings.
     h = (cover_hash or '').strip().lower()
     if not h or len(h) > 64 or any(c not in '0123456789abcdef' for c in h):
-        return Response("Invalid cover hash\n", status=400, mimetype='text/plain')
+        r = Response("Invalid cover hash\n", status=400, mimetype='text/plain')
+        r.headers['Cache-Control'] = 'no-store'
+        return r
 
-    from app_paths import get_project_root_for_data
-    root = get_project_root_for_data(__file__)
-    cache_dir = os.path.join(root, 'cover_cache')
+    cache_dir = _get_cover_cache_dir()
     # Current cache format: <hash>.jpg (some older caches may have .png)
     for ext, mime in (('.jpg', 'image/jpeg'), ('.jpeg', 'image/jpeg'), ('.png', 'image/png')):
         fp = os.path.join(cache_dir, h + ext)
@@ -1909,7 +1909,9 @@ def shazam_sync_cover(cover_hash: str):
             resp = send_file(fp, mimetype=mime, conditional=True)
             resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
             return resp
-    return Response("Not found\n", status=404, mimetype='text/plain')
+    nf = Response("Not found\n", status=404, mimetype='text/plain')
+    nf.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    return nf
 
 
 @app.route('/api/shazam-sync/export/local-filenames')
@@ -2332,18 +2334,6 @@ def _extract_soundeo_preview_url(track_page_url: str) -> Optional[str]:
     except Exception as exc:
         logging.warning("Soundeo preview extraction error: %s", exc)
         return None
-
-
-@app.route('/api/shazam-sync/cover/<key_hash>')
-def shazam_serve_cover(key_hash):
-    """Serve a locally cached cover art JPEG."""
-    import re as _re
-    if not _re.match(r'^[a-f0-9]{32}$', key_hash):
-        return ('', 404)
-    cover_path = os.path.join(_get_cover_cache_dir(), key_hash + '.jpg')
-    if not os.path.exists(cover_path):
-        return ('', 404)
-    return send_file(cover_path, mimetype='image/jpeg', max_age=86400)
 
 
 _cover_backfill_running = False

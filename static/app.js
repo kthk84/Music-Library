@@ -2325,9 +2325,10 @@ function shazamScheduleRenderTrackList(data, force) {
     var flush = function () {
         _shazamRenderListRaf = 0;
         _shazamRenderListTimer = null;
-        var d = shazamLastData || payload;
-        if (!d) return;
-        shazamRenderTrackList(d);
+        // Always render the scheduled payload (fresh status from ApplyStatus). Using shazamLastData here
+        // ignored newer server JSON and caused stale rows / missing cover cells after refetch.
+        if (!payload) return;
+        shazamRenderTrackList(payload);
         _shazamRenderListLastAt = Date.now();
     };
     shazamCancelPendingTrackListRender();
