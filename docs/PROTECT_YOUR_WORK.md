@@ -65,7 +65,7 @@ If the experiment goes wrong, you can always go back to this commit. No need to 
 To lock in the current state (including the re-applied notification bubble and any other uncommitted changes):
 
 ```bash
-cd "/Users/keith/Desktop/Antigravity Projects/KeithKornson BV/SoundBridge"
+cd "/Users/keith/Code/Antigravity Projects/KeithKornson BV/SoundBridge"
 git add -A
 git status   # review what will be committed
 git commit -m "Queue notification bubble: fixed overlay, in/out animations, no box"
