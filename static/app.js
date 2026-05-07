@@ -2511,6 +2511,17 @@ function shazamFindNextBtn(fromBtn) {
 /** Pre-fetch and pre-load the next track so it can start quickly when the current one ends. */
 async function shazamPrefetchNext(fromBtn) {
     shazamCancelNextBuffer();
+    // Don't pre-fetch the next track's preview while a queue download is
+    // running. The prefetch endpoint full-downloads the preview MP3 from
+    // Soundeo, which adds a third concurrent connection on the same cookie
+    // session — Soundeo throttles this, and it's the dominant cause of "play
+    // takes long during downloads". Buffering will resume after the download
+    // queue completes.
+    if (typeof shazamDownloadProgressSnapshot !== 'undefined'
+        && shazamDownloadProgressSnapshot
+        && shazamDownloadProgressSnapshot.running) {
+        return;
+    }
     var nextBtn = shazamFindNextBtn(fromBtn);
     if (!nextBtn) return;
 
@@ -3742,25 +3753,46 @@ async function shazamToggleSoundeoPlay(btn) {
     // by far the most common cause of "press play, nothing happens". Probing
     // the JSON endpoint first lets us tell the user *why* and trigger the
     // connection banner so they can re-auth instead of silently retrying.
+    //
+    // Exception: while a queue download is running, Soundeo throttles per
+    // cookie-session — the track-page fetch in `_extract_soundeo_preview_url`
+    // becomes very slow (Soundeo CDN is busy streaming the active download).
+    // Pre-flighting then would block the click for 8+ seconds while delivering
+    // little signal. Skip it; let the audio element try directly. The
+    // stream-preview proxy uses the same cache, so it'll resolve as soon as
+    // Soundeo unblocks.
+    const downloadActive = !!(typeof shazamDownloadProgressSnapshot !== 'undefined'
+        && shazamDownloadProgressSnapshot
+        && shazamDownloadProgressSnapshot.running);
     let previewOk = false;
     let previewErr = null;
     let previewStatus = 0;
-    try {
-        const probeCtrl = new AbortController();
-        const probeTimer = setTimeout(function () { probeCtrl.abort(); }, 12000);
-        const probeRes = await fetch('/api/soundeo/preview-url?track_url=' + encodeURIComponent(trackUrl), { signal: probeCtrl.signal });
-        clearTimeout(probeTimer);
-        previewStatus = probeRes.status;
-        if (probeRes.ok) {
+    if (downloadActive) {
+        previewOk = true; // optimistic: skip preflight, let audio element handle
+    } else {
+        try {
+            const probeCtrl = new AbortController();
+            // 8s rather than 12s — if Soundeo can't answer within 8s it's not
+            // going to suddenly recover, and the user notices the wait.
+            const probeTimer = setTimeout(function () { probeCtrl.abort(); }, 8000);
+            const probeRes = await fetch('/api/soundeo/preview-url?track_url=' + encodeURIComponent(trackUrl), { signal: probeCtrl.signal });
+            clearTimeout(probeTimer);
+            previewStatus = probeRes.status;
+            if (probeRes.ok) {
+                previewOk = true;
+            } else {
+                const data = await probeRes.json().catch(function () { return {}; });
+                previewErr = (data && data.error) || ('Soundeo preview unavailable (HTTP ' + probeRes.status + ')');
+            }
+        } catch (e) {
+            // Timeout / network error: don't block the click. Try playback anyway —
+            // the audio element will fail loudly via onerror if Soundeo is truly down.
             previewOk = true;
-        } else {
-            const data = await probeRes.json().catch(function () { return {}; });
-            previewErr = (data && data.error) || ('Soundeo preview unavailable (HTTP ' + probeRes.status + ')');
+            previewErr = (e && e.name === 'AbortError')
+                ? 'Soundeo preflight timed out — attempting playback anyway'
+                : ('Soundeo preflight failed: ' + ((e && e.message) || e));
+            console.warn('shazamToggleSoundeoPlay: preflight error, proceeding optimistically:', previewErr);
         }
-    } catch (e) {
-        previewErr = (e && e.name === 'AbortError')
-            ? 'Soundeo preview request timed out'
-            : ('Soundeo preview request failed: ' + ((e && e.message) || e));
     }
 
     if (!previewOk) {
