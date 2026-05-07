@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, jsonify, send_file, Response
+from flask import Flask, render_template, request, jsonify, send_file, Response, make_response
 import os
 import json
 import sys
@@ -949,8 +949,19 @@ def open_folder_dialog():
 
 @app.route('/')
 def index():
-    """Serve the main HTML page"""
-    return render_template('index.html')
+    """Serve the main HTML page.
+
+    Forbid caching the HTML shell so a transient bad render (e.g. the launcher
+    accidentally pointing at a broken state path → 500 → empty cells once the
+    user navigates back) cannot get pinned in the browser cache. Static
+    bundles (app.js?v=N, style.css?v=N) carry their own cachebusters so this
+    only affects the lightweight HTML wrapper.
+    """
+    resp = make_response(render_template('index.html'))
+    resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    resp.headers['Expires'] = '0'
+    return resp
 
 @app.route('/api/browse-folder', methods=['POST'])
 def browse_folder():
