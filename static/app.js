@@ -2363,6 +2363,10 @@ let shazamBarTimeUpdate = null;
 let shazamBarEnded = null;
 /** Proxy ID for temp MP3 (AIFF/WAV); released on end/close/switch. */
 let shazamCurrentProxyId = null;
+/** True after we've alerted the user about a Soundeo preview failure this session.
+ * The connection banner stays visible; this just suppresses repeated alert() spam
+ * so a user clicking play on five expired-session rows in a row only sees one popup. */
+let shazamSoundeoPlayErrorAlerted = false;
 /** Pre-buffered next track so playback can continue when the current track ends. */
 let shazamNextBuffer = null;
 /** Cover art hashes for Sync list / play bar (from server status.cover_hashes). */
@@ -3719,12 +3723,75 @@ async function shazamToggleSoundeoPlay(btn) {
     btn.textContent = '…';
     btn.disabled = true;
     var activeBtn = btn;
-    const resetBtn = () => { activeBtn.innerHTML = PLAY_ICON_ROW; activeBtn.classList.remove('playing'); activeBtn.disabled = false; };
+    const resetBtn = (errMsg) => {
+        activeBtn.innerHTML = PLAY_ICON_ROW;
+        activeBtn.classList.remove('playing');
+        activeBtn.disabled = false;
+        if (errMsg) {
+            // Surface the reason on hover so the user has *something* to read instead
+            // of a button that silently snaps back to ▶.
+            activeBtn.title = '⚠ ' + errMsg;
+            activeBtn.classList.add('shazam-play-failed');
+            setTimeout(function () { activeBtn.classList.remove('shazam-play-failed'); }, 2400);
+        }
+    };
+
+    // Pre-flight the preview-URL probe BEFORE wiring up audio.src. The audio
+    // element only exposes opaque onerror events (no HTTP status), and the
+    // server returns 404 JSON when the Soundeo session has expired — which is
+    // by far the most common cause of "press play, nothing happens". Probing
+    // the JSON endpoint first lets us tell the user *why* and trigger the
+    // connection banner so they can re-auth instead of silently retrying.
+    let previewOk = false;
+    let previewErr = null;
+    let previewStatus = 0;
+    try {
+        const probeCtrl = new AbortController();
+        const probeTimer = setTimeout(function () { probeCtrl.abort(); }, 12000);
+        const probeRes = await fetch('/api/soundeo/preview-url?track_url=' + encodeURIComponent(trackUrl), { signal: probeCtrl.signal });
+        clearTimeout(probeTimer);
+        previewStatus = probeRes.status;
+        if (probeRes.ok) {
+            previewOk = true;
+        } else {
+            const data = await probeRes.json().catch(function () { return {}; });
+            previewErr = (data && data.error) || ('Soundeo preview unavailable (HTTP ' + probeRes.status + ')');
+        }
+    } catch (e) {
+        previewErr = (e && e.name === 'AbortError')
+            ? 'Soundeo preview request timed out'
+            : ('Soundeo preview request failed: ' + ((e && e.message) || e));
+    }
+
+    if (!previewOk) {
+        console.warn('shazamToggleSoundeoPlay: preview pre-flight failed:', previewStatus, previewErr);
+        // 404 / "could not extract" almost always means the saved Soundeo session
+        // is no longer valid even though our `connected` badge says it is (the
+        // badge only checks that a cookies file exists, not that it's still alive).
+        // Show the connection banner and alert exactly once per session so the
+        // user can re-authenticate via Settings → Reconnect Soundeo.
+        const looksLikeSessionExpired = previewStatus === 404 || /could not extract preview/i.test(previewErr || '');
+        if (looksLikeSessionExpired && typeof showConnectionBanner === 'function') {
+            try { showConnectionBanner(); } catch (e) { /* banner not present */ }
+        }
+        if (looksLikeSessionExpired && !shazamSoundeoPlayErrorAlerted) {
+            shazamSoundeoPlayErrorAlerted = true;
+            alert("Couldn't fetch Soundeo preview.\n\n" + previewErr +
+                "\n\nMost common cause: your Soundeo session has expired.\n" +
+                "Open Settings → Reconnect Soundeo, then try again.");
+        }
+        resetBtn(previewErr || 'Preview unavailable');
+        shazamCurrentlyPlaying = null;
+        return;
+    }
+
+    // Pre-flight succeeded → play through the proxy stream endpoint (CORS-safe;
+    // the Audio element can't load Soundeo's CDN URL directly).
     try {
         const streamUrl = '/api/soundeo/stream-preview?track_url=' + encodeURIComponent(trackUrl);
         shazamAudioEl.onerror = () => {
-            console.warn('Soundeo preview audio error');
-            resetBtn();
+            console.warn('Soundeo preview audio error after successful preflight');
+            resetBtn('Audio playback failed');
             shazamCurrentlyPlaying = null;
         };
         shazamAudioEl.onended = () => {
@@ -3745,13 +3812,16 @@ async function shazamToggleSoundeoPlay(btn) {
         activeBtn.innerHTML = PAUSE_ICON_ROW;
         activeBtn.classList.add('playing');
         activeBtn.disabled = false;
+        // Clear any leftover error tooltip from a previous failed attempt on this row.
+        const baseLabel = activeBtn.dataset.trackLabel || '';
+        if (baseLabel) activeBtn.title = baseLabel;
         shazamCurrentlyPlaying = trackUrl;
         shazamPlayingBtn = activeBtn;
         shazamPlayerBarShow(activeBtn.dataset.trackLabel || '—');
         shazamPrefetchNext(activeBtn);
     } catch (e) {
         console.warn('Soundeo preview playback failed:', e);
-        resetBtn();
+        resetBtn('Playback error: ' + ((e && e.message) || e));
         shazamCurrentlyPlaying = null;
     }
 }
