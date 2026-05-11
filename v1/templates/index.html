@@ -7,6 +7,124 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v=16">
 </head>
 <body>
+    <!-- Version toggle banner -->
+    <div id="versionBanner" style="display:none;position:fixed;top:0;left:0;right:0;background:#1a1a1a;color:#fff;padding:6px 14px;z-index:9999;font:13px/1.4 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;justify-content:space-between;align-items:center;border-bottom:1px solid #333;">
+        <span>SoundBridge <strong id="versionLabel" style="color:#7ec8ff;">v?</strong> <span id="versionSupervised" style="color:#888;font-size:11px;margin-left:8px;"></span></span>
+        <button id="versionSwitchBtn" onclick="versionSwitch()" style="background:#2d4d6e;color:#fff;border:1px solid #3a6090;padding:4px 12px;border-radius:4px;cursor:pointer;font-size:12px;">Switch</button>
+    </div>
+    <style>body.has-version-banner { padding-top: 32px; }</style>
+    <script>
+    (async function () {
+        try {
+            const r = await fetch('/api/version/info');
+            if (!r.ok) return;
+            const info = await r.json();
+            const banner = document.getElementById('versionBanner');
+            const lbl = document.getElementById('versionLabel');
+            const sup = document.getElementById('versionSupervised');
+            const btn = document.getElementById('versionSwitchBtn');
+            window.__sbVersionInfo = info;
+            lbl.textContent = info.version;
+            const target = info.version === 'v1' ? 'v2' : 'v1';
+            const targetPort = target === 'v1' ? 5002 : 5003;
+            btn.textContent = 'Switch to ' + target;
+            btn.disabled = false;
+            btn.style.opacity = '1';
+            if (info.supervised) {
+                sup.textContent = '';
+                btn.title = 'Stop ' + info.version + ' and start ' + target + ' (URL stays the same)';
+            } else {
+                sup.textContent = '(standalone — switching opens port :' + targetPort + ')';
+                btn.title = 'Spawn ' + target + ' on :' + targetPort + ' and redirect (URL changes). For stable URL, use SoundBridge.command.';
+            }
+            banner.style.display = 'flex';
+            document.body.classList.add('has-version-banner');
+        } catch (e) { /* hide silently */ }
+    })();
+    function _sbShowSwitchHelp(currentVersion, targetVersion) {
+        const overlay = document.createElement('div');
+        overlay.id = 'sbHelpOverlay';
+        overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;display:flex;align-items:center;justify-content:center;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;';
+        overlay.innerHTML =
+            '<div style="background:#fff;color:#222;border-radius:10px;max-width:560px;padding:28px 28px 20px;box-shadow:0 12px 40px rgba(0,0,0,0.3);">' +
+            '<h2 style="margin:0 0 12px;font-size:18px;font-weight:600;">To switch between v1 and v2</h2>' +
+            '<p style="margin:0 0 14px;color:#444;">SoundBridge is running <strong>' + currentVersion + '</strong> in standalone mode (started via <code>python3 app.py</code>). Standalone mode can\'t switch — only the launcher script can.</p>' +
+            '<p style="margin:0 0 8px;color:#444;"><strong>One-time setup to enable switching:</strong></p>' +
+            '<ol style="margin:0 0 16px 20px;padding:0;color:#444;">' +
+            '<li style="margin-bottom:6px;">Stop this version: in the Terminal where it\'s running, press <kbd style="background:#eee;padding:1px 6px;border-radius:3px;font-family:menlo,monospace;">Ctrl+C</kbd> (or close that Terminal window).</li>' +
+            '<li style="margin-bottom:6px;">In Finder, open <code style="background:#f4f4f4;padding:1px 4px;border-radius:3px;">~/Code/Antigravity Projects/KeithKornson BV/</code>.</li>' +
+            '<li style="margin-bottom:6px;"><strong>Double-click <code style="background:#f4f4f4;padding:1px 4px;border-radius:3px;">SoundBridge.command</code></strong>. A Terminal window opens; SoundBridge starts inside it.</li>' +
+            '<li style="margin-bottom:6px;">Open <a href="http://127.0.0.1:5002" target="_blank" style="color:#2d4d6e;">http://127.0.0.1:5002</a>. The Switch button will be active and the URL stays the same when you toggle.</li>' +
+            '</ol>' +
+            '<p style="margin:0 0 8px;color:#666;font-size:12px;">First time? Right-click <code>SoundBridge.command</code> → "Open" — macOS asks once whether to trust it, and remembers from then on.</p>' +
+            '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;">' +
+            '<button id="sbHelpClose" style="background:#2d4d6e;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;">Got it</button>' +
+            '</div>' +
+            '</div>';
+        document.body.appendChild(overlay);
+        const close = () => overlay.remove();
+        overlay.querySelector('#sbHelpClose').onclick = close;
+        overlay.onclick = (e) => { if (e.target === overlay) close(); };
+        document.addEventListener('keydown', function esc(ev) {
+            if (ev.key === 'Escape') { close(); document.removeEventListener('keydown', esc); }
+        });
+    }
+    async function versionSwitch() {
+        const info = window.__sbVersionInfo || {};
+        const cur = document.getElementById('versionLabel').textContent;
+        const tgt = cur === 'v1' ? 'v2' : 'v1';
+        const tgtPort = tgt === 'v1' ? 5002 : 5003;
+        const confirmMsg = info.supervised
+            ? 'Switch from ' + cur + ' to ' + tgt + '?\n\nLaunched via SoundBridge.command — the app will restart on the same URL.'
+            : 'Switch from ' + cur + ' to ' + tgt + '?\n\nStandalone mode — ' + tgt + ' will start on http://127.0.0.1:' + tgtPort + '/ and your browser will redirect there.';
+        if (!confirm(confirmMsg)) return;
+        const btn = document.getElementById('versionSwitchBtn');
+        btn.disabled = true;
+        btn.textContent = 'Switching to ' + tgt + '…';
+        let data = null;
+        try {
+            const r = await fetch('/api/version/switch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({to: tgt}),
+            });
+            try { data = await r.json(); } catch (e) {}
+            if (!r.ok) {
+                const errMsg = (data && data.error) || 'unknown';
+                const hint = (data && data.hint) ? '\n\n' + data.hint : '';
+                alert('Switch failed: ' + errMsg + hint);
+                btn.disabled = false;
+                btn.textContent = 'Switch to ' + tgt;
+                return;
+            }
+        } catch (e) { /* expected — server may be exiting before response arrives */ }
+        const targetUrl = (data && data.redirect_url) || (location.origin + '/');
+        const isSupervised = !(data && data.redirect_url);
+        document.body.innerHTML =
+            '<div style="padding:80px 24px;text-align:center;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',sans-serif;color:#666;">' +
+            '<h2 style="font-weight:400;">Switching to ' + tgt + '…</h2>' +
+            '<p>' + (isSupervised ? 'The launcher is restarting the app on the same URL.' : 'Starting ' + tgt + ' on ' + targetUrl + ' — your browser will redirect when it\'s ready.') + '</p>' +
+            '<p style="margin-top:32px;font-size:12px;color:#999;">If nothing happens after 15 seconds, check Terminal output for errors.</p>' +
+            '</div>';
+        const start = Date.now();
+        const probeUrl = isSupervised ? '/api/version/info' : (targetUrl + 'api/version/info');
+        const tryNext = async () => {
+            try {
+                const r2 = await fetch(probeUrl, {cache: 'no-store'});
+                if (r2.ok) {
+                    const info2 = await r2.json();
+                    if (info2.version === tgt) {
+                        if (isSupervised) location.reload();
+                        else location.href = targetUrl;
+                        return;
+                    }
+                }
+            } catch (e) { /* still starting up */ }
+            if (Date.now() - start < 30000) setTimeout(tryNext, 600);
+        };
+        setTimeout(tryNext, 1500);
+    }
+    </script>
     <!-- Icon definitions (hidden) -->
     <svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;">
         <symbol id="icon-folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></symbol>

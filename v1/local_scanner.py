@@ -125,15 +125,42 @@ def _parenthetical_part(s: str) -> str:
     return s[start + 1:end].strip().lower()
 
 
+_CATALOG_ID_RE = re.compile(r'^[A-Z]{2,6}\s?\d{1,5}[A-Z]?$', re.IGNORECASE)
+_YEAR_ID_RE = re.compile(r'^(?:19|20)\d{2}$')  # 1900-2099 — year markers like (2024)
+
+
+def _is_catalog_id(s: str) -> bool:
+    """True if the parenthetical looks like a label catalog ID, not a mix variant.
+
+    Examples that should match: FSOE937, MAU5042, OPC003, ANJ001, ASOT2024.
+    These are RELEASE IDs (label name + release number) which Shazam sometimes
+    includes in the title even though local files don't carry them. Different
+    catalog IDs do NOT mean different remixes.
+    """
+    if not s:
+        return False
+    s = s.strip()
+    if _CATALOG_ID_RE.match(s):
+        return True
+    if _YEAR_ID_RE.match(s):
+        return True
+    return False
+
+
 def _different_remix_or_version(shazam_title: str, local_title: str, sim_threshold: float = 0.65) -> bool:
     """
     True if both titles have a parenthetical part (e.g. remix name) and those parts differ significantly.
     Used to avoid matching "1977 (Tom Zeta Maccabi Remix)" to "1977 (Other Remix)".
+
+    Carve-out: if either parenthetical is a label catalog ID (e.g. FSOE937)
+    or a bare year (e.g. 2024), it's not a remix variant — allow the match.
     """
     p_shazam = _parenthetical_part(shazam_title)
     p_local = _parenthetical_part(local_title)
     if not p_shazam or not p_local:
         return False  # one or both have no parenthetical – allow match to be decided by other logic
+    if _is_catalog_id(p_shazam) or _is_catalog_id(p_local):
+        return False  # catalog/release IDs aren't remix variants
     from app import similarity_score
     sim = similarity_score(p_shazam, p_local)
     return sim < sim_threshold

@@ -1,0 +1,83 @@
+name: smoke
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Strip macOS-only deps that block Linux install
+          grep -v 'pyobjc-framework' requirements.txt | grep -v 'pywebview' > /tmp/req-ci.txt
+          pip install -r /tmp/req-ci.txt
+
+      - name: Bytecompile all modules (catch syntax errors)
+        run: |
+          python -m py_compile $(find . -name '*.py' -not -path './.github/*' -not -path './build/*' -not -path './dist/*')
+
+      - name: Schema models import + validate
+        run: |
+          python -c "
+          from models import StatusCache, validate_status, STATUS_REQUIRED_KEYS
+          # clean status passes
+          assert validate_status({
+              'shazam_count': 0, 'to_download': [], 'have_locally': [],
+              'urls': {}, 'not_found': {}, 'search_outcomes': []
+          }) == [], 'clean status should produce no issues'
+          # bad status produces issues
+          issues = validate_status({'shazam_count': 'oops'})
+          assert len(issues) > 0, 'bad status should produce issues'
+          print('models: OK')
+          "
+
+      - name: Boot Flask in background
+        env:
+          SOUNDBRIDGE_DATA_DIR: /tmp/sb-ci
+          SOUNDBRIDGE_PORT: '5099'
+        run: |
+          mkdir -p /tmp/sb-ci
+          python app.py &
+          echo $! > /tmp/sb.pid
+          # Wait for server up to 30s
+          for i in $(seq 1 60); do
+            if curl -fs -o /dev/null http://127.0.0.1:5099/api/version/info; then
+              echo "server up after ${i} polls"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "server did not start in time" >&2
+          exit 1
+
+      - name: Hit endpoints (smoke)
+        run: |
+          set -e
+          curl -fs http://127.0.0.1:5099/api/version/info | tee /tmp/version.json
+          grep -q '"version": "v2"' /tmp/version.json
+          curl -fs http://127.0.0.1:5099/api/shazam-sync/status | head -c 200
+          echo ""
+          curl -fs http://127.0.0.1:5099/api/shazam-sync/mutation-log | head -c 200
+          echo ""
+          echo "smoke: OK"
+
+      - name: Stop Flask
+        if: always()
+        run: |
+          if [ -f /tmp/sb.pid ]; then kill $(cat /tmp/sb.pid) 2>/dev/null || true; fi
