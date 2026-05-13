@@ -3577,8 +3577,14 @@ function shazamRenderTrackList(data) {
             }
             if (isSkipped) {
                 actionsCell += `<button type="button" class="shazam-row-action-btn shazam-undo-action" onclick="shazamUnskipRow(this)" title="Undo skip"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 12L18 8v8L6 12z"/></svg></button>`;
-            } else {
-                actionsCell += `<button type="button" class="shazam-row-action-btn shazam-skip-action${skipInactive}" data-action="skip" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Skip (hide locally)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="6" y2="18"/><line x1="10" y1="6" x2="10" y2="18"/><polygon points="14 8 14 16 20 12"/></svg></button>`;
+            } else if (!skipInactive) {
+                // Only render Skip on rows where it's actually actionable (to-download,
+                // not dismissed). On have-local rows the previous greyed-out version was
+                // routinely mistaken for an "Undo skip" button — same icon family, no
+                // pointer-events, no tooltip on touch devices. Hiding it removes the
+                // false affordance entirely; the Undo-skip button (rendered only when
+                // isSkipped) remains the single back-arrow that ever appears.
+                actionsCell += `<button type="button" class="shazam-row-action-btn shazam-skip-action" data-action="skip" data-artist="${safeAttr(row.artist)}" data-title="${safeAttr(row.title)}" title="Skip (hide locally)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="6" y1="6" x2="6" y2="18"/><line x1="10" y1="6" x2="10" y2="18"/><polygon points="14 8 14 16 20 12"/></svg></button>`;
             }
         }
         actionsCell += '</td>';
