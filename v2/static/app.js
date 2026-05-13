@@ -3605,12 +3605,17 @@ function shazamRenderTrackList(data) {
 
         let titleCellContent = escapeHtml(row.title);
         if (!isDismissed && !isSkipped) {
-            if (url) {
-                const linkLabel = soundeoTitle ? escapeHtml(soundeoTitle) : 'Open on Soundeo';
-                const linkTitle = soundeoTitle ? `Open on Soundeo: ${escapeHtml(soundeoTitle)}` : 'Open on Soundeo';
-                titleCellContent += `<div class="soundeo-source-title"><a href="${escapeHtml(url)}" target="_blank" rel="noopener" title="${linkTitle}">${linkLabel}</a></div>`;
-            } else if (soundeoTitle) {
-                titleCellContent += `<div class="soundeo-source-title" title="${escapeHtml(soundeoTitle)}">${escapeHtml(soundeoTitle)}</div>`;
+            // Subtitle line shows the Soundeo source title. It's INFORMATIONAL only —
+            // not a link — because the small grey text invited accidental clicks that
+            // opened Soundeo in a new tab / side-panel (a "side-peek" the user didn't
+            // intend). Intentional access to Soundeo lives in the play-button
+            // right-click menu ("Open on Soundeo") and the row's Search action.
+            if (soundeoTitle || url) {
+                const subLabel = soundeoTitle ? escapeHtml(soundeoTitle) : (url ? 'On Soundeo' : '');
+                const subTitleAttr = soundeoTitle
+                    ? `Soundeo: ${escapeHtml(soundeoTitle)} — right-click ▶ for Open on Soundeo`
+                    : 'Right-click ▶ for Open on Soundeo';
+                titleCellContent += `<div class="soundeo-source-title" title="${subTitleAttr}">${subLabel}</div>`;
             }
         }
 
