@@ -29,3 +29,8 @@ build/
 dist/
 *.egg-info/
 SoundBridge.app/
+
+# Atomic-write temp files (_save_json_atomic leaves these only if the process is
+# killed mid-write; never commit them)
+*.tmp.*
+*.tmp2.*
