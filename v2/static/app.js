@@ -1416,6 +1416,81 @@ function shazamMergeCoverHashes(coverHashes) {
     });
 }
 
+/**
+ * Does the cover map (now disk-complete from /status) know a cover for this key?
+ * Same variant logic the row render uses, so existence here == a cover renders.
+ */
+function shazamHasCoverForKey(key) {
+    if (!key) return false;
+    if (shazamCoverHashes[key] || shazamCoverHashes[key.toLowerCase()]) return true;
+    try {
+        var vks = shazamKeyVariants(key);
+        for (var i = 0; i < vks.length; i++) {
+            if (vks[i] && shazamCoverHashes[vks[i]]) return true;
+        }
+    } catch (e) { /* ignore */ }
+    return false;
+}
+
+/**
+ * Surgically fill in covers that have appeared on disk since the last render —
+ * without a full table rebuild (which would lose scroll position and hover).
+ * Only placeholder cells whose track now has a cover get swapped, in place.
+ * Used by the cover-backfill watcher so newly-cached covers populate live.
+ * Returns the number of cells filled.
+ */
+function shazamRefreshVisibleCovers() {
+    var list = document.getElementById('shazamTrackList');
+    if (!list) return 0;
+    var rows = list.querySelectorAll('tr[data-track-key]');
+    var filled = 0;
+    for (var i = 0; i < rows.length; i++) {
+        var tr = rows[i];
+        var cell = tr.querySelector('td.shazam-cover-col');
+        if (!cell) continue;
+        var span = cell.querySelector('.track-cover');
+        // Only touch placeholders — rows that already show a cover are left alone.
+        if (!span || !span.classList.contains('track-cover-placeholder')) continue;
+        var key = tr.getAttribute('data-track-key');
+        if (!key || !shazamHasCoverForKey(key)) continue;
+        cell.innerHTML = '<span class="track-cover" style="background-image:url(/api/shazam-sync/cover-by-key?key=' +
+            encodeURIComponent(key) + ');" aria-hidden="true"></span>';
+        filled++;
+    }
+    return filled;
+}
+
+/**
+ * Watch a running server-side cover backfill and populate covers as they land.
+ *
+ * There is no steady idle /status poll, so without this the frontend is blind to
+ * a backfill: covers cached on the server never appear until a manual reload.
+ * This is a lightweight, SELF-TERMINATING poll — it fetches /status only while a
+ * backfill is running, merges the (disk-derived) cover map, and does a surgical
+ * in-place cover refresh (no full re-render). It stops the moment the backfill
+ * reports done, after one final refresh.
+ */
+let _shazamCoverBackfillInterval = null;
+const SHAZAM_COVER_BACKFILL_POLL_MS = 4000;
+function shazamStartCoverBackfillWatch() {
+    if (_shazamCoverBackfillInterval) return;  // already watching
+    var stop = function () {
+        if (_shazamCoverBackfillInterval) { clearInterval(_shazamCoverBackfillInterval); _shazamCoverBackfillInterval = null; }
+    };
+    _shazamCoverBackfillInterval = setInterval(function () {
+        fetch('/api/shazam-sync/status')
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (data) {
+                if (!data) return;
+                if (data.cover_hashes) shazamMergeCoverHashes(data.cover_hashes);
+                shazamRefreshVisibleCovers();
+                var bf = data.cover_backfill;
+                if (!bf || !bf.running) { stop(); shazamRefreshVisibleCovers(); }
+            })
+            .catch(function () { /* transient; keep watching */ });
+    }, SHAZAM_COVER_BACKFILL_POLL_MS);
+}
+
 function shazamMergeDownloadProgressFromPayload(data) {
     if (!data || data.download_progress === undefined) return;
     var dp = data.download_progress;
@@ -2115,6 +2190,11 @@ function shazamApplyStatus(data) {
     }
     if (data.cover_hashes && typeof data.cover_hashes === 'object') {
         shazamMergeCoverHashes(data.cover_hashes);
+    }
+    // If a cover backfill is running server-side, start the self-terminating
+    // watcher so newly-cached covers populate in place (no manual reload needed).
+    if (data.cover_backfill && data.cover_backfill.running) {
+        shazamStartCoverBackfillWatch();
     }
     // Local-only personal-curation flags. MERGE (not replace) so a status poll
     // that races with an in-flight optimistic update doesn't wipe the just-set

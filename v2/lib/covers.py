@@ -166,7 +166,25 @@ def compute_cover_hashes_from_disk(status: Dict) -> Dict[str, str]:
     diskset = _disk_hash_set(cover_dir)
     if not diskset:
         return {}
-    soundeo_titles = status.get("soundeo_titles") or {}
+    # CONCURRENCY: this runs on the hot /status read path while background worker
+    # threads (cover backfill, download, search) may be mutating the SAME shared
+    # status dicts/lists (app._shazam_sync_status nests them by reference). Iterate
+    # only over defensive snapshots, never the live collections — otherwise a
+    # concurrent insert raises "dictionary changed size during iteration" and 500s
+    # the whole status response. The snapshot itself is retried in case the
+    # collection mutates mid-copy.
+    def _snapshot(coll, as_list):
+        for _ in range(5):
+            try:
+                if as_list:
+                    return list(coll) if isinstance(coll, list) else []
+                return list(coll.keys()) if isinstance(coll, dict) else []
+            except RuntimeError:
+                continue
+        return []
+    # Live dict, read only via .get() below (atomic — no iteration, so safe under
+    # concurrent mutation). Do NOT copy it (a copy would iterate and could race).
+    soundeo_titles = status.get("soundeo_titles") if isinstance(status.get("soundeo_titles"), dict) else {}
     result: Dict[str, str] = {}
 
     def _map_primary(primary: str, extra_candidates: Tuple[str, ...] = ()) -> None:
@@ -187,12 +205,12 @@ def compute_cover_hashes_from_disk(status: Dict) -> Dict[str, str]:
                 result[v] = h  # matched variant too, for playbar/back-compat lookups
                 return
 
-    for k in (status.get("urls") or {}):
+    for k in _snapshot(status.get("urls") or {}, as_list=False):
         _map_primary(k)
-    for k in (status.get("starred") or {}):
+    for k in _snapshot(status.get("starred") or {}, as_list=False):
         _map_primary(k)
     for src in ("have_locally", "to_download", "skipped_tracks", "maybe", "listened"):
-        for t in (status.get(src) or []):
+        for t in _snapshot(status.get(src) or [], as_list=True):
             if not isinstance(t, dict):
                 continue
             a, ti = t.get("artist"), t.get("title")

@@ -923,6 +923,7 @@ def shazam_bootstrap():
     # same disk-derived cover_hashes overlay — otherwise the first render has a
     # sparse map and thumbnails stay blank until a later /status poll.
     _overlay_disk_cover_hashes(status)
+    status['cover_backfill'] = _cover_backfill_status()
     resp = jsonify({'settings': settings, 'status': status})
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return resp
@@ -1689,7 +1690,18 @@ def _add_starred_lowercase_aliases(status: Dict) -> Dict:
             continue
         data = out[m]
         extra = {}
-        for k, v in data.items():
+        # Snapshot items defensively: these dicts (cover_hashes, starred, …) are
+        # shared by reference with app._shazam_sync_status, which background worker
+        # threads can mutate. Iterating the live dict risks "dictionary changed
+        # size during iteration". Retry the snapshot in case it races mid-copy.
+        items = []
+        for _ in range(5):
+            try:
+                items = list(data.items())
+                break
+            except RuntimeError:
+                items = []
+        for k, v in items:
             if not isinstance(k, str):
                 continue
             lk = k.lower()
@@ -1953,12 +1965,36 @@ def _overlay_disk_cover_hashes(status: Dict) -> Dict:
     try:
         disk_covers = compute_cover_hashes_from_disk(status)
         if disk_covers:
-            merged = dict(status.get('cover_hashes') or {})
+            # Concurrency-safe copy: cover_hashes may be mutated by a background
+            # backfill thread, so copying it can race ("dictionary changed size").
+            # Retry the snapshot; fall back to just the disk-derived map.
+            merged = None
+            existing = status.get('cover_hashes') or {}
+            for _ in range(5):
+                try:
+                    merged = dict(existing)
+                    break
+                except RuntimeError:
+                    merged = None
+            if merged is None:
+                merged = {}
             merged.update(disk_covers)  # disk is authoritative
             status['cover_hashes'] = merged
     except Exception:
         logging.exception("_overlay_disk_cover_hashes failed")
     return status
+
+
+def _cover_backfill_status() -> Dict:
+    """Compact cover-backfill progress for status payloads, so the frontend can
+    watch a running backfill and populate newly-cached covers in place (without
+    a full re-render) until it completes. See shazamCoverBackfillWatch in app.js."""
+    p = _cover_backfill_progress or {}
+    return {
+        'running': bool(p.get('running')),
+        'done': int(p.get('done') or 0),
+        'total': int(p.get('total') or 0),
+    }
 
 
 @app.route('/api/shazam-sync/status', methods=['GET'])
@@ -1968,6 +2004,7 @@ def shazam_sync_status():
     out = _get_best_available_status()
     out['compare_running'] = compare_running
     _overlay_disk_cover_hashes(out)
+    out['cover_backfill'] = _cover_backfill_status()
     # Self-heal #3: auto-trigger Soundeo backfill if a small number of url-keys
     # lack covers (newly-Shazammed tracks since the last bulk run that didn't
     # get cover cached at search time). Throttled and bounded so it never spams
@@ -2566,10 +2603,15 @@ def _run_cover_backfill():
                     if cover_hash:
                         status.setdefault('cover_hashes', {})[key] = cover_hash
                         cover_hashes[key] = cover_hash
-                        # Update in-memory status
+                        # Update in-memory status with an ATOMIC REBIND, not an
+                        # in-place insert: the main thread iterates
+                        # mem['cover_hashes'] on the /status read path, and a
+                        # concurrent in-place insert here raised "dictionary
+                        # changed size during iteration" (500). Swapping in a new
+                        # dict means a reader always holds a complete, frozen map.
                         mem = getattr(app, '_shazam_sync_status', None)
                         if mem is not None:
-                            mem.setdefault('cover_hashes', {})[key] = cover_hash
+                            mem['cover_hashes'] = {**(mem.get('cover_hashes') or {}), key: cover_hash}
             except Exception as e:
                 logging.debug('cover_backfill: error for %s: %s', key, e)
 
