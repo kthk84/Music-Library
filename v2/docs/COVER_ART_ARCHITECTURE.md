@@ -109,11 +109,24 @@ band-aid commits. Companion tests cover variant resolution (accents/`&`/parens),
 the by-key endpoint (serve/404/400/traversal-safety), disk-derivation, and the
 three persistence-hardening guards.
 
-## Performance note (separate, pre-existing)
+## Performance / "stuck on Loading…" (fixed)
 
-Rendering the **full** unfiltered list (~3,500 rows of string-concatenated HTML)
-is slow — the app shows "Loading… (large libraries can take up to two minutes)".
-That is a pre-existing client-render cost unrelated to covers (the server's
-`/bootstrap` and `/status` return in ~2 s; `cover-by-key` in ~1 ms). A future
-improvement would be row virtualization or lazy/incremental rendering. Filtering
-(search box, time range) renders a subset instantly.
+The app used to show "Loading… (large libraries can take up to two minutes)".
+Investigation showed the render itself is **not** slow: a full ~3,500-row build
++ DOM swap is ~460 ms, server `/bootstrap` ~2 s, `cover-by-key` ~1 ms. The real
+problem was that the track-list render flush was scheduled **only** via
+`requestAnimationFrame`, and browsers **pause rAF callbacks in hidden/background
+tabs**. So if the app loaded (or was switched away from) while the tab wasn't
+visible, the initial render never flushed and the list hung on "Loading…" until
+the tab regained focus — indefinitely, not two minutes.
+
+Fix (`static/app.js`, `shazamScheduleRenderTrackList`): arm a `setTimeout`
+fallback alongside the rAF (`SHAZAM_RENDER_RAF_FALLBACK_MS = 200`). rAF wins when
+the tab is visible (smooth paint); the timeout wins when it's hidden (timers
+keep firing in the background). The flush is idempotent and cancels its sibling.
+Verified: a fresh load in a **hidden** tab now renders all 3,297 rows in ~3.3 s
+(was: never). The misleading "two minutes" loading copy was replaced with
+"Loading your library…".
+
+Server `/bootstrap` + `/status` return in ~2 s; `cover-by-key` in ~1 ms.
+Filtering (search box, time range) renders a subset instantly.

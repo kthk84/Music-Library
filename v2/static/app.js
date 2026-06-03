@@ -1595,7 +1595,7 @@ function shazamApplySettings(cfg) {
 
 async function shazamBootstrapLoad() {
     const trackList = document.getElementById('shazamTrackList');
-    if (trackList) trackList.innerHTML = '<p class="shazam-info-msg">Loading… (large libraries can take up to two minutes)</p>';
+    if (trackList) trackList.innerHTML = '<p class="shazam-info-msg">Loading your library…</p>';
     try {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), SHAZAM_BOOTSTRAP_TIMEOUT_MS);
@@ -2310,6 +2310,13 @@ const SHAZAM_TRACK_LIST_RENDER_MIN_MS = 900;
 let _shazamRenderListRaf = 0;
 let _shazamRenderListTimer = null;
 let _shazamRenderListLastAt = 0;
+// Fallback timer that races requestAnimationFrame. rAF callbacks are PAUSED by
+// the browser while the tab is hidden/backgrounded, so a render scheduled only
+// via rAF never flushes until the tab is focused — the list gets stuck on
+// "Loading…". This setTimeout fires regardless of visibility; whichever wins
+// flushes and cancels the other.
+let _shazamRenderListFallbackTimer = null;
+const SHAZAM_RENDER_RAF_FALLBACK_MS = 200;
 
 function shazamShouldThrottleTrackListRender(statusPayload) {
     var d = statusPayload || shazamLastData;
@@ -2329,6 +2336,10 @@ function shazamCancelPendingTrackListRender() {
         clearTimeout(_shazamRenderListTimer);
         _shazamRenderListTimer = null;
     }
+    if (_shazamRenderListFallbackTimer) {
+        clearTimeout(_shazamRenderListFallbackTimer);
+        _shazamRenderListFallbackTimer = null;
+    }
     if (_shazamRenderListRaf) {
         cancelAnimationFrame(_shazamRenderListRaf);
         _shazamRenderListRaf = 0;
@@ -2343,28 +2354,34 @@ function shazamScheduleRenderTrackList(data, force) {
     var payload = data != null ? data : shazamLastData;
     if (!payload) return;
     var throttle = !force && shazamShouldThrottleTrackListRender(payload);
+    // Idempotent flush — cancels its sibling timer (rAF vs setTimeout fallback)
+    // so the race winner renders exactly once.
     var flush = function () {
-        _shazamRenderListRaf = 0;
-        _shazamRenderListTimer = null;
-        // Always render the scheduled payload (fresh status from ApplyStatus). Using shazamLastData here
-        // ignored newer server JSON and caused stale rows / missing cover cells after refetch.
+        shazamCancelPendingTrackListRender();
         if (!payload) return;
         shazamRenderTrackList(payload);
         _shazamRenderListLastAt = Date.now();
     };
+    // Arm rAF (smooth paint when visible) AND a setTimeout fallback (fires even
+    // when the tab is hidden, where rAF is paused). Without the fallback the
+    // first render can hang on "Loading…" until the tab is focused.
+    var armRafWithFallback = function () {
+        _shazamRenderListRaf = requestAnimationFrame(flush);
+        _shazamRenderListFallbackTimer = setTimeout(flush, SHAZAM_RENDER_RAF_FALLBACK_MS);
+    };
     shazamCancelPendingTrackListRender();
     if (!throttle) {
-        _shazamRenderListRaf = requestAnimationFrame(flush);
+        armRafWithFallback();
         return;
     }
     var now = Date.now();
     var wait = Math.max(0, SHAZAM_TRACK_LIST_RENDER_MIN_MS - (now - _shazamRenderListLastAt));
     if (wait <= 0) {
-        _shazamRenderListRaf = requestAnimationFrame(flush);
+        armRafWithFallback();
     } else {
         _shazamRenderListTimer = setTimeout(function () {
             _shazamRenderListTimer = null;
-            _shazamRenderListRaf = requestAnimationFrame(flush);
+            armRafWithFallback();
         }, wait);
     }
 }

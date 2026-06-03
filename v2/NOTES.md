@@ -45,6 +45,19 @@ Full write-up: [`docs/COVER_ART_ARCHITECTURE.md`](docs/COVER_ART_ARCHITECTURE.md
 Tests: `tests/test_cover_art.py` (24 tests; the headline one reproduces the
 post-interruption empty-map state and asserts `/status` rebuilds from disk).
 
+## "Loading…" never finishing (background-tab render stall) — fixed
+
+Symptom: the track list sometimes stuck on "Loading…" for a very long time
+("up to two minutes"). Root cause was NOT slow rendering (a full ~3,500-row
+render is ~460 ms): the render flush was scheduled only via
+`requestAnimationFrame`, which browsers **pause in hidden/background tabs**. If
+the app loaded while not the foreground tab, the first render never fired.
+
+Fix: `shazamScheduleRenderTrackList` now races rAF against a 200 ms `setTimeout`
+fallback (timers fire even when hidden); flush is idempotent. Verified rendering
+3,297 rows in ~3.3 s in a hidden tab. Loading copy corrected to "Loading your
+library…". See the perf section of `docs/COVER_ART_ARCHITECTURE.md`.
+
 ## Search all: browser vs HTTP, Stop button
 
 - **No browser when you click Search:** Search can run in two ways. (1) **HTTP** — no Chrome window; uses cookies and requests. (2) **Browser** — opens Chrome; if **headed** you see the window, if **headless** it runs in the background. Config: `search_all_use_http` (true = no browser), `headed_mode` (false = headless). The progress bar now shows “Starting search (HTTP, no browser)…” or “Starting search (headless browser)…” so you can tell which mode you’re in.
