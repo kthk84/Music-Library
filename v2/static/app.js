@@ -2757,20 +2757,23 @@ function shazamPlayerBarShow(label) {
     }
     const barCover = document.getElementById('shazamBarCover');
     if (barCover) {
-        var hash = null;
+        // Existence from the disk-complete map (any variant); fetch by key so the
+        // server resolves the file. Same model as the overview cells — no more
+        // hand-rolled variant→hash lookup that could miss the cached form.
+        var hasBarCover = false;
         if (shazamBarKey) {
-            hash = shazamCoverHashes[shazamBarKey] || shazamCoverHashes[(shazamBarKey || '').toLowerCase()] || null;
-            if (!hash) {
+            hasBarCover = !!(shazamCoverHashes[shazamBarKey] || shazamCoverHashes[(shazamBarKey || '').toLowerCase()]);
+            if (!hasBarCover) {
                 try {
                     var vks = shazamKeyVariants(shazamBarKey);
                     for (var vi = 0; vi < vks.length; vi++) {
-                        if (shazamCoverHashes[vks[vi]]) { hash = shazamCoverHashes[vks[vi]]; break; }
+                        if (shazamCoverHashes[vks[vi]]) { hasBarCover = true; break; }
                     }
                 } catch (e) { /* ignore */ }
             }
         }
-        if (hash) {
-            barCover.style.backgroundImage = `url('/api/shazam-sync/cover/${hash}')`;
+        if (hasBarCover) {
+            barCover.style.backgroundImage = "url('/api/shazam-sync/cover-by-key?key=" + encodeURIComponent(shazamBarKey) + "')";
             barCover.classList.remove('shazam-bar-cover-placeholder');
         } else {
             barCover.style.backgroundImage = '';
@@ -3468,10 +3471,19 @@ function shazamRenderTrackList(data) {
             matchCell = '<td class="shazam-match-col">' + (pct != null ? '<span class="shazam-match-pct">' + pct + '%</span>' : '\u2014') + '</td>';
         }
 
-        // Cover thumbnail (overview list). Uses cover_hashes (key-variant aware).
-        const coverHash = _lu(shazamCoverHashes, key, keyLower, keyNorm, keyNormLower, keyDeep) || null;
-        const coverCell = coverHash
-            ? '<td class="shazam-cover-col"><span class="track-cover" style="background-image:url(/api/shazam-sync/cover/' + coverHash + ');" aria-hidden="true"></span></td>'
+        // Cover thumbnail (overview list).
+        //   Existence gate: the cover_hashes map from /status is recomputed from
+        //   the cover_cache/ directory on every poll, so it is never sparse — a
+        //   hit here reliably means a file exists on disk.
+        //   Fetch: by track KEY (not a pre-resolved hash). The server resolves
+        //   the key to a file via its canonical variant set, so the thumbnail
+        //   shows whenever the file exists, regardless of which key-variant it
+        //   was cached under. This removes the frontend's dependency on the map
+        //   holding the exact hash under the exact key form this row uses — the
+        //   root cause of the recurring "blank cover, file present" bug.
+        const hasCover = !!_lu(shazamCoverHashes, key, keyLower, keyNorm, keyNormLower, keyDeep);
+        const coverCell = hasCover
+            ? '<td class="shazam-cover-col"><span class="track-cover" style="background-image:url(/api/shazam-sync/cover-by-key?key=' + encodeURIComponent(key) + ');" aria-hidden="true"></span></td>'
             : '<td class="shazam-cover-col"><span class="track-cover track-cover-placeholder" aria-hidden="true"></span></td>';
 
         const safeAttr = s => escapeHtml(s).replace(/'/g, '&#39;');

@@ -31,6 +31,9 @@ from lib.covers import (
     _rebuild_cover_hashes_from_disk,
     _extract_local_artwork_to_cache,
     download_cover_art,
+    cover_key_variants,
+    find_cover_file_for_key,
+    compute_cover_hashes_from_disk,
 )
 
 # Logger for Soundeo star/unstar: file only (no console), so agents can read it and users aren't spammed.
@@ -916,6 +919,10 @@ def shazam_bootstrap():
     settings.update(_get_soundeo_chrome_profile_info())
     status = _get_best_available_status()
     status['compare_running'] = getattr(app, '_shazam_compare_running', False)
+    # Initial page load goes through /bootstrap (not /status), so it needs the
+    # same disk-derived cover_hashes overlay — otherwise the first render has a
+    # sparse map and thumbnails stay blank until a later /status poll.
+    _overlay_disk_cover_hashes(status)
     resp = jsonify({'settings': settings, 'status': status})
     resp.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return resp
@@ -1927,12 +1934,40 @@ def _get_best_available_status():
     return _add_starred_lowercase_aliases(_apply_skip_list_to_status({'shazam_count': 0, 'local_count': 0, 'to_download_count': 0, 'to_download': [], 'have_locally': [], 'folder_stats': []}))
 
 
+def _overlay_disk_cover_hashes(status: Dict) -> Dict:
+    """Overlay a COMPLETE, disk-derived cover_hashes map onto an outgoing status.
+
+    ROOT-CAUSE FIX for the recurring "covers vanished" bug. The cover map is
+    derived state — every cover is a file at cover_cache/<md5(key_variant)>.jpg —
+    so it is fully reconstructable from disk + the track keys already in status.
+    Recomputing it on every status read (the single chokepoint feeding the UI:
+    both /bootstrap and /status go through here) makes the served map impossible
+    to be sparser than what is actually on disk. Every historical loss vector —
+    interrupted write, cancelled-compare bare dict, stale-cache fetch, a rebuild
+    path that forgot to carry cover_hashes, a .bak restore that omitted it —
+    becomes irrelevant to display: if the file exists, the cover shows.
+
+    Mutates and returns `status`. No-op (and never raises) if the cover dir is
+    empty or anything goes wrong. Cheap: uses a memoized directory listing.
+    """
+    try:
+        disk_covers = compute_cover_hashes_from_disk(status)
+        if disk_covers:
+            merged = dict(status.get('cover_hashes') or {})
+            merged.update(disk_covers)  # disk is authoritative
+            status['cover_hashes'] = merged
+    except Exception:
+        logging.exception("_overlay_disk_cover_hashes failed")
+    return status
+
+
 @app.route('/api/shazam-sync/status', methods=['GET'])
 def shazam_sync_status():
     """Return last comparison status. Never return empty when Shazam/local data exists."""
     compare_running = getattr(app, '_shazam_compare_running', False)
     out = _get_best_available_status()
     out['compare_running'] = compare_running
+    _overlay_disk_cover_hashes(out)
     # Self-heal #3: auto-trigger Soundeo backfill if a small number of url-keys
     # lack covers (newly-Shazammed tracks since the last bulk run that didn't
     # get cover cached at search time). Throttled and bounded so it never spams
@@ -1990,6 +2025,40 @@ def shazam_sync_cover(cover_hash: str):
         h,
         cache_dir,
     )
+    nf = Response("Not found\n", status=404, mimetype='text/plain')
+    nf.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
+    return nf
+
+
+@app.route('/api/shazam-sync/cover-by-key', methods=['GET'])
+def shazam_sync_cover_by_key():
+    """Serve cover art by track KEY (?key=Artist - Title), resolving the file
+    server-side via the canonical variant set.
+
+    This is the resilient cover path: the frontend passes the track key it
+    always has, and the server finds cover_cache/<md5(variant)>.jpg for whichever
+    variant the file was cached under. Because resolution is deterministic from
+    disk, a cover renders whenever the file exists — independent of any persisted
+    cover_hashes map. That eliminates the entire class of "the map went sparse so
+    the thumbnail is blank even though the file is right there" bugs.
+
+    Security: the served path is md5(key) (hex) joined to cover_cache, so no key
+    content can escape the cache directory.
+    """
+    key = (request.args.get('key') or '').strip()
+    if not key or len(key) > 512:
+        r = Response("Missing or oversized key\n", status=400, mimetype='text/plain')
+        r.headers['Cache-Control'] = 'no-store'
+        return r
+    found = find_cover_file_for_key(key)
+    if found:
+        fp, mime = found
+        resp = send_file(fp, mimetype=mime, conditional=True)
+        # Bytes are immutable per (key→hash→file); safe to cache hard. The key is
+        # in the URL, so a different track gets a different URL.
+        resp.headers['Cache-Control'] = 'public, max-age=31536000, immutable'
+        return resp
+    logging.debug("shazam_sync_cover_by_key: no cover file for key=%r", key[:80])
     nf = Response("Not found\n", status=404, mimetype='text/plain')
     nf.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate'
     return nf

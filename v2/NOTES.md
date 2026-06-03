@@ -25,6 +25,26 @@ Undo dismiss re-stars the track on Soundeo: it tries the HTTP API first, then fa
 - **Dot state** (green = found, orange = searched not found, grey = not searched) is stored in `shazam_status_cache.json` via the `search_outcomes` log. That file is **persistent** (project root); it survives browser refresh and app restart.
 - **Fix (Feb 2026):** Compare (and other code paths) were calling `save_status_cache(status)` with a status that had no `search_outcomes`, which overwrote the file and wiped the log. Orange dots then disappeared on refresh. In `save_status_cache` we now **preserve** the existing file’s `search_outcomes` when the status being saved has none, so the search log is never wiped and dots survive compare + refresh.
 
+## Cover art — why thumbnails no longer vanish
+
+The recurring "covers disappeared (after an interruption / Fetch / cancel)" bug
+is permanently fixed. Root cause: `cover_hashes` was treated as precious state
+hand-threaded through many rebuild/merge paths; any path that forgot it (or used
+a mismatched key form) blanked covers even though the files were on disk — the
+same shape as the orange-dots bug above, fixed the same band-aid way 7 times.
+
+Now the **`cover_cache/` directory is the source of truth**: a cover is
+`cover_cache/<md5(track_key_variant)>.jpg`, the map is recomputed from disk on
+every status read (`/bootstrap` + `/status` both go through
+`_overlay_disk_cover_hashes`), and the UI fetches covers **by track key** via
+`/api/shazam-sync/cover-by-key` (server resolves the variant). A thumbnail shows
+whenever the file exists — no persisted map can make it disappear. A blank cover
+just means no cover file exists yet (track not searched/backfilled).
+
+Full write-up: [`docs/COVER_ART_ARCHITECTURE.md`](docs/COVER_ART_ARCHITECTURE.md).
+Tests: `tests/test_cover_art.py` (24 tests; the headline one reproduces the
+post-interruption empty-map state and asserts `/status` rebuilds from disk).
+
 ## Search all: browser vs HTTP, Stop button
 
 - **No browser when you click Search:** Search can run in two ways. (1) **HTTP** — no Chrome window; uses cookies and requests. (2) **Browser** — opens Chrome; if **headed** you see the window, if **headless** it runs in the background. Config: `search_all_use_http` (true = no browser), `headed_mode` (false = headless). The progress bar now shows “Starting search (HTTP, no browser)…” or “Starting search (headless browser)…” so you can tell which mode you’re in.

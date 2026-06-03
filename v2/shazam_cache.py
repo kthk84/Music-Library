@@ -5,6 +5,7 @@ Persistent caches for Shazam sync.
 When running from a frozen bundle, data lives in ~/Library/Application Support/SoundBridge.
 """
 import json
+import logging
 import os
 import shutil
 import threading
@@ -38,41 +39,50 @@ def _save_json(path: str, data: Any) -> None:
 
 
 def _save_json_atomic(path: str, data: Any) -> None:
-    """Write to temp file then rename for atomicity. Flush+fsync so data is on disk before rename.
-    Falls back to a direct write if the atomic rename times out (e.g. transient macOS filesystem issue)."""
-    import logging as _log
-    tmp = path + ".tmp." + str(os.getpid())
-    renamed = False
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
+    """Write to a temp file then rename, for crash-safe atomic replacement.
+
+    Both the primary and the fallback path use temp-file + ``os.replace`` (an
+    atomic rename on the same filesystem). The live file is NEVER opened for
+    truncation in place — that is precisely the operation that, if the process
+    is killed mid-write, leaves a half-written/corrupt JSON that then reads back
+    as ``None`` and wipes the whole status (covers, dots, the lot). With this
+    structure an interrupted write can only ever leave a stray ``.tmp`` file;
+    the previous good ``path`` stays intact until a complete file is renamed
+    over it.
+    """
+    def _write_then_replace(tmp_path: str) -> None:
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
             f.flush()
             try:
                 os.fsync(f.fileno())
             except (OSError, AttributeError):
-                logging.debug("silent except at shazam_cache.py:53", exc_info=True)
-        os.replace(tmp, path)
-        renamed = True
+                logging.debug("_save_json_atomic: fsync unavailable", exc_info=True)
+        os.replace(tmp_path, path)
+
+    def _cleanup(p: str) -> None:
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            logging.debug("_save_json_atomic: temp cleanup failed for %s", p, exc_info=True)
+
+    tmp = path + ".tmp." + str(os.getpid())
+    try:
+        _write_then_replace(tmp)
+        return
     except Exception as _e:
-        if not renamed:
-            _log.warning('_save_json_atomic: atomic rename failed (%s) — falling back to direct write for %s', _e, os.path.basename(path))
-            try:
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False)
-                    f.flush()
-                    try:
-                        os.fsync(f.fileno())
-                    except (OSError, AttributeError):
-                        logging.debug("silent except at shazam_cache.py:66", exc_info=True)
-            except Exception as _e2:
-                _log.error('_save_json_atomic: direct write also failed for %s: %s', os.path.basename(path), _e2)
-                raise
-    finally:
-        if os.path.exists(tmp):
-            try:
-                os.remove(tmp)
-            except OSError:
-                logging.debug("silent except at shazam_cache.py:75", exc_info=True)
+        logging.warning('_save_json_atomic: atomic write failed (%s) — retrying with a fresh temp for %s', _e, os.path.basename(path))
+        _cleanup(tmp)
+    # Second attempt with a fresh temp name — still atomic, still leaves the
+    # existing file untouched until a complete write is renamed into place.
+    tmp2 = path + ".tmp2." + str(os.getpid())
+    try:
+        _write_then_replace(tmp2)
+    except Exception as _e2:
+        logging.error('_save_json_atomic: fallback write also failed for %s: %s — previous file left intact', os.path.basename(path), _e2)
+        _cleanup(tmp2)
+        raise
 
 
 def _track_key(t: Dict) -> tuple:
@@ -342,7 +352,7 @@ def load_status_cache() -> Optional[Dict]:
                     urls = status["urls"]
                     nf = dict(bak.get("not_found") or {})
                     status["not_found"] = {k: v for k, v in nf.items() if not (urls.get(k) or (isinstance(k, str) and urls.get(k.lower())))}
-                for key in ("track_ids", "starred", "soundeo_titles", "soundeo_match_scores", "dismissed_manual_check"):
+                for key in ("track_ids", "starred", "soundeo_titles", "soundeo_match_scores", "dismissed_manual_check", "cover_hashes"):
                     if bak.get(key) and not status.get(key):
                         v = bak[key]
                         status[key] = list(v) if isinstance(v, list) else (dict(v) if isinstance(v, dict) else v)
@@ -379,8 +389,20 @@ def save_status_cache(status: Dict) -> None:
             to_dl_now = [t for t in (out.get("to_download") or []) if isinstance(t, dict) and _k(t) not in have_keys]
             out["to_download"] = to_dl_now
             out["to_download_count"] = len(to_dl_now)
+
+            # Preserve cover_hashes: never persist a sparser map than what's
+            # already on disk. The /status read path recomputes covers from the
+            # cover_cache directory (so display no longer depends on this), but
+            # keeping the persisted copy complete prevents thrash and helps any
+            # other reader. This is the single write-chokepoint guard that the
+            # ~40 individual save sites no longer each have to remember.
+            existing_cov = existing_for_merge.get("cover_hashes")
+            if isinstance(existing_cov, dict) and existing_cov:
+                merged_cov = dict(existing_cov)
+                merged_cov.update(out.get("cover_hashes") or {})
+                out["cover_hashes"] = merged_cov
     except Exception:
-        logging.debug("silent except at shazam_cache.py:349", exc_info=True)
+        logging.debug("save_status_cache: lost-update/cover_hashes merge guard failed", exc_info=True)
 
     # Must run on every save (not only when the merge try/except fails): replay + atomic write.
     log = out.get('search_outcomes') or []

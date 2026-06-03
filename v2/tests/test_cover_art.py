@@ -1,10 +1,25 @@
 """
-Regression tests for Shazam/Sync cover art: API must serve cached files and
-status JSON must retain cover_hashes whenever we merge from the saved cache.
+Regression tests for Shazam/Sync cover art.
 
-Without cover_hashes in /api/shazam-sync/status, the UI has nothing to point
-background-image URLs at (thumbnails stay blank even when files exist).
+The recurring "covers vanished" bug had ONE root cause: ``cover_hashes`` (track
+key -> md5) was treated as precious state hand-threaded through ~4 server
+rebuild paths and ~4 client merge paths; any interruption / stale-cache fetch /
+cancel-race wrote a status without it and thumbnails went blank even though the
+files were on disk. The permanent fix makes the on-disk ``cover_cache/``
+directory the source of truth: covers are named ``<md5(key_variant)>.jpg``, the
+map is recomputed from disk on every ``/status`` read (so it can never go
+sparse), and the UI fetches covers BY KEY so the server resolves the file via
+the canonical variant set.
+
+These tests pin that invariant. The headline one,
+``test_status_recomputes_cover_hashes_from_disk_when_persisted_map_empty``,
+reproduces the exact post-interruption state (persisted ``cover_hashes: {}``,
+files present on disk) and asserts ``/status`` heals it — it would have failed
+on every one of the 7 prior band-aid commits.
 """
+import hashlib
+import json
+
 import pytest
 
 
@@ -13,12 +28,43 @@ SAMPLE_HASH = "abcd1234abcd1234abcd1234abcd1234"
 TRACK_KEY = "Test Artist - Test Title"
 
 
+def _md5(s: str) -> str:
+    return hashlib.md5(s.encode("utf-8")).hexdigest()
+
+
+# 20-byte valid JPEG (SOI ... EOI) so send_file has real bytes to serve.
+_JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+
+
+def _write_cover(cache_dir, key: str, ext: str = ".jpg") -> str:
+    """Write a cover file named md5(key)+ext into cache_dir. Returns the hash."""
+    h = _md5(key)
+    (cache_dir / f"{h}{ext}").write_bytes(_JPEG_BYTES)
+    return h
+
+
 @pytest.fixture
 def app_module():
     """Import app lazily so monkeypatch applies before heavy routes run."""
     import app as m
 
     return m
+
+
+@pytest.fixture
+def cover_dir(tmp_path, monkeypatch):
+    """A fresh cover_cache dir, wired into BOTH app and lib.covers namespaces."""
+    import app as app_module
+    import lib.covers as covers
+
+    cache_dir = tmp_path / "cover_cache"
+    cache_dir.mkdir()
+    # find_cover_file_for_key / compute_cover_hashes_from_disk resolve
+    # _get_cover_cache_dir in lib.covers; the /cover/<hash> route resolves it in
+    # app's namespace. Patch both so every path points at the test dir.
+    monkeypatch.setattr(covers, "_get_cover_cache_dir", lambda: str(cache_dir))
+    monkeypatch.setattr(app_module, "_get_cover_cache_dir", lambda: str(cache_dir))
+    return cache_dir
 
 
 def test_shazam_sync_cover_serves_jpeg_from_cache_dir(app_module, monkeypatch, tmp_path):
@@ -147,3 +193,241 @@ def test_get_best_available_partial_status_preserves_cover_hashes(app_module, mo
 
     out = app_module._get_best_available_status()
     assert out.get("cover_hashes", {}).get(TRACK_KEY) == SAMPLE_HASH
+
+
+# =====================================================================
+# Canonical variant normalizer — the single source of truth for keys.
+# =====================================================================
+
+def test_cover_key_variants_covers_case_parens_accents():
+    from lib.covers import cover_key_variants
+
+    variants = cover_key_variants("Davi & Definition - Désolé (Original Mix)")
+    # exact + lowercase present
+    assert "Davi & Definition - Désolé (Original Mix)" in variants
+    assert "davi & definition - désolé (original mix)" in variants
+    # parens stripped
+    assert any("désolé" in v and "(" not in v for v in variants)
+    # deep-normalized: accents folded, '&'->',', artists sorted, lowercase
+    assert "davi, definition - desole" in variants
+    # ordered + de-duplicated (no repeats)
+    assert len(variants) == len(set(variants))
+
+
+def test_cover_key_variants_empty_key():
+    from lib.covers import cover_key_variants
+    assert cover_key_variants("") == []
+    assert cover_key_variants("   ") == []
+
+
+# =====================================================================
+# find_cover_file_for_key + the by-key endpoint (resilient fetch path)
+# =====================================================================
+
+def test_find_cover_file_for_key_exact(cover_dir):
+    from lib.covers import find_cover_file_for_key
+    _write_cover(cover_dir, TRACK_KEY)
+    found = find_cover_file_for_key(TRACK_KEY)
+    assert found is not None
+    fp, mime = found
+    assert fp.endswith(f"{_md5(TRACK_KEY)}.jpg")
+    assert mime == "image/jpeg"
+
+
+def test_find_cover_file_for_key_resolves_variant(cover_dir):
+    """Cover cached under the deep-normalized variant is found from the display key."""
+    from lib.covers import find_cover_file_for_key
+    display_key = "Davi & Definition - Désolé"
+    stored_variant = "davi, definition - desole"   # deep-norm form
+    _write_cover(cover_dir, stored_variant)
+    found = find_cover_file_for_key(display_key)
+    assert found is not None, "variant resolution failed — display key should find the deep-norm file"
+    assert found[0].endswith(f"{_md5(stored_variant)}.jpg")
+
+
+def test_find_cover_file_for_key_png(cover_dir):
+    from lib.covers import find_cover_file_for_key
+    _write_cover(cover_dir, TRACK_KEY, ext=".png")
+    found = find_cover_file_for_key(TRACK_KEY)
+    assert found is not None and found[1] == "image/png"
+
+
+def test_cover_by_key_endpoint_serves_bytes(app_module, cover_dir):
+    _write_cover(cover_dir, TRACK_KEY)
+    client = app_module.app.test_client()
+    resp = client.get("/api/shazam-sync/cover-by-key", query_string={"key": TRACK_KEY})
+    assert resp.status_code == 200, resp.data
+    assert resp.mimetype == "image/jpeg"
+    assert resp.data == _JPEG_BYTES
+    assert "immutable" in resp.headers.get("Cache-Control", "")
+
+
+def test_cover_by_key_endpoint_resolves_accented_variant(app_module, cover_dir):
+    """The exact UX bug: row key has accents/&, file cached under the folded form."""
+    _write_cover(cover_dir, "davi, definition - desole")
+    client = app_module.app.test_client()
+    resp = client.get("/api/shazam-sync/cover-by-key", query_string={"key": "Davi & Definition - Désolé"})
+    assert resp.status_code == 200, resp.data
+    assert resp.data == _JPEG_BYTES
+
+
+def test_cover_by_key_404_when_missing(app_module, cover_dir):
+    client = app_module.app.test_client()
+    resp = client.get("/api/shazam-sync/cover-by-key", query_string={"key": "No Such - Track"})
+    assert resp.status_code == 404
+    assert "no-store" in resp.headers.get("Cache-Control", "").lower()
+
+
+def test_cover_by_key_400_empty_or_oversized(app_module, cover_dir):
+    client = app_module.app.test_client()
+    assert client.get("/api/shazam-sync/cover-by-key", query_string={"key": ""}).status_code == 400
+    assert client.get("/api/shazam-sync/cover-by-key", query_string={"key": "x" * 600}).status_code == 400
+
+
+def test_cover_by_key_path_traversal_is_safe(app_module, cover_dir):
+    """A traversal-looking key hashes to hex, so it can never escape cover_cache."""
+    client = app_module.app.test_client()
+    resp = client.get("/api/shazam-sync/cover-by-key", query_string={"key": "../../../../etc/passwd"})
+    # No cover file for that md5 → clean 404, never a file outside the cache dir.
+    assert resp.status_code == 404
+
+
+# =====================================================================
+# Disk-derivation — the read-path source of truth.
+# =====================================================================
+
+def test_compute_cover_hashes_from_disk_keys_by_primary(cover_dir):
+    from lib.covers import compute_cover_hashes_from_disk
+    h = _write_cover(cover_dir, TRACK_KEY)
+    status = {"to_download": [{"artist": "Test Artist", "title": "Test Title"}]}
+    out = compute_cover_hashes_from_disk(status)
+    # primary key + lowercase both present and correct
+    assert out.get(TRACK_KEY) == h
+    assert out.get(TRACK_KEY.lower()) == h
+
+
+def test_compute_cover_hashes_from_disk_from_urls(cover_dir):
+    from lib.covers import compute_cover_hashes_from_disk
+    h = _write_cover(cover_dir, TRACK_KEY)
+    out = compute_cover_hashes_from_disk({"urls": {TRACK_KEY: "https://soundeo.com/x"}})
+    assert out.get(TRACK_KEY) == h
+
+
+def test_compute_cover_hashes_empty_when_no_files(cover_dir):
+    from lib.covers import compute_cover_hashes_from_disk
+    out = compute_cover_hashes_from_disk({"urls": {TRACK_KEY: "https://x"}})
+    assert out == {}
+
+
+# =====================================================================
+# HEADLINE REGRESSION: /status recomputes a complete cover_hashes map
+# from disk even when the persisted/in-memory map is empty.
+# This reproduces the post-interruption state and proves the bug class
+# is closed at the read chokepoint. Would FAIL on all 7 prior commits.
+# =====================================================================
+
+def test_status_recomputes_cover_hashes_from_disk_when_persisted_map_empty(app_module, cover_dir, monkeypatch):
+    h = _write_cover(cover_dir, TRACK_KEY)
+
+    # Simulate a status that lost its cover_hashes (interrupted write / cancel
+    # race / stale-cache fetch) but whose track + url survive and whose cover
+    # file is sitting on disk.
+    broken_status = {
+        "cover_hashes": {},                       # <- wiped
+        "urls": {TRACK_KEY: "https://soundeo.com/x"},
+        "to_download": [{"artist": "Test Artist", "title": "Test Title"}],
+        "to_download_count": 1,
+    }
+    monkeypatch.setattr(app_module, "_get_best_available_status", lambda: dict(broken_status))
+    # Keep the route's async self-heal hook inert for a deterministic test.
+    monkeypatch.setattr(app_module, "_auto_trigger_cover_backfill_if_small_gap", lambda *_a, **_k: None)
+
+    client = app_module.app.test_client()
+    resp = client.get("/api/shazam-sync/status")
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["cover_hashes"].get(TRACK_KEY) == h, (
+        "/status must rebuild cover_hashes from the cover_cache dir even when the "
+        "persisted map is empty — this is the permanent fix for the recurring bug"
+    )
+
+
+def test_status_cover_hashes_resilient_to_accented_key(app_module, cover_dir, monkeypatch):
+    """File cached under folded variant; row uses the display key. /status still maps it."""
+    stored = "davi, definition - desole"
+    h = _write_cover(cover_dir, stored)
+    broken_status = {
+        "cover_hashes": {},
+        "to_download": [{"artist": "Davi & Definition", "title": "Désolé"}],
+        "to_download_count": 1,
+    }
+    monkeypatch.setattr(app_module, "_get_best_available_status", lambda: dict(broken_status))
+    monkeypatch.setattr(app_module, "_auto_trigger_cover_backfill_if_small_gap", lambda *_a, **_k: None)
+
+    client = app_module.app.test_client()
+    data = client.get("/api/shazam-sync/status").get_json()
+    # Primary display key resolves to the folded-variant file's hash.
+    assert data["cover_hashes"].get("Davi & Definition - Désolé") == h
+
+
+# =====================================================================
+# Persistence hardening (defense in depth).
+# =====================================================================
+
+def test_save_status_cache_preserves_cover_hashes(monkeypatch, tmp_path):
+    """A save whose status dropped cover_hashes must not shrink the persisted map."""
+    import shazam_cache as sc
+
+    status_path = str(tmp_path / "shazam_status_cache.json")
+    monkeypatch.setattr(sc, "STATUS_CACHE_PATH", status_path)
+
+    # Pre-existing file WITH cover_hashes.
+    sc.save_status_cache({
+        "urls": {TRACK_KEY: "https://soundeo.com/x"},
+        "cover_hashes": {TRACK_KEY: SAMPLE_HASH, TRACK_KEY.lower(): SAMPLE_HASH},
+        "search_outcomes": [],
+    })
+    # A later save that forgot cover_hashes (the bug shape).
+    sc.save_status_cache({
+        "urls": {TRACK_KEY: "https://soundeo.com/x"},
+        "cover_hashes": {},
+        "search_outcomes": [],
+    })
+    reloaded = sc.load_status_cache()
+    assert reloaded["cover_hashes"].get(TRACK_KEY) == SAMPLE_HASH, (
+        "save_status_cache must merge cover_hashes from the existing file"
+    )
+
+
+def test_save_json_atomic_round_trips_and_leaves_no_temp(tmp_path):
+    import shazam_cache as sc
+    target = str(tmp_path / "out.json")
+    payload = {"a": 1, "cover_hashes": {TRACK_KEY: SAMPLE_HASH}, "unicode": "Désolé"}
+    sc._save_json_atomic(target, payload)
+    with open(target, encoding="utf-8") as f:
+        assert json.load(f) == payload
+    # No stray temp files left behind.
+    leftovers = [p.name for p in tmp_path.iterdir() if ".tmp" in p.name]
+    assert leftovers == [], f"temp files leaked: {leftovers}"
+
+
+def test_load_status_cache_restores_cover_hashes_from_bak(monkeypatch, tmp_path):
+    """When the main file lost urls/outcomes, .bak restore now includes cover_hashes."""
+    import shazam_cache as sc
+
+    status_path = tmp_path / "shazam_status_cache.json"
+    monkeypatch.setattr(sc, "STATUS_CACHE_PATH", str(status_path))
+
+    # Main file: has track lists but no urls/search_outcomes (the .bak trigger).
+    status_path.write_text(json.dumps({
+        "to_download": [{"artist": "Test Artist", "title": "Test Title"}],
+        "have_locally": [],
+    }), encoding="utf-8")
+    # .bak: the richer prior snapshot, including cover_hashes.
+    (tmp_path / "shazam_status_cache.json.bak").write_text(json.dumps({
+        "urls": {TRACK_KEY: "https://soundeo.com/x"},
+        "cover_hashes": {TRACK_KEY: SAMPLE_HASH},
+    }), encoding="utf-8")
+
+    out = sc.load_status_cache()
+    assert out["cover_hashes"].get(TRACK_KEY) == SAMPLE_HASH
