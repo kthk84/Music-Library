@@ -1685,6 +1685,86 @@ def _auto_trigger_cover_backfill_if_small_gap(status: Dict) -> None:
     logging.info("auto-backfill: triggered for %d url-keys without cover_hashes", missing)
 
 
+def _maybe_backfill_covers_after_job(reason: str) -> bool:
+    """Fire the cover backfill IMMEDIATELY after a URL-adding job completes.
+
+    Guarantees that any track scraped by a job (single search, global search,
+    favorites sync, star batch) gets its cover fetched right away — covering the
+    paths that don't cache covers inline (favorites sync/crawl) and any inline
+    fetch that failed mid-job. Unlike the poll-driven auto-trigger this BYPASSES
+    the 10-minute throttle: a job completion is an explicit, bounded event, and
+    the client does a status reload right after every job, which sees
+    cover_backfill.running and starts the in-page watcher — so covers appear in
+    the open list within seconds, no manual reload.
+
+    Disk-aware: counts a cover as missing only if no file exists for any key
+    variant, so it never re-fetches Soundeo pages for covers already cached.
+    Never raises (workers call it as a fire-and-forget tail step).
+    Returns True if a backfill was started.
+    """
+    global _cover_backfill_running, _cover_backfill_progress, _AUTO_BACKFILL_LAST_AT
+    try:
+        if _cover_backfill_running:
+            return False
+        from shazam_cache import load_status_cache
+        status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
+        urls = status.get('urls') or {}
+        if not urls:
+            return False
+        disk_map = compute_cover_hashes_from_disk(status)
+        url_keys = []
+        for _ in range(5):
+            try:
+                url_keys = list(urls.keys())
+                break
+            except RuntimeError:
+                url_keys = []
+        missing = 0
+        for k in url_keys:
+            if not isinstance(k, str):
+                continue
+            if k in disk_map or k.lower() in disk_map:
+                continue
+            missing += 1
+        if missing == 0:
+            return False
+        _AUTO_BACKFILL_LAST_AT = time.time()
+        _cover_backfill_running = True
+        _cover_backfill_progress = {'done': 0, 'total': missing, 'running': True, 'started_at': time.time()}
+        threading.Thread(target=_run_cover_backfill, daemon=True).start()
+        logging.info("cover-backfill after %s: started for %d missing cover(s)", reason, missing)
+        return True
+    except Exception:
+        logging.exception("_maybe_backfill_covers_after_job(%s) failed", reason)
+        return False
+
+
+def _publish_cover_hash_live(key: str, cover_hash: str) -> None:
+    """Publish a just-scraped cover into the in-memory status ATOMICALLY.
+
+    Replaces in-place `_set_cover_hash_variants(app._shazam_sync_status, …)`
+    mutation: the /status read path iterates that shared dict concurrently, and
+    in-place inserts raced it ("dictionary changed size during iteration").
+    Builds the variant entries in a private dict, then rebinds in one assignment
+    so readers always hold a complete, frozen map.
+    """
+    mem = getattr(app, '_shazam_sync_status', None)
+    if not mem or not key or not cover_hash:
+        return
+    tmp: Dict = {'cover_hashes': {}}
+    _set_cover_hash_variants(tmp, key, cover_hash)
+    existing = mem.get('cover_hashes') or {}
+    snapshot = {}
+    for _ in range(5):
+        try:
+            snapshot = dict(existing)
+            break
+        except RuntimeError:
+            snapshot = {}
+    snapshot.update(tmp['cover_hashes'])
+    mem['cover_hashes'] = snapshot
+
+
 def _status_is_stale(status: Optional[Dict]) -> bool:
     """True if status doesn't match current shazam_cache (e.g. Fetch added more tracks)."""
     if not status:
@@ -2579,8 +2659,23 @@ def _run_cover_backfill():
         urls = status.get('urls') or {}
         cover_hashes = status.get('cover_hashes') or {}
 
-        # Tracks that have a Soundeo URL but no cached cover art
-        todo_raw = [(key, url) for key, url in urls.items() if key not in cover_hashes]
+        # Tracks that have a Soundeo URL but no cached cover art. Disk-aware:
+        # the persisted map can lag what's actually in cover_cache/ (covers are
+        # files; the map is derived), so also skip any key whose file already
+        # exists under any canonical variant — otherwise we'd re-fetch Soundeo
+        # track pages for covers we already have.
+        from lib.covers import find_cover_file_for_key
+        todo_raw = []
+        for key, url in urls.items():
+            if key in cover_hashes:
+                continue
+            existing = find_cover_file_for_key(key)
+            if existing:
+                # Heal the map entry so future runs skip the disk check too.
+                h = os.path.splitext(os.path.basename(existing[0]))[0]
+                cover_hashes[key] = h
+                continue
+            todo_raw.append((key, url))
 
         # Sort by newest Shazam date first so recently-added tracks get art immediately.
         # Build a lookup: key -> shazamed_at from to_download + have_locally lists.
@@ -3736,6 +3831,9 @@ def _run_soundeo_automation(tracks: list):
             status['soundeo_match_scores'][k.lower()] = sc
         app._shazam_sync_status = status
         save_status_cache(status)
+        # Crawl adds urls without fetching covers — fetch them now so results
+        # show art in the open list immediately.
+        _maybe_backfill_covers_after_job('favorites crawl')
     except Exception as e:
         app._shazam_sync_progress = {
             'running': False,
@@ -3876,6 +3974,10 @@ def _run_sync_favorites_from_soundeo():
             'mutations': len(mutations),
             'mode': 'sync_favorites',
         }
+        # Favorites sync discovers tracks (urls/starred) but does NOT fetch cover
+        # art inline — fetch immediately so the just-synced tracks show covers in
+        # the open list (client's post-job status reload starts the live watcher).
+        _maybe_backfill_covers_after_job('favorites sync')
     except Exception as e:
         app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'sync_favorites'}
 
@@ -4067,8 +4169,8 @@ def _run_search_soundeo_single(artist: str, title: str):
                 cover_hash = _cache_cover_art(key, cover_url_single)
                 if cover_hash:
                     _set_cover_hash_variants(status, key, cover_hash)
-                    if hasattr(app, '_shazam_sync_status') and app._shazam_sync_status:
-                        _set_cover_hash_variants(app._shazam_sync_status, key, cover_hash)
+                    # Atomic rebind (not in-place) — readers iterate this concurrently.
+                    _publish_cover_hash_live(key, cover_hash)
             status['not_found'].pop(key, None)
             status['not_found'].pop(key.lower(), None)
             app._shazam_sync_status = status
@@ -4122,6 +4224,11 @@ def _run_search_soundeo_single(artist: str, title: str):
                 'error': err, 'message': err if not_logged_in else f'Not found: {artist} - {title}', 'mode': 'search_single',
                 'current_key': key,
             }
+        # Safety net: if the inline cover fetch failed (or any older track still
+        # lacks a cover file), fetch immediately — the client's post-job status
+        # reload sees cover_backfill.running and live-fills the list.
+        if not getattr(app, '_shazam_single_search_queue', None):
+            _maybe_backfill_covers_after_job('single search')
         _start_next_single_search()
     except Exception as e:
         app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'search_single', 'key': key}
@@ -4316,6 +4423,8 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
             'soundeo_match_scores': dict(status.get('soundeo_match_scores') or {}),
             'starred': dict(status.get('starred') or {}),
         }
+        # Safety net for tracks whose inline cover fetch failed mid-batch.
+        _maybe_backfill_covers_after_job('global search')
     except Exception as e:
         app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'search_global'}
 

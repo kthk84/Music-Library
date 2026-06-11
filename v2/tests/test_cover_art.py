@@ -386,6 +386,73 @@ def test_status_cover_hashes_resilient_to_accented_key(app_module, cover_dir, mo
 
 
 # =====================================================================
+# Job-end backfill trigger: a scraped track without a cover file must get
+# the backfill fired IMMEDIATELY when the job completes (no 10-min wait),
+# so the in-page watcher fills it without a manual reload.
+# =====================================================================
+
+def test_after_job_backfill_fires_when_cover_missing(app_module, cover_dir, monkeypatch):
+    started = {}
+
+    class FakeThread:
+        def __init__(self, target=None, daemon=None):
+            started['target'] = target
+        def start(self):
+            started['started'] = True
+
+    monkeypatch.setattr(app_module.threading, 'Thread', FakeThread)
+    monkeypatch.setattr('shazam_cache.load_status_cache',
+                        lambda: {'urls': {TRACK_KEY: 'https://soundeo.com/x'}, 'cover_hashes': {}})
+    app_module._cover_backfill_running = False
+    try:
+        fired = app_module._maybe_backfill_covers_after_job('unit test')
+        assert fired is True
+        assert started.get('started') is True
+        assert app_module._cover_backfill_progress['running'] is True
+        assert app_module._cover_backfill_progress['total'] == 1
+    finally:
+        app_module._cover_backfill_running = False
+        app_module._cover_backfill_progress = {'done': 0, 'total': 0, 'running': False}
+
+
+def test_after_job_backfill_skips_when_cover_on_disk(app_module, cover_dir, monkeypatch):
+    """Disk-aware: a cover file on disk counts as covered even if the persisted
+    map lost the entry — no pointless backfill, no Soundeo re-fetch."""
+    _write_cover(cover_dir, TRACK_KEY)
+    monkeypatch.setattr('shazam_cache.load_status_cache',
+                        lambda: {'urls': {TRACK_KEY: 'https://soundeo.com/x'}, 'cover_hashes': {}})
+    app_module._cover_backfill_running = False
+    assert app_module._maybe_backfill_covers_after_job('unit test') is False
+
+
+def test_after_job_backfill_noop_when_already_running(app_module, cover_dir, monkeypatch):
+    monkeypatch.setattr('shazam_cache.load_status_cache',
+                        lambda: {'urls': {TRACK_KEY: 'https://soundeo.com/x'}, 'cover_hashes': {}})
+    app_module._cover_backfill_running = True
+    try:
+        assert app_module._maybe_backfill_covers_after_job('unit test') is False
+    finally:
+        app_module._cover_backfill_running = False
+
+
+def test_publish_cover_hash_live_rebinds_atomically(app_module, monkeypatch):
+    """The in-memory publish must REBIND the dict (new object), never mutate in
+    place — readers iterate it concurrently."""
+    before = {'Existing - Track': 'ffff0000ffff0000ffff0000ffff0000'}
+    app_module.app._shazam_sync_status = {'cover_hashes': before}
+    try:
+        app_module._publish_cover_hash_live(TRACK_KEY, SAMPLE_HASH)
+        after = app_module.app._shazam_sync_status['cover_hashes']
+        assert after is not before, "must rebind, not mutate in place"
+        assert after[TRACK_KEY] == SAMPLE_HASH
+        assert after[TRACK_KEY.lower()] == SAMPLE_HASH
+        assert after['Existing - Track'] == 'ffff0000ffff0000ffff0000ffff0000'
+        assert before == {'Existing - Track': 'ffff0000ffff0000ffff0000ffff0000'}, "old dict untouched"
+    finally:
+        app_module.app._shazam_sync_status = None
+
+
+# =====================================================================
 # Persistence hardening (defense in depth).
 # =====================================================================
 
