@@ -250,6 +250,16 @@
                     </div>
                 </div>
                 <div id="setsError" class="shazam-info-msg shazam-warning" style="display:none;"></div>
+                <!-- Set audio player: lives OUTSIDE the re-rendered list so the
+                     embedded stream keeps playing across row refreshes. Sticky so
+                     it stays visible while scrolling long tracklists. -->
+                <div id="setsPlayerBar" class="sets-player-bar" style="display:none;">
+                    <div class="sets-player-head">
+                        <span id="setsPlayerTitle" class="sets-player-title">—</span>
+                        <button type="button" class="btn btn-small" onclick="setsPlayerStop()" title="Stop and close the set player">✕</button>
+                    </div>
+                    <div id="setsPlayerHost" class="sets-player-host"></div>
+                </div>
                 <div id="setsList"><p class="shazam-info-msg">No sets yet. Paste a URL above to scrape your first tracklist.</p></div>
             </section>
         </div>
@@ -444,7 +454,7 @@
     <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
     <div id="shazamDownloadHaveMenu" class="shazam-play-context-menu" role="menu" style="display:none;" aria-label="Download options"></div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=81"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=82"></script>
 <script>
 (function() {
     if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {

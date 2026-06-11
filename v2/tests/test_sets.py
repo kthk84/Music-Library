@@ -149,6 +149,32 @@ def test_scrape_rejects_non_url(sets_file):
         sets_mod.scrape_set_from_url("not a url")
 
 
+# -------------------------------------------------------------- stream url ---
+
+def test_trackid_carries_stream_url(monkeypatch, sets_file):
+    payload = json.load(open(os.path.join(FIXTURE_DIR, "trackid_audiostream.json")))
+    monkeypatch.setattr(sets_mod, "_http_get", lambda url, timeout=20: _FakeResp(200, payload=payload))
+    out = sets_mod.scrape_set_from_url("https://trackid.net/audiostreams/whatever-slug")
+    assert out["stream_url"].startswith("https://soundcloud.com/"), \
+        "trackid sets must carry the source stream for in-app playback"
+
+
+def test_extract_stream_url_prefers_sc_track_id():
+    html = ('<a href="https://soundcloud.com/huminalmusic">profile</a>'
+            '<div data-x="soundcloud.com/tracks/2314934267"></div>'
+            '<a href="https://youtube.com/watch?v=abc123XYZ_-">yt</a>')
+    assert sets_mod._extract_stream_url(html) == "https://api.soundcloud.com/tracks/2314934267"
+
+
+def test_extract_stream_url_youtube_and_permalink_fallbacks():
+    assert sets_mod._extract_stream_url('x youtu.be/dQw4w9WgXcQ x') == \
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    html = '<a href="https://soundcloud.com/someartist/some-mix-029">listen</a>'
+    assert sets_mod._extract_stream_url(html) == "https://soundcloud.com/someartist/some-mix-029"
+    # 1001tracklists' own profile must not be mistaken for the stream
+    assert sets_mod._extract_stream_url('href="https://soundcloud.com/1001tracklists/likes"') == ""
+
+
 # ----------------------------------------------------- storage + endpoints ---
 
 def test_sets_storage_round_trip_and_replace(sets_file):

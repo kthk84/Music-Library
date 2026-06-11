@@ -3795,6 +3795,7 @@ async function shazamDismissManualCheck(btn) {
 }
 
 function shazamTogglePlay(btn) {
+    if (typeof setsPlayerPause === 'function') setsPlayerPause();
     try {
         const dirB64 = (btn.dataset.dirB64 || '').trim();
         const file = btn.dataset.file;
@@ -3949,6 +3950,7 @@ function shazamTogglePlay(btn) {
 }
 
 async function shazamToggleSoundeoPlay(btn) {
+    if (typeof setsPlayerPause === 'function') setsPlayerPause();
     const trackUrl = btn.dataset.soundeoUrl;
     if (!trackUrl) return;
 
@@ -5733,6 +5735,10 @@ function setsRender() {
         html += '<strong class="sets-card-title">' + escapeHtml(s.title || s.url) + '</strong>';
         html += '<span class="sets-card-meta">' + escapeHtml(String(s.track_count || (s.tracks || []).length)) + ' tracks · ' + escapeHtml(s.source || '') + (when ? ' · ' + escapeHtml(when) : '') + '</span>';
         html += '<span class="sets-card-actions">';
+        if (s.stream_url) {
+            const kindLabel = setsStreamKind(s.stream_url) === 'youtube' ? 'YouTube' : (setsStreamKind(s.stream_url) === 'soundcloud' ? 'SoundCloud' : 'stream');
+            html += '<button type="button" class="btn btn-small btn-primary" onclick="event.stopPropagation(); setsPlaySet(\'' + escapeHtml(s.id) + '\')" title="Play the full set audio (' + kindLabel + ')">▶ Play set</button> ';
+        }
         html += '<a href="' + escapeHtml(s.url) + '" target="_blank" rel="noopener" class="btn btn-small" onclick="event.stopPropagation()" title="Open source page">Source</a> ';
         html += '<button type="button" class="btn btn-small" onclick="event.stopPropagation(); setsRefresh(\'' + escapeHtml(s.id) + '\')" title="Re-scrape this URL">Refresh</button> ';
         html += '<button type="button" class="btn btn-small" onclick="event.stopPropagation(); setsDelete(\'' + escapeHtml(s.id) + '\')" title="Remove this set">✕</button>';
@@ -5776,7 +5782,12 @@ function setsRender() {
                 // 🔍 search — always available (also re-search to refresh a link).
                 const searchBtn = '<button type="button" class="shazam-row-action-btn" data-action="search" data-key="' + safeAttr(st.key) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>';
 
-                html += '<tr data-track-key="' + safeAttr(st.key) + '"><td>' + (i + 1) + '</td><td class="shazam-when">' + escapeHtml(t.start_time || '') + '</td>';
+                // Timestamp: when the set has a playable stream, the time becomes a
+                // "jump into the actual mix here" button — skim without Soundeo.
+                const timeCell = (s.stream_url && t.start_time)
+                    ? '<td class="shazam-when"><button type="button" class="sets-time-jump" onclick="setsPlayAt(\'' + escapeHtml(s.id) + '\', \'' + escapeHtml(t.start_time) + '\')" title="Play the set from ' + escapeHtml(t.start_time) + '">▶ ' + escapeHtml(t.start_time) + '</button></td>'
+                    : '<td class="shazam-when">' + escapeHtml(t.start_time || '') + '</td>';
+                html += '<tr data-track-key="' + safeAttr(st.key) + '"><td>' + (i + 1) + '</td>' + timeCell;
                 html += '<td>' + badge + escapeHtml(t.artist || '—') + '</td><td>' + escapeHtml(t.title || '—') + '</td>';
                 html += playCell;
                 html += '<td class="shazam-actions-col">' + starBtn + ' ' + dlBtn + ' ' + searchBtn + '</td></tr>';
@@ -5873,6 +5884,151 @@ async function setsDelete(id) {
 // (Per-track Search now goes through the shared [data-action="search"] handler,
 // same queue/progress semantics as Sync rows. The 5s state poll refreshes the
 // row when the link lands, unlocking ▶/★/⬇.)
+
+// ========== Set audio player (play the ACTUAL mix, seek to timestamps) =======
+// "Skim mode": before searching/scraping Soundeo at all, play the set's source
+// stream (SoundCloud / YouTube — captured at scrape time as set.stream_url) and
+// jump to any track via its timestamp, like trackid.net / 1001tracklists do.
+
+let _setsActivePlayer = null;  // { setId, kind, iframe, scWidget }
+let _setsSCApiPromise = null;
+
+function setsStreamKind(url) {
+    const u = (url || '').toLowerCase();
+    if (u.includes('soundcloud.com')) return 'soundcloud';
+    if (u.includes('youtube.com') || u.includes('youtu.be')) return 'youtube';
+    return u ? 'other' : '';
+}
+
+function _setsParseTimeToSec(t) {
+    const parts = String(t || '').trim().split(':').map(Number);
+    if (parts.some(isNaN) || !parts.length) return 0;
+    return parts.reduce((acc, v) => acc * 60 + v, 0);
+}
+
+function _setsLoadSCApi() {
+    if (window.SC && window.SC.Widget) return Promise.resolve();
+    if (_setsSCApiPromise) return _setsSCApiPromise;
+    _setsSCApiPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = 'https://w.soundcloud.com/player/api.js';
+        s.onload = () => resolve();
+        s.onerror = () => { _setsSCApiPromise = null; reject(new Error('SoundCloud player API failed to load')); };
+        document.head.appendChild(s);
+    });
+    return _setsSCApiPromise;
+}
+
+function _setsPauseSoundeoPreview() {
+    // One audio source at a time: stop a running Soundeo preview / local play
+    // before the set stream starts.
+    try {
+        if (shazamAudioEl) { shazamAudioEl.pause(); }
+        const bar = document.getElementById('shazamPlayerBar');
+        if (bar && bar.style.display !== 'none') shazamPlayerBarHide();
+    } catch (e) { /* ignore */ }
+}
+
+async function setsPlaySet(setId, seekSec) {
+    const s = setsCache.find(x => x.id === setId);
+    if (!s || !s.stream_url) return;
+    const kind = setsStreamKind(s.stream_url);
+    if (kind === 'other') { window.open(s.stream_url, '_blank', 'noopener'); return; }
+    _setsPauseSoundeoPreview();
+
+    const bar = document.getElementById('setsPlayerBar');
+    const host = document.getElementById('setsPlayerHost');
+    const titleEl = document.getElementById('setsPlayerTitle');
+    if (!bar || !host) return;
+
+    // Same set already loaded → just seek (keeps playback running seamlessly).
+    if (_setsActivePlayer && _setsActivePlayer.setId === setId) {
+        if (seekSec != null) setsSeek(seekSec);
+        return;
+    }
+
+    bar.style.display = 'block';
+    if (titleEl) titleEl.textContent = s.title || s.url;
+    host.innerHTML = '';
+    _setsActivePlayer = { setId, kind, iframe: null, scWidget: null };
+
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('allow', 'autoplay; encrypted-media');
+    iframe.style.cssText = 'width:100%;border:0;display:block;';
+    if (kind === 'soundcloud') {
+        iframe.style.height = '120px';
+        iframe.src = 'https://w.soundcloud.com/player/?url=' + encodeURIComponent(s.stream_url) +
+            '&auto_play=true&visual=false&show_teaser=false&hide_related=true';
+        host.appendChild(iframe);
+        _setsActivePlayer.iframe = iframe;
+        try {
+            await _setsLoadSCApi();
+            const w = SC.Widget(iframe);
+            _setsActivePlayer.scWidget = w;
+            if (seekSec != null && seekSec > 0) {
+                w.bind(SC.Widget.Events.READY, function () {
+                    // PLAY_PROGRESS fires once audio actually started; seeking on
+                    // READY alone can be ignored while the stream is still loading.
+                    let seeked = false;
+                    w.bind(SC.Widget.Events.PLAY_PROGRESS, function () {
+                        if (!seeked) { seeked = true; w.seekTo(seekSec * 1000); }
+                    });
+                });
+            }
+        } catch (e) {
+            console.warn('SC widget API unavailable — playback works, seek disabled', e);
+        }
+    } else { // youtube
+        iframe.style.height = '200px';
+        const idm = s.stream_url.match(/(?:watch\?v=|embed\/|youtu\.be\/)([a-zA-Z0-9_-]{6,15})/);
+        const vid = idm ? idm[1] : '';
+        iframe.src = 'https://www.youtube.com/embed/' + vid + '?autoplay=1&enablejsapi=1' +
+            (seekSec ? '&start=' + Math.floor(seekSec) : '');
+        host.appendChild(iframe);
+        _setsActivePlayer.iframe = iframe;
+    }
+}
+
+function setsSeek(seekSec) {
+    const p = _setsActivePlayer;
+    if (!p) return;
+    if (p.kind === 'soundcloud' && p.scWidget) {
+        p.scWidget.seekTo(Math.max(0, seekSec) * 1000);
+        p.scWidget.play();
+    } else if (p.kind === 'youtube' && p.iframe && p.iframe.contentWindow) {
+        p.iframe.contentWindow.postMessage(JSON.stringify({
+            event: 'command', func: 'seekTo', args: [Math.max(0, seekSec), true]
+        }), '*');
+        p.iframe.contentWindow.postMessage(JSON.stringify({
+            event: 'command', func: 'playVideo', args: []
+        }), '*');
+    }
+}
+
+function setsPlayAt(setId, timeStr) {
+    setsPlaySet(setId, _setsParseTimeToSec(timeStr));
+}
+
+function setsPlayerStop() {
+    const bar = document.getElementById('setsPlayerBar');
+    const host = document.getElementById('setsPlayerHost');
+    if (host) host.innerHTML = '';   // removing the iframe stops the audio
+    if (bar) bar.style.display = 'none';
+    _setsActivePlayer = null;
+}
+
+/** Pause (not close) the set player — called when a per-track preview or local
+ * file starts, so only one audio source plays at a time. */
+function setsPlayerPause() {
+    const p = _setsActivePlayer;
+    if (!p) return;
+    try {
+        if (p.kind === 'soundcloud' && p.scWidget) p.scWidget.pause();
+        else if (p.kind === 'youtube' && p.iframe && p.iframe.contentWindow) {
+            p.iframe.contentWindow.postMessage(JSON.stringify({ event: 'command', func: 'pauseVideo', args: [] }), '*');
+        }
+    } catch (e) { /* ignore */ }
+}
 
 function showConnectionBanner() {
     const el = document.getElementById('connectionBanner');

@@ -100,7 +100,8 @@ def _scrape_trackid(url: str) -> Dict:
     tracks = sorted(merged.values(), key=lambda x: x["start_time"] or "99:99:99")
     if not tracks:
         raise ValueError("trackid.net returned no detected tracks for that stream (it may still be processing).")
-    return {"title": title, "tracks": tracks, "source": "trackid.net"}
+    return {"title": title, "tracks": tracks, "source": "trackid.net",
+            "stream_url": _clean(result.get("url"))}
 
 
 # ------------------------------------------------------------------ JSON-LD ---
@@ -212,6 +213,32 @@ def _tracks_from_1001_dom(html: str) -> List[Dict]:
     return out
 
 
+def _extract_stream_url(html: str) -> str:
+    """Best-effort: find the playable source stream (the actual mix audio) in a
+    tracklist page. Preference order: SoundCloud api-track reference (loads
+    directly in the SC widget), YouTube video, SoundCloud permalink, Mixcloud.
+    Returns '' when nothing is found."""
+    if not html:
+        return ""
+    m = re.search(r"(?:api\.)?soundcloud\.com/tracks/(\d+)", html)
+    if m:
+        return f"https://api.soundcloud.com/tracks/{m.group(1)}"
+    m = re.search(r"(?:youtube\.com/(?:watch\?v=|embed/)|youtu\.be/)([a-zA-Z0-9_-]{6,15})", html)
+    if m:
+        return f"https://www.youtube.com/watch?v={m.group(1)}"
+    # SoundCloud permalink (skip 1001tracklists' own profile + player assets)
+    for m in re.finditer(r"https?://soundcloud\.com/([a-zA-Z0-9_-]+)(/[a-zA-Z0-9_-]+)?", html):
+        user, slug = m.group(1), m.group(2) or ""
+        if user in ("1001tracklists", "player", "pages", "you", "search", "tags"):
+            continue
+        if slug and slug not in ("/tracks", "/sets", "/likes", "/followers"):
+            return f"https://soundcloud.com/{user}{slug}"
+    m = re.search(r"https?://(?:www\.)?mixcloud\.com/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+/?", html)
+    if m:
+        return m.group(0)
+    return ""
+
+
 def has_tracklist_markers(html: str) -> bool:
     """True when the HTML looks like a real tracklist page (not an interstitial)."""
     low = (html or "").lower()
@@ -243,7 +270,8 @@ def _scrape_1001(url: str, fetch_html: Optional[Callable[[str], str]] = None) ->
         raise ValueError("No tracks found on that 1001tracklists page (layout may have changed).")
     title = _jsonld_title(html) or url
     title = re.sub(r"\s*\|\s*1001Tracklists.*$", "", title, flags=re.IGNORECASE)
-    return {"title": title, "tracks": tracks, "source": "1001tracklists"}
+    return {"title": title, "tracks": tracks, "source": "1001tracklists",
+            "stream_url": _extract_stream_url(html)}
 
 
 # ----------------------------------------------------------------- generic ---
@@ -283,7 +311,8 @@ def _scrape_generic(url: str, fetch_html: Optional[Callable[[str], str]] = None)
         tracks = tracks[:200]
     if not tracks:
         raise ValueError("No tracklist found on that page.")
-    return {"title": _jsonld_title(html) or url, "tracks": tracks, "source": urlparse(url).netloc or "web"}
+    return {"title": _jsonld_title(html) or url, "tracks": tracks,
+            "source": urlparse(url).netloc or "web", "stream_url": _extract_stream_url(html)}
 
 
 # -------------------------------------------------------------------- main ---
@@ -311,6 +340,7 @@ def scrape_set_from_url(url: str, fetch_html: Optional[Callable[[str], str]] = N
         "created_at": int(time.time()),
         "tracks": scraped["tracks"],
         "track_count": len(scraped["tracks"]),
+        "stream_url": scraped.get("stream_url") or "",
     }
 
 
