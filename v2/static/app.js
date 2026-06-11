@@ -5616,6 +5616,9 @@ function switchTab(tabId) {
     }
     if (tabId === 'sets') {
         setsLoad();
+        setsStatePollStart();
+    } else {
+        setsStatePollStop();
     }
     saveAppStateToStorage({ active_tab: tabId });
 }
@@ -5648,17 +5651,68 @@ async function setsLoad() {
     }
 }
 
-function _setsTrackKnown(artist, title) {
-    // "In library" = the Sync list knows this track (Shazammed) or it has a Soundeo link.
+function _setsLookup(map, key) {
+    if (!map || !key) return undefined;
+    try {
+        const vks = shazamKeyVariants(key);
+        for (let i = 0; i < vks.length; i++) {
+            if (vks[i] && map[vks[i]]) return map[vks[i]];
+        }
+    } catch (e) {
+        return map[key] || map[key.toLowerCase()];
+    }
+    return undefined;
+}
+
+/** Per-track state for a Sets row, derived from the same live maps the Sync
+ * tab uses (variant-aware): Soundeo url, starred, already-downloaded. */
+function _setsTrackState(artist, title) {
     const key = `${artist} - ${title}`;
     const kl = key.toLowerCase();
-    if (shazamTrackUrls[key] || shazamTrackUrls[kl]) return 'linked';
+    const url = _setsLookup(shazamTrackUrls, key) || null;
+    const starred = !!_setsLookup(shazamStarred, key);
+    let have = false, shazammed = false;
     const d = shazamLastData || {};
-    const all = [...(d.to_download || []), ...(d.have_locally || []), ...(d.skipped_tracks || [])];
-    for (const t of all) {
-        if ((`${t.artist} - ${t.title}`).toLowerCase() === kl) return 'shazammed';
+    for (const t of (d.have_locally || [])) {
+        if ((`${t.artist} - ${t.title}`).toLowerCase() === kl) { have = true; shazammed = true; break; }
     }
-    return null;
+    if (!shazammed) {
+        for (const t of [...(d.to_download || []), ...(d.skipped_tracks || [])]) {
+            if ((`${t.artist} - ${t.title}`).toLowerCase() === kl) { shazammed = true; break; }
+        }
+    }
+    return { key, url, starred, have, shazammed };
+}
+
+// Light state refresh while the Sets tab is open: actions (search/star/download)
+// resolve asynchronously via the existing Sync machinery; polling /status keeps
+// the Sets rows' buttons (link found → ▶/★/⬇ unlock, star fills, ⬇ becomes ✓)
+// in sync without the user leaving the tab. Stopped when the tab is left.
+let _setsStatePollInterval = null;
+function setsStatePollStart() {
+    if (_setsStatePollInterval) return;
+    _setsStatePollInterval = setInterval(async () => {
+        const panel = document.getElementById('tab-panel-sets');
+        if (!panel || !panel.classList.contains('active')) { setsStatePollStop(); return; }
+        try {
+            const res = await fetch('/api/shazam-sync/status');
+            if (!res.ok) return;
+            const data = await res.json();
+            if (data.urls) Object.assign(shazamTrackUrls, data.urls);
+            if (data.starred) Object.assign(shazamStarred, data.starred);
+            if (data.cover_hashes) shazamMergeCoverHashes(data.cover_hashes);
+            shazamLastData = shazamLastData || {};
+            if (data.have_locally) shazamLastData.have_locally = data.have_locally;
+            if (data.to_download) shazamLastData.to_download = data.to_download;
+            // Re-render only when the state relevant to the visible rows actually
+            // changed — an unconditional rebuild every 5s would wipe the playing
+            // ▶/⏸ state and hover, and cause needless churn.
+            if (_setsStateFingerprint() !== _setsLastFingerprint) setsRender();
+        } catch (e) { /* transient */ }
+    }, 5000);
+}
+function setsStatePollStop() {
+    if (_setsStatePollInterval) { clearInterval(_setsStatePollInterval); _setsStatePollInterval = null; }
 }
 
 function setsRender() {
@@ -5684,21 +5738,84 @@ function setsRender() {
         html += '<button type="button" class="btn btn-small" onclick="event.stopPropagation(); setsDelete(\'' + escapeHtml(s.id) + '\')" title="Remove this set">✕</button>';
         html += '</span></div>';
         if (!isCollapsed) {
-            html += '<table class="shazam-track-table sets-track-table"><thead><tr><th style="width:36px;">#</th><th style="width:72px;">Time</th><th>Artist</th><th>Title</th><th style="width:120px;"></th></tr></thead><tbody>';
+            html += '<table class="shazam-track-table sets-track-table"><thead><tr><th style="width:36px;">#</th><th style="width:72px;">Time</th><th>Artist</th><th>Title</th><th style="width:36px;"></th><th style="width:130px;">Actions</th></tr></thead><tbody>';
+            const safeAttr = v => escapeHtml(String(v == null ? '' : v)).replace(/'/g, '&#39;');
+            const inactive = ' shazam-row-action-inactive';
             (s.tracks || []).forEach((t, i) => {
-                const known = _setsTrackKnown(t.artist, t.title);
-                const badge = known === 'linked'
-                    ? '<span class="status-dot status-found" title="Known in Sync (Soundeo link)"></span> '
-                    : (known === 'shazammed' ? '<span class="status-dot status-no-link" title="Also in your Shazam list"></span> ' : '');
-                html += '<tr><td>' + (i + 1) + '</td><td class="shazam-when">' + escapeHtml(t.start_time || '') + '</td>';
+                const st = _setsTrackState(t.artist, t.title);
+                const badge = st.have
+                    ? '<span class="status-dot status-have" title="Already in your local library"></span> '
+                    : (st.url
+                        ? '<span class="status-dot status-found" title="Found on Soundeo"></span> '
+                        : (st.shazammed ? '<span class="status-dot status-no-link" title="Also in your Shazam list (no Soundeo link yet)"></span> ' : ''));
+                const label = (t.artist ? t.artist + ' - ' : '') + (t.title || '');
+
+                // ▶ preview — only when a Soundeo link exists; reuses the global
+                // playbar + stream-preview machinery (and auto-advances down the set).
+                const playCell = st.url
+                    ? '<td class="shazam-play-col"><button type="button" class="shazam-play-btn shazam-soundeo-play" data-track-key="' + safeAttr(st.key) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" data-soundeo-url="' + safeAttr(st.url) + '" data-track-label="' + safeAttr(label) + '" onclick="shazamToggleSoundeoPlay(this)" title="Stream Soundeo preview">' + PLAY_ICON_ROW + '</button></td>'
+                    : '<td class="shazam-play-col"><button type="button" class="shazam-play-btn shazam-row-action-inactive" disabled title="Search first to find this track on Soundeo">' + PLAY_ICON_ROW + '</button></td>';
+
+                // ★ star / unstar — same data-action contract as Sync rows; the
+                // global click handler routes to the existing queue functions.
+                const starSvg = st.starred
+                    ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>'
+                    : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
+                const starBtn = st.url
+                    ? '<button type="button" class="shazam-row-action-btn" data-action="' + (st.starred ? 'unstar' : 'star') + '" data-key="' + safeAttr(st.key) + '" ' + (st.starred ? 'data-url' : 'data-track-url') + '="' + safeAttr(st.url) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="' + (st.starred ? 'Remove from Soundeo favorites' : 'Add to Soundeo favorites') + '">' + starSvg + '</button>'
+                    : '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Search first">' + starSvg + '</button>';
+
+                // ⬇ download — via the existing one-by-one download queue; ✓ when already local.
+                const dlSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
+                const dlBtn = st.have
+                    ? '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Already in your local library">✓</button>'
+                    : (st.url
+                        ? '<button type="button" class="shazam-row-action-btn" data-action="download" data-key="' + safeAttr(st.key) + '" title="Download AIFF from Soundeo">' + dlSvg + '</button>'
+                        : '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Search first">' + dlSvg + '</button>');
+
+                // 🔍 search — always available (also re-search to refresh a link).
+                const searchBtn = '<button type="button" class="shazam-row-action-btn" data-action="search" data-key="' + safeAttr(st.key) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>';
+
+                html += '<tr data-track-key="' + safeAttr(st.key) + '"><td>' + (i + 1) + '</td><td class="shazam-when">' + escapeHtml(t.start_time || '') + '</td>';
                 html += '<td>' + badge + escapeHtml(t.artist || '—') + '</td><td>' + escapeHtml(t.title || '—') + '</td>';
-                html += '<td><button type="button" class="btn btn-small" onclick="setsSearchTrack(this)" data-artist="' + escapeHtml(t.artist || '').replace(/'/g, '&#39;') + '" data-title="' + escapeHtml(t.title || '').replace(/'/g, '&#39;') + '" title="Search this track on Soundeo (same as Sync search)">Search</button></td></tr>';
+                html += playCell;
+                html += '<td class="shazam-actions-col">' + starBtn + ' ' + dlBtn + ' ' + searchBtn + '</td></tr>';
             });
             html += '</tbody></table>';
         }
         html += '</div>';
     }
     list.innerHTML = html;
+    _setsLastFingerprint = _setsStateFingerprint();
+    // Reattach playing state after the innerHTML rebuild (same pattern as the
+    // Sync renderer): the audio element keeps playing independently; the row's
+    // ▶ must show ⏸ again and shazamPlayingBtn must point at the NEW button so
+    // pause/auto-advance keep working.
+    if (shazamCurrentlyPlaying) {
+        const btns = list.querySelectorAll('.shazam-play-btn[data-soundeo-url]');
+        for (const b of btns) {
+            if (b.dataset.soundeoUrl === shazamCurrentlyPlaying) {
+                b.innerHTML = PAUSE_ICON_ROW;
+                b.classList.add('playing');
+                shazamPlayingBtn = b;
+                break;
+            }
+        }
+    }
+}
+
+/** Fingerprint of the per-track state shown in the Sets rows (url/star/have)
+ * so the poll can skip no-op re-renders. */
+let _setsLastFingerprint = '';
+function _setsStateFingerprint() {
+    const parts = [];
+    for (const s of setsCache) {
+        for (const t of (s.tracks || [])) {
+            const st = _setsTrackState(t.artist, t.title);
+            parts.push((st.url ? '1' : '0') + (st.starred ? '1' : '0') + (st.have ? '1' : '0'));
+        }
+    }
+    return parts.join('');
 }
 
 function setsToggleCollapse(id) {
@@ -5753,27 +5870,9 @@ async function setsDelete(id) {
     } catch (e) { alert('Delete failed: ' + (e.message || e)); }
 }
 
-async function setsSearchTrack(btn) {
-    const artist = btn.dataset.artist || '';
-    const title = btn.dataset.title || '';
-    if (!artist && !title) return;
-    const old = btn.textContent;
-    btn.disabled = true; btn.textContent = 'Queued…';
-    try {
-        const res = await fetch('/api/shazam-sync/search-soundeo-single', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ artist, title })
-        });
-        const data = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(data.error || 'Search failed');
-        btn.textContent = '✓ ' + (data.status === 'queued' ? 'Queued' : 'Searching');
-        setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 4000);
-    } catch (e) {
-        btn.textContent = old; btn.disabled = false;
-        alert('Search failed: ' + (e.message || e));
-    }
-}
+// (Per-track Search now goes through the shared [data-action="search"] handler,
+// same queue/progress semantics as Sync rows. The 5s state poll refreshes the
+// row when the link lands, unlocking ▶/★/⬇.)
 
 function showConnectionBanner() {
     const el = document.getElementById('connectionBanner');
