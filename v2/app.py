@@ -1607,7 +1607,13 @@ def _merge_preserved_urls_into_status(status: Dict) -> None:
 
 _AUTO_BACKFILL_LAST_AT = 0.0
 _AUTO_BACKFILL_MIN_INTERVAL_SEC = 600   # 10 minutes between automatic triggers
-_AUTO_BACKFILL_MAX_GAP = 100            # don't auto-trigger on bulk loads (>100 missing)
+# NOTE: there used to be a _AUTO_BACKFILL_MAX_GAP = 100 that silently SKIPPED
+# auto-backfill when more than 100 covers were missing ("bulk load — let the
+# user trigger it manually"). In practice a normal week of Shazamming overflowed
+# it, after which covers for new tracks never appeared without a manual backfill
+# — the single biggest cause of the recurring "top of the list is all blank"
+# experience. The worker is sequential (~8 covers/s), throttled to one start per
+# 10 min, and watchdogged, so large gaps are exactly when it should run. Removed.
 
 
 def _auto_trigger_cover_backfill_if_small_gap(status: Dict) -> None:
@@ -1653,15 +1659,23 @@ def _auto_trigger_cover_backfill_if_small_gap(status: Dict) -> None:
     if not urls:
         return
     cover_hashes = status.get('cover_hashes') or {}
+    # Snapshot defensively — these dicts are shared with background workers
+    # (search persists new urls in place); iterating the live dict can raise
+    # "dictionary changed size during iteration".
+    url_keys = []
+    for _ in range(5):
+        try:
+            url_keys = list(urls.keys())
+            break
+        except RuntimeError:
+            url_keys = []
     missing = 0
-    for k in urls.keys():
+    for k in url_keys:
         if not isinstance(k, str):
             continue
         if k in cover_hashes or k.lower() in cover_hashes:
             continue
         missing += 1
-        if missing > _AUTO_BACKFILL_MAX_GAP:
-            return  # bulk load — let the user trigger it manually if they want
     if missing == 0:
         return
     _AUTO_BACKFILL_LAST_AT = time.time()

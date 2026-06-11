@@ -271,6 +271,21 @@ def test_cover_by_key_endpoint_resolves_accented_variant(app_module, cover_dir):
     assert resp.data == _JPEG_BYTES
 
 
+def test_cover_by_key_resolves_parens_and_apostrophe_keys(app_module, cover_dir):
+    """Keys with ()/' must round-trip when percent-encoded (the CSS-url regression:
+    encodeURIComponent leaves !'()* raw, which breaks CSS url() embedding; the
+    frontend now percent-encodes them — server must decode them identically)."""
+    key = "Robin S. - Show Me Love (Stone's Club Mix)"
+    _write_cover(cover_dir, key)
+    client = app_module.app.test_client()
+    # Fully percent-encoded form, exactly as shazamCoverByKeyUrl produces it.
+    from urllib.parse import quote
+    encoded = quote(key, safe="")
+    resp = client.get(f"/api/shazam-sync/cover-by-key?key={encoded}")
+    assert resp.status_code == 200, resp.data
+    assert resp.data == _JPEG_BYTES
+
+
 def test_cover_by_key_404_when_missing(app_module, cover_dir):
     client = app_module.app.test_client()
     resp = client.get("/api/shazam-sync/cover-by-key", query_string={"key": "No Such - Track"})

@@ -90,6 +90,33 @@ anyway (helps every other reader, reduces churn):
   write can only leave a stray `.tmp`, never a corrupt status (a corrupt status
   reads back as `None` and would wipe *everything*, covers included).
 
+## Post-mortem addendum (2026-06-11): two more root causes found and fixed
+
+Even after the disk-derive work above, the UI still showed large numbers of
+blank covers. Two further, independent causes:
+
+1. **CSS `url()` truncation on track keys with `()` / `'` (regression from the
+   cover-by-key switch).** `encodeURIComponent` leaves `!'()*` unescaped, and an
+   unquoted CSS `url(...)` terminates at the first `)` (a single-quoted
+   `url('...')` terminates at `'`). So every track titled `… (Original Mix)` /
+   `(Remix)` / `(feat. …)` produced an **invalid `background-image` that the
+   browser silently dropped** — blank cell despite the file existing and the map
+   being correct. Measured live: **1,238 of 2,744 covers broken**. Fix:
+   `shazamCoverByKeyUrl()` percent-encodes `!'()*` on top of
+   `encodeURIComponent`, used by every URL build site (overview cell, playbar,
+   watcher fill). After: **0 broken**. Lesson: hash-based URLs were inert by
+   construction; key-based URLs must be encoded for the *embedding context*
+   (CSS), not just for HTTP.
+
+2. **Auto-backfill refused gaps > 100.** `_auto_trigger_cover_backfill_if_small_gap`
+   silently returned when more than 100 url-keys lacked covers ("bulk load").
+   A normal week of Shazamming overflows that, after which covers for new tracks
+   never appear without a manual `POST /backfill-covers` — i.e. the top of the
+   newest-first list trends permanently blank. The cap is removed; the 10-minute
+   throttle, sequential worker (~8 covers/s) and 30-min watchdog already bound
+   the load. New tracks' covers now fetch themselves and the in-page watcher
+   fills them live.
+
 ## Why a cover can still be (correctly) absent
 
 A blank cover cell is correct when **no cover file exists** for that track —

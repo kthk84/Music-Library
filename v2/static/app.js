@@ -1417,6 +1417,25 @@ function shazamMergeCoverHashes(coverHashes) {
 }
 
 /**
+ * Build a cover-by-key URL that is safe to embed in CSS url() — quoted OR
+ * unquoted — and in HTML attributes.
+ *
+ * encodeURIComponent leaves !'()* unescaped. Parentheses TERMINATE an unquoted
+ * CSS url(...) token and apostrophes terminate a single-quoted url('...'), so a
+ * key like "Track (Original Mix)" produced an invalid background-image that the
+ * browser silently dropped — cover blank even though the file existed. Since
+ * "(Original Mix)" / "(Remix)" / "(feat. …)" appear in most dance-track titles,
+ * this broke cover art for roughly a third of the library. Percent-encoding
+ * those five characters as well makes the URL inert in every embedding context.
+ */
+function shazamCoverByKeyUrl(key) {
+    var enc = encodeURIComponent(key).replace(/[!'()*]/g, function (c) {
+        return '%' + c.charCodeAt(0).toString(16).toUpperCase();
+    });
+    return '/api/shazam-sync/cover-by-key?key=' + enc;
+}
+
+/**
  * Does the cover map (now disk-complete from /status) know a cover for this key?
  * Same variant logic the row render uses, so existence here == a cover renders.
  */
@@ -1453,8 +1472,8 @@ function shazamRefreshVisibleCovers() {
         if (!span || !span.classList.contains('track-cover-placeholder')) continue;
         var key = tr.getAttribute('data-track-key');
         if (!key || !shazamHasCoverForKey(key)) continue;
-        cell.innerHTML = '<span class="track-cover" style="background-image:url(/api/shazam-sync/cover-by-key?key=' +
-            encodeURIComponent(key) + ');" aria-hidden="true"></span>';
+        cell.innerHTML = '<span class="track-cover" style="background-image:url(' +
+            shazamCoverByKeyUrl(key) + ');" aria-hidden="true"></span>';
         filled++;
     }
     return filled;
@@ -2870,7 +2889,7 @@ function shazamPlayerBarShow(label) {
             }
         }
         if (hasBarCover) {
-            barCover.style.backgroundImage = "url('/api/shazam-sync/cover-by-key?key=" + encodeURIComponent(shazamBarKey) + "')";
+            barCover.style.backgroundImage = "url('" + shazamCoverByKeyUrl(shazamBarKey) + "')";
             barCover.classList.remove('shazam-bar-cover-placeholder');
         } else {
             barCover.style.backgroundImage = '';
@@ -3580,7 +3599,7 @@ function shazamRenderTrackList(data) {
         //   root cause of the recurring "blank cover, file present" bug.
         const hasCover = !!_lu(shazamCoverHashes, key, keyLower, keyNorm, keyNormLower, keyDeep);
         const coverCell = hasCover
-            ? '<td class="shazam-cover-col"><span class="track-cover" style="background-image:url(/api/shazam-sync/cover-by-key?key=' + encodeURIComponent(key) + ');" aria-hidden="true"></span></td>'
+            ? '<td class="shazam-cover-col"><span class="track-cover" style="background-image:url(' + shazamCoverByKeyUrl(key) + ');" aria-hidden="true"></span></td>'
             : '<td class="shazam-cover-col"><span class="track-cover track-cover-placeholder" aria-hidden="true"></span></td>';
 
         const safeAttr = s => escapeHtml(s).replace(/'/g, '&#39;');
