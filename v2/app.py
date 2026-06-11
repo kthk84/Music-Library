@@ -976,6 +976,10 @@ def save_settings():
         config['headed_mode'] = bool(data['headed_mode'])
     if 'search_all_use_http' in data:
         config['search_all_use_http'] = bool(data['search_all_use_http'])
+    if 'search_mode' in data:
+        mode = str(data['search_mode']).strip()
+        if mode in ('api', 'browser_hidden', 'browser_visible'):
+            config['search_mode'] = mode
     if 'stream_to_ui' in data:
         config['stream_to_ui'] = bool(data['stream_to_ui'])
     if 'soundeo_chrome_user_data_dir' in data:
@@ -4224,7 +4228,10 @@ def _run_sync_single_track_browser(artist: str, title: str):
 
     config = load_config()
     cookies_path = get_soundeo_cookies_path()
-    headed = config.get('headed_mode', True)
+    _mode = _get_search_mode()
+    # search_mode chooses visibility for browser searches; legacy headed_mode
+    # is the fallback for other Selenium jobs.
+    headed = (_mode == 'browser_visible') if _mode.startswith('browser') else config.get('headed_mode', True)
     key = f"{artist} - {title}"
 
     try:
@@ -4269,8 +4276,172 @@ def _run_sync_single_track_browser(artist: str, title: str):
         app._shazam_sync_progress = {'running': False, 'error': str(e), 'mode': 'sync_single'}
 
 
+# --- Soundeo search via API (no browser), parallel ---------------------------
+# Soundeo has no public API, but run_search_tracks_http drives its internal
+# search endpoints with the saved cookie session — no Chrome window at all.
+# search_mode config: 'api' (default — quiet + parallel), 'browser_hidden',
+# 'browser_visible' (legacy Selenium paths, sequential).
+
+_SEARCH_HTTP_MAX_PARALLEL = 3   # network fans out; result-apply serializes below
+_SEARCH_APPLY_LOCK = threading.Lock()
+_search_http_active = 0
+_search_http_active_lock = threading.Lock()
+
+
+def _get_search_mode() -> str:
+    from config_shazam import load_config
+    try:
+        mode = str((load_config() or {}).get('search_mode') or '').strip()
+    except Exception:
+        mode = ''
+    return mode if mode in ('api', 'browser_hidden', 'browser_visible') else 'api'
+
+
+def _apply_single_search_result(artist: str, title: str, found: bool, url: str = '',
+                                soundeo_title: str = '', score=None, starred: bool = False,
+                                cover_url: str = '') -> str:
+    """Persist one search outcome. The load-modify-save runs under a process-wide
+    lock so PARALLEL searches can't lose each other's updates (save_status_cache
+    replays urls from search_outcomes — a stale snapshot would drop the other
+    worker's just-appended outcome). Cover download (network/file) stays outside
+    the lock; only the status mutation serializes."""
+    from shazam_cache import load_status_cache, save_status_cache, log_search_outcome
+    from config_shazam import get_soundeo_cookies_path
+    key = f"{artist} - {title}"
+    cover_hash = None
+    if found and cover_url:
+        import re as _re
+        cu = _re.sub(r'-\d+\.jpg$', '-500.jpg', cover_url) if _re.search(r'-\d+\.jpg$', cover_url) else cover_url
+        try:
+            cover_hash = _cache_cover_art(key, cu)
+        except Exception:
+            logging.debug("api-search: cover cache failed for %s", key[:60], exc_info=True)
+    with _SEARCH_APPLY_LOCK:
+        status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
+        for k in ('urls', 'soundeo_titles', 'soundeo_match_scores', 'not_found', 'cover_hashes', 'starred'):
+            status.setdefault(k, {})
+        if found and url:
+            _set_url_and_track_id(status, key, url, get_soundeo_cookies_path())
+            tv = soundeo_title or key
+            status['soundeo_titles'][key] = status['soundeo_titles'][key.lower()] = tv
+            if score is not None:
+                try:
+                    sc = round(float(score), 3)
+                    status['soundeo_match_scores'][key] = status['soundeo_match_scores'][key.lower()] = sc
+                except (TypeError, ValueError):
+                    pass
+            status['starred'][key] = status['starred'][key.lower()] = bool(starred)
+            if cover_hash:
+                _set_cover_hash_variants(status, key, cover_hash)
+            status['not_found'].pop(key, None)
+            status['not_found'].pop(key.lower(), None)
+            log_search_outcome(key, found=True, url=url, status_to_update=status)
+            # ❤ like graduation — enqueue only; the LAST drainer kicks the star
+            # queue after all saves are done (see the lost-update post-mortem).
+            _convert_like_to_star_if_pending(status, key, artist, title, url, bool(starred))
+        else:
+            status['not_found'][key] = True
+            status['not_found'][key.lower()] = True
+            log_search_outcome(key, found=False, status_to_update=status)
+        app._shazam_sync_status = status
+        save_status_cache(status)
+    return key
+
+
+def _run_search_single_http_drainer():
+    """Worker thread: drain the single-search queue via the HTTP path. Up to
+    _SEARCH_HTTP_MAX_PARALLEL drainers run concurrently; the last one to exit
+    finalizes progress and kicks the star queue / cover backfill."""
+    global _search_http_active
+    from config_shazam import get_soundeo_cookies_path
+    from soundeo_automation import run_search_tracks_http
+    cookies_path = get_soundeo_cookies_path()
+    lock = getattr(app, '_shazam_single_search_queue_lock', None)
+    try:
+        while True:
+            item = None
+            remaining = 0
+            if lock:
+                with lock:
+                    q = getattr(app, '_shazam_single_search_queue', None) or []
+                    if q:
+                        item = q.pop(0)
+                        app._shazam_single_search_queue = q
+                        remaining = len(q)
+            if not item:
+                break
+            artist, title = item.get('artist', ''), item.get('title', '')
+            if not artist and not title:
+                continue
+            key = f"{artist} - {title}"
+            app._shazam_sync_progress = {
+                'running': True, 'mode': 'search_single', 'current_key': key,
+                'message': f'Searching (API): {key}' + (f' (+{remaining} queued)' if remaining else ''),
+            }
+            try:
+                out = run_search_tracks_http([{'artist': artist, 'title': title}], cookies_path) or {}
+            except Exception as e:
+                out = {'error': str(e)}
+            if out.get('error'):
+                logging.warning("api-search failed for %s: %s", key[:60], out['error'])
+                app._shazam_sync_progress = {
+                    'running': True, 'mode': 'search_single', 'key': key, 'current_key': key,
+                    'done': 0, 'failed': 1, 'error': str(out['error']),
+                    'message': f"Search failed: {key}",
+                }
+                continue
+            urls = out.get('urls') or {}
+            url = urls.get(key) or urls.get(key.lower()) or ''
+            titles = out.get('soundeo_titles') or {}
+            sc_map = out.get('soundeo_match_scores') or {}
+            st_map = out.get('starred') or {}
+            cu_map = out.get('cover_urls') or {}
+            found = bool(url)
+            starred = bool(st_map.get(key) or st_map.get(key.lower()))
+            _apply_single_search_result(
+                artist, title, found, url=url,
+                soundeo_title=titles.get(key) or titles.get(key.lower()) or '',
+                score=sc_map.get(key) or sc_map.get(key.lower()),
+                starred=starred,
+                cover_url=cu_map.get(key) or cu_map.get(key.lower()) or '',
+            )
+            prog = {
+                'running': True, 'mode': 'search_single', 'key': key, 'current_key': key,
+                'done': 1 if found else 0, 'failed': 0 if found else 1,
+                'message': (f'Found: {key}' if found else f'Not found: {key}'),
+            }
+            if found:
+                prog['url'] = url
+                prog['soundeo_title'] = titles.get(key) or titles.get(key.lower()) or key
+                prog['starred'] = starred
+            app._shazam_sync_progress = prog
+    finally:
+        with _search_http_active_lock:
+            _search_http_active = max(0, _search_http_active - 1)
+            last_out = _search_http_active == 0
+        if last_out:
+            p = dict(getattr(app, '_shazam_sync_progress', None) or {})
+            p['running'] = False
+            app._shazam_sync_progress = p
+            _start_next_single_star()
+            _maybe_backfill_covers_after_job('single search (api)')
+
+
 def _start_next_single_search():
     """If single-search queue has items, pop one and run it in a background thread. Call with _shazam_single_search_queue_lock held only when called from request handler; from worker we acquire the lock."""
+    if _get_search_mode() == 'api':
+        global _search_http_active
+        lock = getattr(app, '_shazam_single_search_queue_lock', None)
+        qlen = len(getattr(app, '_shazam_single_search_queue', None) or [])
+        if qlen == 0 or lock is None:
+            return
+        with _search_http_active_lock:
+            desired = min(_SEARCH_HTTP_MAX_PARALLEL, qlen)
+            to_spawn = max(0, desired - _search_http_active)
+            _search_http_active += to_spawn
+        for _ in range(to_spawn):
+            threading.Thread(target=_run_search_single_http_drainer, daemon=True).start()
+        return
     queue = getattr(app, '_shazam_single_search_queue', None) or []
     lock = getattr(app, '_shazam_single_search_queue_lock', None)
     if lock is None:
@@ -4488,7 +4659,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
 
     config = load_config()
     cookies_path = get_soundeo_cookies_path()
-    use_http = config.get('search_all_use_http', False)
+    use_http = config.get('search_all_use_http', False) or _get_search_mode() == 'api'
     headed = config.get('headed_mode', True)
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
     status.setdefault('urls', {})
@@ -4741,6 +4912,14 @@ def shazam_search_soundeo_single():
     app._shazam_sync_progress = {
         'running': True, 'message': f'Searching: {a} - {t}', 'mode': 'search_single', 'current_key': _sk,
     }
+    if _get_search_mode() == 'api':
+        # API mode: push the item back and let the dispatcher spawn parallel
+        # HTTP drainers — starting the browser worker here would bypass the
+        # search-mode choice for the first item of every burst.
+        with app._shazam_single_search_queue_lock:
+            app._shazam_single_search_queue.insert(0, next_item)
+        _start_next_single_search()
+        return jsonify({'status': 'started', 'message': f'Searching Soundeo for: {a} - {t} (API)', 'single_search_queue': [{'artist': q['artist'], 'title': q['title']} for q in queue_after]})
     thread = threading.Thread(target=_run_search_soundeo_single, args=(a, t), daemon=True)
     thread.start()
     return jsonify({'status': 'started', 'message': f'Searching Soundeo for: {a} - {t}', 'single_search_queue': [{'artist': q['artist'], 'title': q['title']} for q in queue_after]})

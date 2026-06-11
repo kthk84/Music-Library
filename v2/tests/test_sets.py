@@ -289,6 +289,108 @@ def test_convert_like_to_star_if_pending(like_env):
     assert len(state["stars"]) == 1
 
 
+# --------------------------------------------------- API (no-browser) search ---
+
+def test_search_mode_settings_roundtrip(monkeypatch, tmp_path):
+    import app as app_module
+    import config_shazam as cfg
+    cfg_path = tmp_path / "config.json"
+    monkeypatch.setattr(cfg, "get_config_path", lambda: str(cfg_path))
+    # load/save in config_shazam read via get_config_path? Ensure isolation by
+    # patching load/save directly.
+    state = {"cfg": {}}
+    monkeypatch.setattr(cfg, "load_config", lambda: dict(state["cfg"]))
+    monkeypatch.setattr(cfg, "save_config", lambda c: state.__setitem__("cfg", dict(c)))
+    client = app_module.app.test_client()
+    r = client.post("/api/settings", json={"search_mode": "browser_visible"})
+    assert r.status_code == 200
+    assert state["cfg"].get("search_mode") == "browser_visible"
+    # invalid value ignored
+    client.post("/api/settings", json={"search_mode": "yolo"})
+    assert state["cfg"].get("search_mode") == "browser_visible"
+    monkeypatch.setattr(cfg, "load_config", lambda: {"search_mode": "browser_visible"})
+    assert app_module._get_search_mode() == "browser_visible"
+    monkeypatch.setattr(cfg, "load_config", lambda: {})
+    assert app_module._get_search_mode() == "api", "API must be the default"
+
+
+def test_apply_single_search_result_found_and_notfound(monkeypatch):
+    import app as app_module
+    import shazam_cache as sc
+
+    state = {"status": {}}
+    monkeypatch.setattr(sc, "load_status_cache", lambda: dict(state["status"]))
+    monkeypatch.setattr(sc, "save_status_cache", lambda s: state.__setitem__("status", dict(s)))
+    monkeypatch.setattr(app_module, "_set_url_and_track_id",
+                        lambda status, key, url, cookies_path=None: status["urls"].__setitem__(key, url))
+    monkeypatch.setattr(app_module, "_cache_cover_art", lambda key, url: None)
+    app_module.app._shazam_sync_status = None
+
+    app_module._apply_single_search_result("A", "B", True, url="https://soundeo.com/t1",
+                                           soundeo_title="A - B (Extended)", score=0.97, starred=False)
+    st = state["status"]
+    assert st["urls"]["A - B"] == "https://soundeo.com/t1"
+    assert st["soundeo_titles"]["A - B"] == "A - B (Extended)"
+    assert st["starred"]["A - B"] is False
+    assert len(st["search_outcomes"]) == 1
+
+    # Second result (sequential here; in prod the apply lock serializes parallel
+    # workers): outcomes must ACCUMULATE — nothing lost.
+    app_module._apply_single_search_result("C", "D", False)
+    st = state["status"]
+    assert len(st["search_outcomes"]) == 2
+    assert st["not_found"]["C - D"] is True
+    assert st["urls"]["A - B"] == "https://soundeo.com/t1", "earlier result must survive"
+
+
+def test_apply_single_search_result_fires_like_conversion(monkeypatch):
+    import app as app_module
+    import shazam_cache as sc
+
+    state = {"status": {"auto_star_on_found": {"A - B": True}, "maybe": {"A - B": True}}, "stars": []}
+    monkeypatch.setattr(sc, "load_status_cache", lambda: dict(state["status"]))
+    monkeypatch.setattr(sc, "save_status_cache", lambda s: state.__setitem__("status", dict(s)))
+    monkeypatch.setattr(app_module, "_set_url_and_track_id",
+                        lambda status, key, url, cookies_path=None: status["urls"].__setitem__(key, url))
+    monkeypatch.setattr(app_module, "_enqueue_single_star",
+                        lambda key, artist, title, url, start=True: state["stars"].append((key, start)))
+    app_module.app._shazam_sync_status = None
+
+    app_module._apply_single_search_result("A", "B", True, url="https://soundeo.com/t1")
+    assert state["stars"] == [("A - B", False)], "conversion enqueues star WITHOUT starting it"
+    assert not state["status"]["maybe"].get("A - B")
+
+
+def test_start_next_single_search_dispatches_by_mode(monkeypatch):
+    import app as app_module
+    import threading as _t
+
+    spawned = []
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), daemon=None):
+            spawned.append(getattr(target, "__name__", str(target)))
+        def start(self):
+            pass
+
+    monkeypatch.setattr(app_module.threading, "Thread", FakeThread)
+    app_module.app._shazam_single_search_queue = [{"artist": "A", "title": "B"}, {"artist": "C", "title": "D"}]
+    app_module.app._shazam_single_search_queue_lock = _t.Lock()
+
+    monkeypatch.setattr(app_module, "_get_search_mode", lambda: "api")
+    app_module._search_http_active = 0
+    app_module._start_next_single_search()
+    assert spawned == ["_run_search_single_http_drainer", "_run_search_single_http_drainer"], \
+        "api mode spawns parallel drainers (capped at queue length)"
+    app_module._search_http_active = 0
+
+    spawned.clear()
+    monkeypatch.setattr(app_module, "_get_search_mode", lambda: "browser_hidden")
+    app_module._start_next_single_search()
+    assert spawned == ["_run_search_soundeo_single"], "browser mode stays sequential"
+    app_module.app._shazam_single_search_queue = []
+
+
 def test_sets_api_endpoints(monkeypatch, sets_file):
     import app as app_module
 

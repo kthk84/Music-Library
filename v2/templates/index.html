@@ -323,6 +323,17 @@
                         </label>
                         <span id="shazamHeadedModeHint" class="folder-hint">When off, the crawler runs in the background (no window).</span>
                     </div>
+                    <div class="settings-toggle-row">
+                        <label class="settings-toggle-label" for="shazamSearchModeSelect" style="gap:8px;">
+                            <span>Soundeo search</span>
+                            <select id="shazamSearchModeSelect" onchange="shazamSetSearchMode(this.value)" aria-describedby="shazamSearchModeHint">
+                                <option value="api">API — no browser, parallel (default)</option>
+                                <option value="browser_hidden">Browser — hidden</option>
+                                <option value="browser_visible">Browser — visible</option>
+                            </select>
+                        </label>
+                        <span id="shazamSearchModeHint" class="folder-hint">API uses your saved session over HTTP — no Chrome window, several tracks at once. Browser modes use the old crawler (one at a time).</span>
+                    </div>
                     <div class="settings-toolbar-row">
                         <div class="favorites-dropdown-wrap toolbar-group">
                             <button type="button" id="shazamFavoritesDropdownBtn" class="btn btn-small btn-secondary" title="Crawls your Soundeo /account/favorites list and syncs starred state for all matching app tracks. Manual only—not run after Fetch Shazam or Search. Search already updates star per track on each track page." aria-haspopup="true" aria-expanded="false">
@@ -454,7 +465,7 @@
     <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
     <div id="shazamDownloadHaveMenu" class="shazam-play-context-menu" role="menu" style="display:none;" aria-label="Download options"></div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=83"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=84"></script>
 <script>
 (function() {
     if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {

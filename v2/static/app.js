@@ -1669,6 +1669,8 @@ function shazamApplySettings(cfg) {
     }
     const headedToggle = document.getElementById('shazamHeadedModeToggle');
     if (headedToggle) headedToggle.checked = cfg.headed_mode !== false;
+    const searchModeSel = document.getElementById('shazamSearchModeSelect');
+    if (searchModeSel) searchModeSel.value = (cfg.search_mode === 'browser_hidden' || cfg.search_mode === 'browser_visible') ? cfg.search_mode : 'api';
     const statusEl = document.getElementById('soundeoSessionStatus');
     const pathEl = document.getElementById('soundeoSessionPath');
     const configPathEl = document.getElementById('configPathHint');
@@ -1725,6 +1727,21 @@ function shazamRenderFolderList() {
     el.innerHTML = rows.map((path, i) =>
         `<div class="folder-list-item"><input type="text" value="${(path || '').replace(/"/g, '&quot;')}" placeholder="${i === 0 && !path ? 'Paste folder path or click Add Folder' : ''}" data-idx="${i}" onchange="shazamFolderChanged(this)" />${path ? `<button onclick="shazamRescanFolder(${i})" class="btn btn-small" title="Rescan this folder only">Rescan</button>` : ''}<button onclick="shazamRemoveFolder(${i})" class="btn btn-small" title="Remove folder" ${rows.length === 1 && !path ? 'style="visibility:hidden"' : ''}>✕</button></div>`
     ).join('');
+}
+
+async function shazamSetSearchMode(mode) {
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ search_mode: mode })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Save failed');
+        if (shazamLastSettings) shazamLastSettings.search_mode = mode;
+    } catch (e) {
+        alert('Could not save search mode: ' + (e.message || e));
+    }
 }
 
 async function shazamSetHeadedMode(showBrowser) {
