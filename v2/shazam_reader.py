@@ -129,8 +129,15 @@ def get_shazam_tracks(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
     finally:
         connection.close()
 
+    # One DB row per TAG EVENT: re-Shazamming the same track adds another row
+    # (verified against a real ShazamLibrary.sqlite — popular tracks have up to
+    # 10 rows). Aggregate per track: shazamed_count = number of tag rows (the DB
+    # is the source of truth for "how often did I Shazam this"), shazamed_at =
+    # the newest tag date (rows arrive ORDER BY ZDATE DESC, so the first row per
+    # key carries it). The old behavior silently dropped duplicate rows, which
+    # froze the count at ~1 and lost the tag history.
     tracks = []
-    seen = set()
+    by_key = {}
     for row in rows:
         artist_name, track_name = row[0], row[1]
         zdate = row[2] if len(row) > 2 else None
@@ -139,15 +146,18 @@ def get_shazam_tracks(db_path: Optional[str] = None) -> List[Dict[str, Any]]:
         if not artist and not title:
             continue
         key = (artist.lower(), title.lower())
-        if key in seen:
+        existing = by_key.get(key)
+        if existing is not None:
+            existing["shazamed_count"] += 1
             continue
-        seen.add(key)
         shazamed_at = None
         if zdate is not None:
             try:
                 shazamed_at = int(_COREDATA_EPOCH + float(zdate))
             except (TypeError, ValueError):
-                logging.debug("silent except at shazam_reader.py:149", exc_info=True)
-        tracks.append({"artist": artist, "title": title, "shazamed_at": shazamed_at})
+                logging.debug("shazam_reader: unparsable ZDATE %r", zdate, exc_info=True)
+        entry = {"artist": artist, "title": title, "shazamed_at": shazamed_at, "shazamed_count": 1}
+        by_key[key] = entry
+        tracks.append(entry)
 
     return tracks

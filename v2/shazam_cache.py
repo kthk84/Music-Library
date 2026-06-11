@@ -135,17 +135,29 @@ def merge_shazam_tracks(existing: List[Dict], new: List[Dict]) -> tuple:
             by_key[k] = new_entry
             added += 1
             continue
-        # Duplicate: only bump count when the timestamp actually moved (user
-        # Shazammed it again at a different moment). Re-fetching the same
-        # library snapshot must NOT inflate the count.
+        # Duplicate of an existing track.
         existing_entry = by_key[k]
         old_ts = existing_entry.get('shazamed_at')
         new_ts = t.get('shazamed_at')
-        if new_ts and old_ts != new_ts:
-            existing_entry['shazamed_count'] = int(existing_entry.get('shazamed_count', 1)) + 1
-            existing_entry['shazamed_at'] = new_ts
-        elif new_ts and not old_ts:
-            existing_entry['shazamed_at'] = new_ts
+        new_count = t.get('shazamed_count')
+        if isinstance(new_count, int) and new_count > 0:
+            # The reader now derives shazamed_count from the DB's tag-event rows
+            # — the DB is authoritative for "how often did I Shazam this". Take
+            # the max so a cached count can never go DOWN (e.g. if the DB was
+            # pruned) and re-fetching the same snapshot stays idempotent.
+            old_count = int(existing_entry.get('shazamed_count', 1))
+            existing_entry['shazamed_count'] = max(old_count, new_count)
+            if new_ts and (not old_ts or new_ts > old_ts):
+                existing_entry['shazamed_at'] = new_ts
+        else:
+            # Legacy payload without a count: only bump when the timestamp moved
+            # (user Shazammed it again at a different moment). Re-fetching the
+            # same library snapshot must NOT inflate the count.
+            if new_ts and old_ts != new_ts:
+                existing_entry['shazamed_count'] = int(existing_entry.get('shazamed_count', 1)) + 1
+                existing_entry['shazamed_at'] = new_ts
+            elif new_ts and not old_ts:
+                existing_entry['shazamed_at'] = new_ts
         # Carry forward any other fields from the new entry that aren't already set
         for fk, fv in t.items():
             if fk in ('artist', 'title', 'shazamed_at', 'shazamed_count'):

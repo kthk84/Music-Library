@@ -2195,6 +2195,95 @@ def shazam_sync_cover_by_key():
     return nf
 
 
+# --- Tracklist sets (paste a URL → scraped tracklist, per-set tab) -----------
+
+def _sets_fetch_html_via_browser(url: str) -> str:
+    """Load a page in the app's Selenium browser and return its rendered HTML.
+
+    Used for bot-gated sources (1001tracklists). Their interstitial detects
+    headless Chrome and never forwards (verified live), so the ladder is:
+    quick headless attempt → headed attempt (same visible-Chrome pattern the
+    Soundeo sync already uses). Polls page_source for tracklist markers instead
+    of a fixed sleep — the headed page typically lands in ~3s. Returns '' on
+    failure."""
+    try:
+        from soundeo_automation import _get_driver, _graceful_quit
+        from lib.sets import has_tracklist_markers
+    except ImportError:
+        return ""
+
+    def _attempt(headless: bool, max_wait_sec: int) -> str:
+        driver = None
+        try:
+            driver = _get_driver(headless=headless, use_persistent_profile=True)
+            driver.get(url)
+            deadline = time.time() + max_wait_sec
+            html = ""
+            while time.time() < deadline:
+                time.sleep(3)
+                html = driver.page_source or ""
+                if has_tracklist_markers(html):
+                    return html
+            return html
+        except Exception as e:
+            logging.warning("sets: browser fetch (headless=%s) failed for %s: %s", headless, url, e)
+            return ""
+        finally:
+            if driver is not None:
+                try:
+                    _graceful_quit(driver)
+                except Exception:
+                    logging.debug("sets: driver quit failed", exc_info=True)
+
+    html = _attempt(headless=True, max_wait_sec=9)
+    if has_tracklist_markers(html):
+        return html
+    logging.info("sets: headless fetch blocked for %s — retrying with headed browser", url)
+    html = _attempt(headless=False, max_wait_sec=30)
+    return html if has_tracklist_markers(html) else (html or "")
+
+
+@app.route('/api/sets', methods=['GET'])
+def sets_list():
+    from lib.sets import load_sets
+    resp = jsonify({'sets': load_sets()})
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+@app.route('/api/sets/add', methods=['POST'])
+def sets_add():
+    """Scrape a tracklist URL into a persisted set. Re-adding the same URL
+    refreshes it in place. Synchronous (trackid ≈2s; browser-fallback ≈15s)."""
+    from lib.sets import scrape_set_from_url, add_or_replace_set
+    data = request.get_json(silent=True) or {}
+    url = (data.get('url') or '').strip()
+    if not url:
+        return jsonify({'error': 'Missing url'}), 400
+    # The browser fallback shares the Soundeo Chrome profile — don't fight a
+    # running search/sync job over the profile lock.
+    fetch_html = None if _shazam_any_job_running() else _sets_fetch_html_via_browser
+    try:
+        new_set = scrape_set_from_url(url, fetch_html=fetch_html)
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 422
+    except Exception:
+        logging.exception("sets_add failed for %s", url)
+        return jsonify({'error': 'Scrape failed unexpectedly — see server log.'}), 500
+    sets = add_or_replace_set(new_set)
+    return jsonify({'added': new_set['id'], 'sets': sets})
+
+
+@app.route('/api/sets/delete', methods=['POST'])
+def sets_delete():
+    from lib.sets import delete_set
+    data = request.get_json(silent=True) or {}
+    set_id = (data.get('id') or '').strip()
+    if not set_id:
+        return jsonify({'error': 'Missing id'}), 400
+    return jsonify({'sets': delete_set(set_id)})
+
+
 @app.route('/api/shazam-sync/export/local-filenames')
 def shazam_export_local_filenames():
     """Download a text log of all scanned local filenames (one per line)."""

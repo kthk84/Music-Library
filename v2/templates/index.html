@@ -164,6 +164,7 @@
             <nav class="tab-nav" role="tablist" aria-label="Main sections">
                 <button type="button" id="tab-btn-mp3" class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-panel-mp3" data-tab="mp3">Tags</button>
                 <button type="button" id="tab-btn-shazam" class="tab-btn active" role="tab" aria-selected="true" aria-controls="tab-panel-shazam" data-tab="shazam">Sync</button>
+                <button type="button" id="tab-btn-sets" class="tab-btn" role="tab" aria-selected="false" aria-controls="tab-panel-sets" data-tab="sets">Sets</button>
             </nav>
         </header>
 
@@ -237,6 +238,22 @@
         </div>
 
         <!-- Tab: Sync -->
+        <!-- Tab: Sets (paste a tracklist URL → scraped tracks per set) -->
+        <div id="tab-panel-sets" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-sets">
+            <section class="step active">
+                <h2>Tracklist sets</h2>
+                <p class="example-hint" style="margin-bottom:8px;">Paste a set URL (trackid.net audiostream or 1001tracklists tracklist) — the page is scraped and its tracks are listed per set. Sets are saved and survive restarts.</p>
+                <div class="folder-input" style="margin-bottom:14px;">
+                    <input type="text" id="setsUrlInput" placeholder="https://trackid.net/audiostreams/… or https://www.1001tracklists.com/tracklist/…" onkeydown="if(event.key==='Enter')setsAddUrl()" />
+                    <div class="btn-group">
+                        <button type="button" id="setsAddBtn" onclick="setsAddUrl()" class="btn btn-primary">Add set</button>
+                    </div>
+                </div>
+                <div id="setsError" class="shazam-info-msg shazam-warning" style="display:none;"></div>
+                <div id="setsList"><p class="shazam-info-msg">No sets yet. Paste a URL above to scrape your first tracklist.</p></div>
+            </section>
+        </div>
+
         <div id="tab-panel-shazam" class="tab-panel active" role="tabpanel" aria-labelledby="tab-btn-shazam">
         <!-- Queue/progress bars: fixed notification bubble at top (no box), hidden by default -->
         <div id="shazamQueueBarsFixed" class="shazam-queue-bars-fixed" style="display:none;">
@@ -427,7 +444,7 @@
     <div id="shazamPlayContextMenu" class="shazam-play-context-menu" role="menu" style="display:none;"></div>
     <div id="shazamDownloadHaveMenu" class="shazam-play-context-menu" role="menu" style="display:none;" aria-label="Download options"></div>
 
-    <script src="{{ url_for('static', filename='app.js') }}?v=79"></script>
+    <script src="{{ url_for('static', filename='app.js') }}?v=80"></script>
 <script>
 (function() {
     if (typeof switchTab !== 'function' || typeof shazamBootstrapLoad !== 'function') {

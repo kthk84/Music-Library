@@ -5614,7 +5614,165 @@ function switchTab(tabId) {
             queueBubble.style.display = 'none';
         }
     }
+    if (tabId === 'sets') {
+        setsLoad();
+    }
     saveAppStateToStorage({ active_tab: tabId });
+}
+
+// ========== Tracklist sets tab (paste URL → scraped tracks per set) ==========
+
+let setsCache = [];
+const SETS_COLLAPSE_KEY = 'mp3cleaner_sets_collapsed';
+
+function _setsCollapsed() {
+    try { return JSON.parse(localStorage.getItem(SETS_COLLAPSE_KEY) || '{}'); } catch (e) { return {}; }
+}
+
+function _setsSetCollapsed(id, val) {
+    const c = _setsCollapsed();
+    if (val) c[id] = true; else delete c[id];
+    try { localStorage.setItem(SETS_COLLAPSE_KEY, JSON.stringify(c)); } catch (e) { /* ignore */ }
+}
+
+async function setsLoad() {
+    const list = document.getElementById('setsList');
+    if (!list) return;
+    try {
+        const res = await fetch('/api/sets');
+        const data = await res.json();
+        setsCache = data.sets || [];
+        setsRender();
+    } catch (e) {
+        list.innerHTML = '<p class="shazam-info-msg shazam-warning">Could not load sets: ' + escapeHtml(e.message || String(e)) + '</p>';
+    }
+}
+
+function _setsTrackKnown(artist, title) {
+    // "In library" = the Sync list knows this track (Shazammed) or it has a Soundeo link.
+    const key = `${artist} - ${title}`;
+    const kl = key.toLowerCase();
+    if (shazamTrackUrls[key] || shazamTrackUrls[kl]) return 'linked';
+    const d = shazamLastData || {};
+    const all = [...(d.to_download || []), ...(d.have_locally || []), ...(d.skipped_tracks || [])];
+    for (const t of all) {
+        if ((`${t.artist} - ${t.title}`).toLowerCase() === kl) return 'shazammed';
+    }
+    return null;
+}
+
+function setsRender() {
+    const list = document.getElementById('setsList');
+    if (!list) return;
+    if (!setsCache.length) {
+        list.innerHTML = '<p class="shazam-info-msg">No sets yet. Paste a URL above to scrape your first tracklist.</p>';
+        return;
+    }
+    const collapsed = _setsCollapsed();
+    let html = '';
+    for (const s of setsCache) {
+        const isCollapsed = !!collapsed[s.id];
+        const when = s.created_at ? new Date(s.created_at * 1000).toLocaleDateString() : '';
+        html += '<div class="sets-card" data-set-id="' + escapeHtml(s.id) + '">';
+        html += '<div class="sets-card-head" onclick="setsToggleCollapse(\'' + escapeHtml(s.id) + '\')">';
+        html += '<span class="sets-card-caret">' + (isCollapsed ? '▸' : '▾') + '</span>';
+        html += '<strong class="sets-card-title">' + escapeHtml(s.title || s.url) + '</strong>';
+        html += '<span class="sets-card-meta">' + escapeHtml(String(s.track_count || (s.tracks || []).length)) + ' tracks · ' + escapeHtml(s.source || '') + (when ? ' · ' + escapeHtml(when) : '') + '</span>';
+        html += '<span class="sets-card-actions">';
+        html += '<a href="' + escapeHtml(s.url) + '" target="_blank" rel="noopener" class="btn btn-small" onclick="event.stopPropagation()" title="Open source page">Source</a> ';
+        html += '<button type="button" class="btn btn-small" onclick="event.stopPropagation(); setsRefresh(\'' + escapeHtml(s.id) + '\')" title="Re-scrape this URL">Refresh</button> ';
+        html += '<button type="button" class="btn btn-small" onclick="event.stopPropagation(); setsDelete(\'' + escapeHtml(s.id) + '\')" title="Remove this set">✕</button>';
+        html += '</span></div>';
+        if (!isCollapsed) {
+            html += '<table class="shazam-track-table sets-track-table"><thead><tr><th style="width:36px;">#</th><th style="width:72px;">Time</th><th>Artist</th><th>Title</th><th style="width:120px;"></th></tr></thead><tbody>';
+            (s.tracks || []).forEach((t, i) => {
+                const known = _setsTrackKnown(t.artist, t.title);
+                const badge = known === 'linked'
+                    ? '<span class="status-dot status-found" title="Known in Sync (Soundeo link)"></span> '
+                    : (known === 'shazammed' ? '<span class="status-dot status-no-link" title="Also in your Shazam list"></span> ' : '');
+                html += '<tr><td>' + (i + 1) + '</td><td class="shazam-when">' + escapeHtml(t.start_time || '') + '</td>';
+                html += '<td>' + badge + escapeHtml(t.artist || '—') + '</td><td>' + escapeHtml(t.title || '—') + '</td>';
+                html += '<td><button type="button" class="btn btn-small" onclick="setsSearchTrack(this)" data-artist="' + escapeHtml(t.artist || '').replace(/'/g, '&#39;') + '" data-title="' + escapeHtml(t.title || '').replace(/'/g, '&#39;') + '" title="Search this track on Soundeo (same as Sync search)">Search</button></td></tr>';
+            });
+            html += '</tbody></table>';
+        }
+        html += '</div>';
+    }
+    list.innerHTML = html;
+}
+
+function setsToggleCollapse(id) {
+    _setsSetCollapsed(id, !_setsCollapsed()[id]);
+    setsRender();
+}
+
+async function setsAddUrl(forcedUrl) {
+    const input = document.getElementById('setsUrlInput');
+    const btn = document.getElementById('setsAddBtn');
+    const errEl = document.getElementById('setsError');
+    const url = (forcedUrl || (input ? input.value : '') || '').trim();
+    if (!url) return;
+    if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Scraping…'; }
+    try {
+        const res = await fetch('/api/sets/add', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || ('Scrape failed (HTTP ' + res.status + ')'));
+        setsCache = data.sets || [];
+        if (input && !forcedUrl) input.value = '';
+        setsRender();
+    } catch (e) {
+        if (errEl) { errEl.textContent = e.message || String(e); errEl.style.display = 'block'; }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Add set'; }
+    }
+}
+
+function setsRefresh(id) {
+    const s = setsCache.find(x => x.id === id);
+    if (s) setsAddUrl(s.url);
+}
+
+async function setsDelete(id) {
+    const s = setsCache.find(x => x.id === id);
+    if (!s) return;
+    if (!confirm('Remove set "' + (s.title || s.url) + '"?')) return;
+    try {
+        const res = await fetch('/api/sets/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id })
+        });
+        const data = await res.json().catch(() => ({}));
+        setsCache = data.sets || [];
+        setsRender();
+    } catch (e) { alert('Delete failed: ' + (e.message || e)); }
+}
+
+async function setsSearchTrack(btn) {
+    const artist = btn.dataset.artist || '';
+    const title = btn.dataset.title || '';
+    if (!artist && !title) return;
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = 'Queued…';
+    try {
+        const res = await fetch('/api/shazam-sync/search-soundeo-single', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ artist, title })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Search failed');
+        btn.textContent = '✓ ' + (data.status === 'queued' ? 'Queued' : 'Searching');
+        setTimeout(() => { btn.textContent = old; btn.disabled = false; }, 4000);
+    } catch (e) {
+        btn.textContent = old; btn.disabled = false;
+        alert('Search failed: ' + (e.message || e));
+    }
 }
 
 function showConnectionBanner() {
@@ -5641,7 +5799,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         restoreAppState();
         var savedTab = loadAppStateFromStorage().active_tab;
-        var tabToShow = (savedTab === 'shazam' || savedTab === 'mp3') ? savedTab : 'shazam';
+        var tabToShow = (savedTab === 'shazam' || savedTab === 'mp3' || savedTab === 'sets') ? savedTab : 'shazam';
         switchTab(tabToShow);
         var tabBtns = document.querySelectorAll('.tab-btn');
         for (var i = 0; i < tabBtns.length; i++) {

@@ -2783,3 +2783,38 @@ button[onclick*="revertLookup"] {
 .shazam-row-listened td:not(.shazam-actions-col):not(.shazam-cover-col):not(.shazam-select-col):not(.shazam-play-col) {
     /* keep listened dim-but-readable; combined with maybe, listened-mark appears */
 }
+
+/* ========== Sets tab (tracklist sets scraped from URLs) ========== */
+.sets-card {
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    background: var(--bg);
+    margin-bottom: 14px;
+    overflow: hidden;
+}
+.sets-card-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: var(--bg-secondary);
+    cursor: pointer;
+    user-select: none;
+}
+.sets-card-head:hover { background: var(--bg-tertiary); }
+.sets-card-caret { color: var(--text-tertiary); width: 14px; flex-shrink: 0; }
+.sets-card-title {
+    font-size: var(--text-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.sets-card-meta {
+    color: var(--text-tertiary);
+    font-size: var(--text-xs);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+.sets-card-actions { margin-left: auto; flex-shrink: 0; display: flex; gap: 6px; align-items: center; }
+.sets-track-table { border: none; border-radius: 0; }
+.sets-track-table .status-dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; margin-right: 4px; }

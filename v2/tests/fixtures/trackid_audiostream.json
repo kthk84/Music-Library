@@ -1,0 +1,175 @@
+{
+ "result": {
+  "id": 361177,
+  "order": null,
+  "url": "https://soundcloud.com/huminalmusic/inner-rhythms-episode-29",
+  "slug": "inner-rhythms-episode-29-live-at-inner-rhythms-the-other-side",
+  "audioStreamType": 1,
+  "externalId": "2314934267",
+  "artworkUrl": "https://i1.sndcdn.com/artworks-zMnACKv6PJnATxD7-dkLoCQ-original.jpg",
+  "title": "Inner Rhythms - Episode 29 | live at Inner Rhythms, The Other Side",
+  "channel": "Huminal",
+  "duration": "05:37:19.4040000",
+  "createdOn": "2026-05-05T00:00:00Z",
+  "addedOn": "2026-05-07T17:11:47.93332Z",
+  "addedBy": "Ayinger",
+  "addedById": 1726,
+  "favouriteCount": 0,
+  "likeCount": 0,
+  "averageRating": null,
+  "processingPriority": 1,
+  "favouriteDate": null,
+  "isPrivate": false,
+  "isDeleted": false,
+  "trackCount": 0,
+  "timeHitRate": null,
+  "trackHitRate": null,
+  "styles": [
+   {
+    "id": 17,
+    "name": "House",
+    "audioStreamCount": null
+   },
+   {
+    "id": 15,
+    "name": "Progressive House",
+    "audioStreamCount": null
+   },
+   {
+    "id": 18,
+    "name": "Trance",
+    "audioStreamCount": null
+   }
+  ],
+  "status": 3,
+  "detectionProcesses": [
+   {
+    "id": 836691,
+    "startDate": "2026-05-07T17:18:08.986391Z",
+    "endDate": "2026-05-07T18:32:53.961174Z",
+    "detectionProcessType": 1,
+    "isReprocessing": false,
+    "detectionProcessMusicTracks": [
+     {
+      "id": 5439838,
+      "musicTrackId": 1241325,
+      "startTime": "00:01:14",
+      "endTime": "00:02:28",
+      "artist": "Shingo Nakamura, Warung",
+      "title": "Worlds Apart (PROFF Remix)",
+      "label": "Monstercat",
+      "labelSlug": "monstercat",
+      "slug": "shingo-nakamura-warung-worlds-apart-proff-remix",
+      "referenceCount": 11,
+      "isNew": true,
+      "accountMusicTrack": null
+     },
+     {
+      "id": 5439839,
+      "musicTrackId": 544567,
+      "startTime": "00:02:42",
+      "endTime": "00:07:53",
+      "artist": "Sébastien Léger",
+      "title": "In A Distorted Galaxy",
+      "label": "Sébastien Léger",
+      "labelSlug": "s-bastien-l-ger",
+      "slug": "sebastien-leger-in-a-distorted-galaxy1330464550",
+      "referenceCount": 22,
+      "isNew": true,
+      "accountMusicTrack": null
+     },
+     {
+      "id": 5439840,
+      "musicTrackId": 1050574,
+      "startTime": "00:07:42",
+      "endTime": "00:12:25",
+      "artist": "Zankee Gulati",
+      "title": "Mind Opener (Marsh Extended Remix)",
+      "label": "Meanwhile",
+      "labelSlug": "meanwhile",
+      "slug": "zankee-gulati-mind-opener-marsh-extended-remix",
+      "referenceCount": 13,
+      "isNew": true,
+      "accountMusicTrack": null
+     }
+    ]
+   },
+   {
+    "id": 836742,
+    "startDate": "2026-05-07T18:38:45.599145Z",
+    "endDate": "2026-05-07T20:14:01.596037Z",
+    "detectionProcessType": 1,
+    "isReprocessing": true,
+    "detectionProcessMusicTracks": [
+     {
+      "id": 5440118,
+      "musicTrackId": 1416932,
+      "startTime": "01:34:29",
+      "endTime": "01:35:49",
+      "artist": "Nordfold",
+      "title": "Forever",
+      "label": "Anjunadeep",
+      "labelSlug": "anjunadeep",
+      "slug": "nordfold-forever",
+      "referenceCount": 1,
+      "isNew": true,
+      "accountMusicTrack": null
+     },
+     {
+      "id": 5440119,
+      "musicTrackId": 1136484,
+      "startTime": "02:02:38",
+      "endTime": "02:04:04",
+      "artist": "Deeparture",
+      "title": "Don't Depend",
+      "label": "Zerothree",
+      "labelSlug": "zerothree",
+      "slug": "deeparture-dont-depend",
+      "referenceCount": 3,
+      "isNew": false,
+      "accountMusicTrack": null
+     },
+     {
+      "id": 5440120,
+      "musicTrackId": 946610,
+      "startTime": "02:14:08",
+      "endTime": "02:15:41",
+      "artist": "Huminal",
+      "title": "Mountainside",
+      "label": "UGENIUS",
+      "labelSlug": "ugenius",
+      "slug": "huminal-mountainside",
+      "referenceCount": 10,
+      "isNew": false,
+      "accountMusicTrack": null
+     }
+    ]
+   },
+   {
+    "id": 837070,
+    "startDate": "2026-05-08T04:30:04.680436Z",
+    "endDate": "2026-05-08T04:30:04.685384Z",
+    "detectionProcessType": 3,
+    "isReprocessing": true,
+    "detectionProcessMusicTracks": []
+   }
+  ],
+  "amendments": [],
+  "audioStreamReprocesses": [
+   {
+    "id": 440487,
+    "detectionProcessType": 1,
+    "addedOn": "2026-05-07T18:33:03.358737Z",
+    "detectionProcessId": 836742
+   },
+   {
+    "id": 440512,
+    "detectionProcessType": 3,
+    "addedOn": "2026-05-07T20:14:08.364362Z",
+    "detectionProcessId": 837070
+   }
+  ],
+  "accountAudiostream": null,
+  "canReprocess": true
+ }
+}
