@@ -5776,11 +5776,15 @@ function setsRender() {
             const inactive = ' shazam-row-action-inactive';
             (s.tracks || []).forEach((t, i) => {
                 const st = _setsTrackState(t.artist, t.title);
-                const badge = st.have
-                    ? '<span class="status-dot status-have" title="Already in your local library"></span> '
+                const isIdTrack = /^id$/i.test((t.artist || '').trim()) && /^id$/i.test((t.title || '').trim());
+                // Fixed-width slot whether or not there's a dot — otherwise rows
+                // with/without status dots get ragged left edges.
+                const dot = st.have
+                    ? '<span class="status-dot status-have" title="Already in your local library"></span>'
                     : (st.url
-                        ? '<span class="status-dot status-found" title="Found on Soundeo"></span> '
-                        : (st.shazammed ? '<span class="status-dot status-no-link" title="Also in your Shazam list (no Soundeo link yet)"></span> ' : ''));
+                        ? '<span class="status-dot status-found" title="Found on Soundeo"></span>'
+                        : (st.shazammed ? '<span class="status-dot status-no-link" title="Also in your Shazam list (no Soundeo link yet)"></span>' : ''));
+                const badge = '<span class="sets-dot-slot">' + dot + '</span>';
                 const label = (t.artist ? t.artist + ' - ' : '') + (t.title || '');
 
                 // ▶ preview — only when a Soundeo link exists; reuses the global
@@ -5804,6 +5808,8 @@ function setsRender() {
                     ? '<button type="button" class="shazam-row-action-btn" disabled aria-busy="true" title="Working…"><span class="shazam-btn-spinner" role="status" aria-label="Working"></span></button>'
                     : st.url
                     ? '<button type="button" class="shazam-row-action-btn" data-action="' + (st.starred ? 'unstar' : 'star') + '" data-key="' + safeAttr(st.key) + '" ' + (st.starred ? 'data-url' : 'data-track-url') + '="' + safeAttr(st.url) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="' + (st.starred ? 'Remove from Soundeo favorites' : 'Add to Soundeo favorites') + '">' + starSvg + '</button>'
+                    : isIdTrack
+                    ? '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Unknown track (ID) — listen via the timestamp; nothing to search">' + heartSvg + '</button>'
                     : '<button type="button" class="shazam-row-action-btn sets-like-btn' + (st.liked ? ' sets-liked' : '') + '" onclick="setsLikeTrack(this)" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" data-liked="' + (st.liked ? '1' : '0') + '" title="' + (st.liked ? 'Liked — searching Soundeo; auto-stars when found. Click to unlike.' : 'Like: add to Sync list, search Soundeo, auto-star when found') + '">' + heartSvg + '</button>';
 
                 // ⬇ download — via the existing one-by-one download queue; ✓ when already local.
@@ -5817,14 +5823,18 @@ function setsRender() {
                         : '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Search first">' + dlSvg + '</button>');
 
                 // 🔍 search — always available (also re-search to refresh a link).
-                const searchBtn = '<button type="button" class="shazam-row-action-btn" data-action="search" data-key="' + safeAttr(st.key) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="Search on Soundeo (find link, no favorite)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>';
+                const searchSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>';
+                const searchBtn = isIdTrack
+                    ? '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Unknown track (ID) — nothing to search">' + searchSvg + '</button>'
+                    : '<button type="button" class="shazam-row-action-btn" data-action="search" data-key="' + safeAttr(st.key) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="Search on Soundeo (find link, no favorite)">' + searchSvg + '</button>';
 
                 // Timestamp: when the set has a playable stream, the time becomes a
                 // "jump into the actual mix here" button — skim without Soundeo.
                 const timeCell = (s.stream_url && t.start_time)
                     ? '<td class="shazam-when"><button type="button" class="sets-time-jump" onclick="setsPlayAt(\'' + escapeHtml(s.id) + '\', \'' + escapeHtml(t.start_time) + '\')" title="Play the set from ' + escapeHtml(t.start_time) + '">▶ ' + escapeHtml(t.start_time) + '</button></td>'
                     : '<td class="shazam-when">' + escapeHtml(t.start_time || '') + '</td>';
-                html += '<tr data-track-key="' + safeAttr(st.key) + '"><td>' + (i + 1) + '</td>' + timeCell;
+                const startSec = t.start_time ? _setsParseTimeToSec(t.start_time) : -1;
+                html += '<tr data-track-key="' + safeAttr(st.key) + '" data-start-sec="' + startSec + '"><td>' + (i + 1) + '</td>' + timeCell;
                 html += '<td>' + badge + escapeHtml(t.artist || '—') + '</td><td>' + escapeHtml(t.title || '—') + '</td>';
                 html += playCell;
                 html += '<td class="shazam-actions-col">' + starBtn + ' ' + dlBtn + ' ' + searchBtn + '</td></tr>';
@@ -5986,8 +5996,10 @@ async function setsPlaySet(setId, seekSec) {
 
     bar.style.display = 'block';
     if (titleEl) titleEl.textContent = s.title || s.url;
+    if (_setsActivePlayer && _setsActivePlayer.posTimer) clearInterval(_setsActivePlayer.posTimer);
+    setsClearHighlight();
     host.innerHTML = '';
-    _setsActivePlayer = { setId, kind, iframe: null, scWidget: null };
+    _setsActivePlayer = { setId, kind, iframe: null, scWidget: null, posTimer: null };
 
     const iframe = document.createElement('iframe');
     iframe.setAttribute('allow', 'autoplay; encrypted-media');
@@ -6002,16 +6014,37 @@ async function setsPlaySet(setId, seekSec) {
             await _setsLoadSCApi();
             const w = SC.Widget(iframe);
             _setsActivePlayer.scWidget = w;
-            if (seekSec != null && seekSec > 0) {
-                w.bind(SC.Widget.Events.READY, function () {
-                    // PLAY_PROGRESS fires once audio actually started; seeking on
-                    // READY alone can be ignored while the stream is still loading.
-                    let seeked = false;
-                    w.bind(SC.Widget.Events.PLAY_PROGRESS, function () {
-                        if (!seeked) { seeked = true; w.seekTo(seekSec * 1000); }
-                    });
+            w.bind(SC.Widget.Events.READY, function () {
+                // Pending seek: PLAY_PROGRESS is the reliable trigger when the
+                // stream autoplays, but it never fires if autoplay is blocked —
+                // so the position poller below ALSO retries the seek until the
+                // reported position converges on the target.
+                let pendingSeek = (seekSec != null && seekSec > 0) ? seekSec : null;
+                let seekTries = 0;
+                w.bind(SC.Widget.Events.PLAY_PROGRESS, function () {
+                    if (pendingSeek != null) { w.seekTo(pendingSeek * 1000); }
                 });
-            }
+                if (_setsActivePlayer && _setsActivePlayer.scWidget === w) {
+                    _setsActivePlayer.posTimer = setInterval(function () {
+                        try {
+                            w.getPosition(function (pos) {
+                                const posSec = pos / 1000;
+                                if (pendingSeek != null) {
+                                    if (Math.abs(posSec - pendingSeek) < 3) {
+                                        pendingSeek = null;  // converged
+                                    } else if (seekTries < 10) {
+                                        seekTries++;
+                                        w.seekTo(pendingSeek * 1000);
+                                    } else {
+                                        pendingSeek = null;  // give up, follow reality
+                                    }
+                                }
+                                setsHighlightPosition(posSec);
+                            });
+                        } catch (e) { /* widget gone */ }
+                    }, 1000);
+                }
+            });
         } catch (e) {
             console.warn('SC widget API unavailable — playback works, seek disabled', e);
         }
@@ -6023,6 +6056,11 @@ async function setsPlaySet(setId, seekSec) {
             (seekSec ? '&start=' + Math.floor(seekSec) : '');
         host.appendChild(iframe);
         _setsActivePlayer.iframe = iframe;
+        iframe.addEventListener('load', function () {
+            try {
+                iframe.contentWindow.postMessage(JSON.stringify({ event: 'listening', id: 'setsPlayer' }), '*');
+            } catch (e) { /* ignore */ }
+        });
     }
 }
 
@@ -6046,12 +6084,51 @@ function setsPlayAt(setId, timeStr) {
     setsPlaySet(setId, _setsParseTimeToSec(timeStr));
 }
 
+let _setsHighlightLastAt = 0;
+/** Highlight the row whose time window contains the set player's position.
+ * Called ~1/s from SC PLAY_PROGRESS / YT infoDelivery. Re-applied every tick,
+ * so a poll re-render self-heals within a second. */
+function setsHighlightPosition(posSec) {
+    const p = _setsActivePlayer;
+    if (!p) return;
+    const now = Date.now();
+    if (now - _setsHighlightLastAt < 900) return;
+    _setsHighlightLastAt = now;
+    const card = document.querySelector('.sets-card[data-set-id="' + p.setId + '"]');
+    if (!card) return;
+    const rows = card.querySelectorAll('tr[data-track-key]');
+    let active = null;
+    for (const r of rows) {
+        const s = parseInt(r.dataset.startSec || '-1', 10);
+        if (isNaN(s) || s < 0) continue;
+        if (s <= posSec) active = r; else break;
+    }
+    rows.forEach(r => r.classList.toggle('sets-row-playing', r === active));
+}
+
+function setsClearHighlight() {
+    document.querySelectorAll('.sets-row-playing').forEach(r => r.classList.remove('sets-row-playing'));
+}
+
+// YouTube embeds report currentTime via infoDelivery postMessages once we ask.
+window.addEventListener('message', function (ev) {
+    const p = _setsActivePlayer;
+    if (!p || p.kind !== 'youtube' || !p.iframe || ev.source !== p.iframe.contentWindow) return;
+    try {
+        const data = typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data;
+        const t = data && data.info && data.info.currentTime;
+        if (typeof t === 'number') setsHighlightPosition(t);
+    } catch (e) { /* not ours */ }
+});
+
 function setsPlayerStop() {
     const bar = document.getElementById('setsPlayerBar');
     const host = document.getElementById('setsPlayerHost');
+    if (_setsActivePlayer && _setsActivePlayer.posTimer) clearInterval(_setsActivePlayer.posTimer);
     if (host) host.innerHTML = '';   // removing the iframe stops the audio
     if (bar) bar.style.display = 'none';
     _setsActivePlayer = null;
+    setsClearHighlight();
 }
 
 async function setsLikeTrack(btn) {

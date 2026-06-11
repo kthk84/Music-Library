@@ -2863,3 +2863,15 @@ button[onclick*="revertLookup"] {
 .sets-like-btn { color: var(--text-tertiary); }
 .sets-like-btn:hover { color: #e0245e; }
 .sets-like-btn.sets-liked { color: #e0245e; }
+
+/* Fixed-width status-dot slot in Sets rows (no ragged indents) */
+.sets-dot-slot { display: inline-block; width: 14px; text-align: left; }
+/* Now-playing row while the set audio plays */
+.sets-track-table tbody tr.sets-row-playing {
+    background: var(--bg-tertiary);
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+.sets-track-table tbody tr.sets-row-playing .sets-time-jump {
+    border-color: var(--accent);
+    font-weight: 600;
+}

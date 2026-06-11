@@ -166,56 +166,78 @@ def _looks_blocked(resp_text: str, status: int) -> bool:
     return any(mk.lower() in low for mk in _CF_MARKERS)
 
 
+def _fmt_secs(sec: int) -> str:
+    return f"{sec // 3600:02d}:{(sec % 3600) // 60:02d}:{sec % 60:02d}"
+
+
+def _parse_1001_name(content: str, by_artist: str, start_time: str) -> Dict:
+    if by_artist and content.lower().startswith(by_artist.lower() + " - "):
+        return _mk_track(content[:len(by_artist)], content[len(by_artist) + 3:], start_time)
+    if " - " in content:
+        artist, title = content.split(" - ", 1)
+        return _mk_track(artist, title, start_time)
+    return _mk_track(by_artist, content, start_time)
+
+
 def _tracks_from_1001_dom(html: str) -> List[Dict]:
     """DOM parse for 1001tracklists (verified against a real headed-browser
-    page, 2026-06): each track row is a schema.org MusicRecording itemscope
-    carrying `<meta itemprop="name" content="Artist - Title">` and usually
-    `<meta itemprop="byArtist" content="Artist">`. Those metas are the precise
-    source — parse them FIRST, using byArtist (when adjacent) to split
-    artist/title even if the artist name itself contains " - ". Fallback:
-    visible `.trackValue` span text."""
+    page, 2026-06). ROW-ANCHORED on the hidden per-row cue inputs
+    (tlp<id>_cue_seconds): every row yields a track. Known tracks carry a
+    schema.org MusicRecording itemscope with precise name/byArtist metas;
+    unknown ("ID") and mashup rows have NO schema markup — only visible
+    trackValue text — and were previously dropped entirely (a real 73-row set
+    parsed as 49). Falls back to an itemscope-only walk when no cue inputs
+    exist (older/cached page variants)."""
     out: List[Dict] = []
-    # Scope to MusicRecording itemscopes so page-level itemprop="name" metas
-    # (page title, site name) can't leak in as tracks. Each block's window runs
-    # to the next MusicRecording (or a bounded slice for the last one).
+    name_meta_re = re.compile(r'<meta[^>]+itemprop=["\']name["\'][^>]+content="([^"]*)"')
+    by_meta_re = re.compile(r'<meta[^>]+itemprop=["\']byArtist["\'][^>]+content="([^"]*)"')
+    tv_re = re.compile(r'<span[^>]*class="[^"]*trackValue[^"]*"[^>]*>(.*?)</span>', re.DOTALL)
+
+    cues = [(m.start(), int(m.group(1))) for m in re.finditer(
+        r'id="tlp\d+_cue_seconds"[^>]*value="(\d+)"', html)]
+    if cues:
+        for i, (pos, sec) in enumerate(cues):
+            end = cues[i + 1][0] if i + 1 < len(cues) else min(len(html), pos + 12000)
+            block = html[pos:end]
+            start_time = _fmt_secs(sec)
+            name_m = name_meta_re.search(block)
+            if name_m and _clean(name_m.group(1)):
+                by_m = by_meta_re.search(block)
+                out.append(_parse_1001_name(_clean(name_m.group(1)),
+                                            _clean(by_m.group(1)) if by_m else "", start_time))
+                continue
+            tv_m = tv_re.search(block)
+            if tv_m:
+                text = _clean(re.sub(r"<[^>]+>", "", tv_m.group(1)))
+                if text:
+                    if " - " in text:
+                        artist, title = text.split(" - ", 1)
+                        out.append(_mk_track(artist, title, start_time))
+                    else:
+                        # Unknown track ("ID") — keep it: the timestamp makes it
+                        # listenable via the set player even without a name.
+                        out.append(_mk_track(text, text, start_time))
+        if out:
+            return out
+
+    # Fallback: itemscope-only walk (no cue inputs in this page variant).
     rec_starts = [m.start() for m in re.finditer(
         r'itemtype=["\']https?://schema\.org/MusicRecording["\']', html)]
-    # Cue times live in hidden per-row inputs (tlp<id>_cue_seconds) that precede
-    # each row's MusicRecording itemscope. Associate by POSITION (nearest cue
-    # before the block, but after the previous block) — counts don't line up
-    # (mashup "w/" rows have cue inputs without their own MusicRecording).
-    cue_positions = [(m.start(), int(m.group(1))) for m in re.finditer(
-        r'id="tlp\d+_cue_seconds"[^>]*value="(\d+)"', html)]
     for idx, start in enumerate(rec_starts):
         end = rec_starts[idx + 1] if idx + 1 < len(rec_starts) else min(len(html), start + 6000)
         block = html[start:end]
-        name_m = re.search(r'<meta[^>]+itemprop=["\']name["\'][^>]+content="([^"]*)"', block)
+        name_m = name_meta_re.search(block)
         if not name_m:
             continue
         content = _clean(name_m.group(1))
         if not content:
             continue
-        prev_start = rec_starts[idx - 1] if idx > 0 else 0
-        cue_sec = None
-        for pos, sec in cue_positions:
-            if prev_start <= pos < start:
-                cue_sec = sec  # last one wins = nearest preceding
-            elif pos >= start:
-                break
-        start_time = f"{cue_sec // 3600:02d}:{(cue_sec % 3600) // 60:02d}:{cue_sec % 60:02d}" if cue_sec is not None else ""
-        by_m = re.search(r'<meta[^>]+itemprop=["\']byArtist["\'][^>]+content="([^"]*)"', block)
-        by_artist = _clean(by_m.group(1)) if by_m else ""
-        if by_artist and content.lower().startswith(by_artist.lower() + " - "):
-            out.append(_mk_track(content[:len(by_artist)], content[len(by_artist) + 3:], start_time))
-        elif " - " in content:
-            artist, title = content.split(" - ", 1)
-            out.append(_mk_track(artist, title, start_time))
-        else:
-            out.append(_mk_track(by_artist, content, start_time))
+        by_m = by_meta_re.search(block)
+        out.append(_parse_1001_name(content, _clean(by_m.group(1)) if by_m else "", ""))
     if out:
         return out
-    # Fallback: visible trackValue spans (strip markup, join fragments).
-    for m in re.finditer(r'<span[^>]*class="[^"]*trackValue[^"]*"[^>]*>(.*?)</span>\s*(?=<|$)', html, re.DOTALL):
+    # Last resort: bare trackValue spans.
+    for m in tv_re.finditer(html):
         text = _clean(re.sub(r"<[^>]+>", "", m.group(1)))
         if not text:
             continue
@@ -240,7 +262,6 @@ def _extract_stream_url(html: str) -> str:
     m = re.search(r"(?:youtube\.com/(?:watch\?v=|embed/)|youtu\.be/)([a-zA-Z0-9_-]{6,15})", html)
     if m:
         return f"https://www.youtube.com/watch?v={m.group(1)}"
-    # SoundCloud permalink (skip 1001tracklists' own profile + player assets)
     for m in re.finditer(r"https?://soundcloud\.com/([a-zA-Z0-9_-]+)(/[a-zA-Z0-9_-]+)?", html):
         user, slug = m.group(1), m.group(2) or ""
         if user in ("1001tracklists", "player", "pages", "you", "search", "tags"):

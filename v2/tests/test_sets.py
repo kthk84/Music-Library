@@ -134,21 +134,26 @@ def test_1001_dom_parses_real_musicrecording_metas(sets_file):
     assert tracks[1] == {"artist": "ID", "title": "ID", "start_time": ""}
 
 
-def test_1001_dom_associates_cue_seconds_by_position(sets_file):
-    """Cue inputs precede each row's MusicRecording; association is positional
-    (counts don't match — mashup rows carry cues without recordings)."""
+def test_1001_dom_row_anchored_includes_id_rows(sets_file):
+    """Rows are anchored on cue inputs. Known tracks parse from MusicRecording
+    metas; unknown (ID) rows have NO schema markup — only trackValue text — and
+    must STILL be listed with their timestamp so they're listenable via the set
+    player (a real 73-row set used to parse as 49)."""
     html = (
         '<input id="tlp1_cue_seconds" type="hidden" value="0">'
         '<div itemscope itemtype="http://schema.org/MusicRecording">'
         '<meta itemprop="name" content="A - One"></div>'
-        '<input id="tlp2_cue_seconds" type="hidden" value="3725">'   # 01:02:05
-        '<input id="tlp3_cue_seconds" type="hidden" value="3726">'   # nearest wins
+        '<input id="tlp2_cue_seconds" type="hidden" value="1320">'
+        '<span class="trackValue notranslate">ID</span>'             # unknown track row
+        '<input id="tlp3_cue_seconds" type="hidden" value="3726">'
         '<div itemscope itemtype="http://schema.org/MusicRecording">'
         '<meta itemprop="name" content="B - Two"></div>'
     )
     tracks = sets_mod._tracks_from_1001_dom(html)
-    assert tracks[0]["start_time"] == "00:00:00"
-    assert tracks[1]["start_time"] == "01:02:06"
+    assert len(tracks) == 3
+    assert tracks[0] == {"artist": "A", "title": "One", "start_time": "00:00:00"}
+    assert tracks[1] == {"artist": "ID", "title": "ID", "start_time": "00:22:00"}
+    assert tracks[2]["start_time"] == "01:02:06"
 
 
 # ----------------------------------------------------------------- generic ---
