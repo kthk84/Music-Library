@@ -206,6 +206,89 @@ def test_sets_storage_round_trip_and_replace(sets_file):
     assert sets_mod.load_sets() == []
 
 
+# ------------------------------------------------------------- like flow ---
+
+@pytest.fixture
+def like_env(monkeypatch, tmp_path):
+    """Isolated caches + recorded side effects for the ❤ pipeline."""
+    import app as app_module
+    import shazam_cache as sc
+
+    state = {"status": {}, "shazam": [], "search_q": [], "stars": [], "search_started": 0}
+    monkeypatch.setattr(sc, "load_status_cache", lambda: dict(state["status"]))
+    monkeypatch.setattr(sc, "save_status_cache", lambda s: state.__setitem__("status", dict(s)))
+    monkeypatch.setattr(sc, "load_shazam_cache", lambda: list(state["shazam"]))
+    monkeypatch.setattr(sc, "save_shazam_cache", lambda t: state.__setitem__("shazam", list(t)))
+    monkeypatch.setattr(app_module, "_shazam_any_job_running", lambda: True)  # don't spawn threads
+    monkeypatch.setattr(app_module, "_enqueue_single_star",
+                        lambda key, artist, title, url, start=True: state["stars"].append((key, url)))
+    app_module.app._shazam_sync_status = None
+    app_module.app._shazam_single_search_queue = state["search_q"]
+    import threading as _t
+    app_module.app._shazam_single_search_queue_lock = _t.Lock()
+    yield app_module, state
+    app_module.app._shazam_sync_status = None
+
+
+def test_like_adds_to_library_flags_and_queues_search(like_env):
+    app_module, state = like_env
+    client = app_module.app.test_client()
+    r = client.post("/api/sets/like", json={"artist": "Mayro & Tali Muss", "title": "Fantom", "liked": True})
+    assert r.status_code == 200 and r.get_json()["queued"] == "search"
+    st = state["status"]
+    key = "Mayro & Tali Muss - Fantom"
+    # joins the main Sync list (manual library entry + to_download row)
+    assert any(t["artist"] == "Mayro & Tali Muss" for t in state["shazam"])
+    assert state["shazam"][0].get("origin") == "set"
+    assert any(t["artist"] == "Mayro & Tali Muss" for t in st["to_download"])
+    # like markers
+    assert st["maybe"].get(key) is True
+    assert st["auto_star_on_found"].get(key) is True
+    # search queued (worker spawn suppressed by busy-flag)
+    assert state["search_q"] == [{"artist": "Mayro & Tali Muss", "title": "Fantom"}]
+    # idempotent: re-like doesn't duplicate
+    client.post("/api/sets/like", json={"artist": "Mayro & Tali Muss", "title": "Fantom", "liked": True})
+    assert sum(1 for t in state["status"]["to_download"] if t["artist"] == "Mayro & Tali Muss") == 1
+
+
+def test_like_with_known_url_converts_straight_to_star(like_env):
+    app_module, state = like_env
+    state["status"] = {"urls": {"A - B": "https://soundeo.com/track/x"}}
+    client = app_module.app.test_client()
+    r = client.post("/api/sets/like", json={"artist": "A", "title": "B", "liked": True})
+    assert r.get_json()["queued"] == "star"
+    assert state["stars"] == [("A - B", "https://soundeo.com/track/x")]
+    # like marker consumed by the conversion; maybe cleared (graduated)
+    assert not state["status"].get("auto_star_on_found", {}).get("A - B")
+    assert not state["status"].get("maybe", {}).get("A - B")
+
+
+def test_unlike_clears_markers(like_env):
+    app_module, state = like_env
+    client = app_module.app.test_client()
+    client.post("/api/sets/like", json={"artist": "A", "title": "B", "liked": True})
+    client.post("/api/sets/like", json={"artist": "A", "title": "B", "liked": False})
+    st = state["status"]
+    assert not st.get("maybe", {}).get("A - B")
+    assert not st.get("auto_star_on_found", {}).get("A - B")
+
+
+def test_convert_like_to_star_if_pending(like_env):
+    app_module, state = like_env
+    status = {"auto_star_on_found": {"A - B": True, "a - b": True}, "maybe": {"A - B": True}}
+    fired = app_module._convert_like_to_star_if_pending(status, "A - B", "A", "B", "https://soundeo.com/t", already_starred=False)
+    assert fired is True
+    assert state["stars"] == [("A - B", "https://soundeo.com/t")]
+    assert status["auto_star_on_found"] == {}
+    assert not status["maybe"].get("A - B")
+    # no marker → no-op
+    assert app_module._convert_like_to_star_if_pending(status, "A - B", "A", "B", "u", False) is False
+    # already starred → marker cleared, no star queued
+    status2 = {"auto_star_on_found": {"C - D": True}}
+    assert app_module._convert_like_to_star_if_pending(status2, "C - D", "C", "D", "u", already_starred=True) is True
+    assert len(state["stars"]) == 1
+
+
 def test_sets_api_endpoints(monkeypatch, sets_file):
     import app as app_module
 

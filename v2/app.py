@@ -2274,6 +2274,151 @@ def sets_add():
     return jsonify({'added': new_set['id'], 'sets': sets})
 
 
+def _enqueue_single_star(key: str, artist: str, title: str, track_url: str, start: bool = True) -> None:
+    """Append one track to the single-star queue and start the worker when idle.
+    Mirrors the /star-track route's enqueue+start logic for internal callers."""
+    if not hasattr(app, '_shazam_single_star_queue'):
+        app._shazam_single_star_queue = []
+    if not hasattr(app, '_shazam_single_star_queue_lock'):
+        app._shazam_single_star_queue_lock = threading.Lock()
+    item = {'key': key, 'artist': artist, 'title': title, 'track_url': track_url or ''}
+    with app._shazam_single_star_queue_lock:
+        app._shazam_single_star_queue.append(item)
+        if not start or getattr(app, '_shazam_compare_running', False):
+            return
+        next_item = app._shazam_single_star_queue.pop(0)
+    threading.Thread(target=_run_star_queue_worker, args=(next_item,), daemon=True).start()
+
+
+def _convert_like_to_star_if_pending(status: Dict, key: str, artist: str, title: str, url: str, already_starred: bool) -> bool:
+    """Skim-flow graduation: a ❤ liked track (auto_star_on_found marker) whose
+    Soundeo link just landed converts into a real star. Clears the like marker
+    and the local 'maybe' flag (it graduates to Shortlist), then queues the star
+    via the normal single-star pipeline. Returns True when a conversion fired."""
+    pending = status.get('auto_star_on_found') or {}
+    hit = False
+    for v in (key, key.lower()):
+        if pending.pop(v, None):
+            hit = True
+    if not hit:
+        return False
+    status['auto_star_on_found'] = pending
+    _set_local_flag_variants(status, 'maybe', key, False)
+    mem = getattr(app, '_shazam_sync_status', None)
+    if mem is not None and mem is not status:
+        mem_pending = dict(mem.get('auto_star_on_found') or {})
+        mem_pending.pop(key, None)
+        mem_pending.pop(key.lower(), None)
+        mem['auto_star_on_found'] = mem_pending
+        _set_local_flag_variants(mem, 'maybe', key, False)
+    if already_starred:
+        logging.info("like→star: %s already starred on Soundeo; like cleared", key[:60])
+        return True
+    logging.info("like→star: queueing star for %s", key[:60])
+    # ENQUEUE ONLY (start=False): when called from inside the search worker, the
+    # worker still has pending save_status_cache calls on its own (older) status
+    # snapshot. A star running concurrently persists starred=True and is then
+    # clobbered by the worker's stale save (observed live: Soundeo star succeeded
+    # but status read back False). The caller kicks _start_next_single_star()
+    # AFTER its final save.
+    _enqueue_single_star(key, artist, title, url, start=False)
+    return True
+
+
+@app.route('/api/sets/like', methods=['POST'])
+def sets_like():
+    """❤ Like a (typically unmatched) set track while skimming.
+
+    liked=true: the track joins the main library list (manual entry in the
+    Shazam cache, shazamed_at=now → top of the Sync list), gets the local
+    'maybe' flag (visible in the Maybe filter), an auto-star marker, and a
+    Soundeo single-search is queued. When the search finds a link, the like
+    auto-converts to a real Soundeo star (Shortlist). liked=false: clears the
+    like marker + maybe flag (the library entry stays).
+    """
+    from shazam_cache import load_status_cache, save_status_cache, load_shazam_cache, save_shazam_cache
+    body = request.get_json(silent=True) or {}
+    artist = (body.get('artist') or '').strip()
+    title = (body.get('title') or '').strip()
+    liked = bool(body.get('liked', True))
+    if not artist and not title:
+        return jsonify({'error': 'artist/title required'}), 400
+    key = f"{artist} - {title}"
+
+    status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
+    mem = getattr(app, '_shazam_sync_status', None)
+
+    if not liked:
+        _set_local_flag_variants(status, 'maybe', key, False)
+        pending = dict(status.get('auto_star_on_found') or {})
+        pending.pop(key, None)
+        pending.pop(key.lower(), None)
+        status['auto_star_on_found'] = pending
+        if mem is not None and mem is not status:
+            _set_local_flag_variants(mem, 'maybe', key, False)
+            mem_p = dict(mem.get('auto_star_on_found') or {})
+            mem_p.pop(key, None)
+            mem_p.pop(key.lower(), None)
+            mem['auto_star_on_found'] = mem_p
+        save_status_cache(status)
+        return jsonify({'ok': True, 'liked': False, 'key': key})
+
+    now_ts = int(time.time())
+    # 1) Manual library entry → the track shows in the normal Sync list (top,
+    #    since shazamed_at=now), persisted in the Shazam cache like any track.
+    cache_tracks = load_shazam_cache() or []
+    kl = key.lower()
+    in_cache = any((f"{t.get('artist','')} - {t.get('title','')}").lower() == kl for t in cache_tracks)
+    if not in_cache:
+        cache_tracks.insert(0, {'artist': artist, 'title': title, 'shazamed_at': now_ts,
+                                'shazamed_count': 1, 'origin': 'set'})
+        save_shazam_cache(cache_tracks)
+        status['shazam_count'] = int(status.get('shazam_count') or 0) + 1
+
+    # 2) Immediate Sync-list visibility: append to to_download unless already listed.
+    def _listed(lst):
+        return any((f"{t.get('artist','')} - {t.get('title','')}").lower() == kl for t in (lst or []) if isinstance(t, dict))
+    if not _listed(status.get('to_download')) and not _listed(status.get('have_locally')):
+        td = list(status.get('to_download') or [])
+        td.insert(0, {'artist': artist, 'title': title, 'shazamed_at': now_ts, 'shazamed_count': 1})
+        status['to_download'] = td
+        status['to_download_count'] = len(td)
+
+    # 3) Like markers: local maybe flag + auto-star-on-found.
+    _set_local_flag_variants(status, 'maybe', key, True)
+    status.setdefault('auto_star_on_found', {})[key] = True
+    status['auto_star_on_found'][key.lower()] = True
+
+    if mem is not None and mem is not status:
+        _set_local_flag_variants(mem, 'maybe', key, True)
+        mem['auto_star_on_found'] = {**(mem.get('auto_star_on_found') or {}), key: True, key.lower(): True}
+        if not _listed(mem.get('to_download')) and not _listed(mem.get('have_locally')):
+            mem['to_download'] = [{'artist': artist, 'title': title, 'shazamed_at': now_ts, 'shazamed_count': 1}] + list(mem.get('to_download') or [])
+            mem['to_download_count'] = len(mem['to_download'])
+        if not in_cache:
+            mem['shazam_count'] = int(mem.get('shazam_count') or 0) + 1
+    save_status_cache(status)
+
+    # 4) Already matched? Convert straight to a star. Otherwise queue the search.
+    urls = status.get('urls') or {}
+    known_url = urls.get(key) or urls.get(key.lower()) or ''
+    queued = 'star' if known_url else 'search'
+    if known_url:
+        _convert_like_to_star_if_pending(status, key, artist, title, known_url, already_starred=False)
+        save_status_cache(status)
+        _start_next_single_star()  # kick AFTER our save (see conversion helper)
+    else:
+        if not hasattr(app, '_shazam_single_search_queue'):
+            app._shazam_single_search_queue = []
+        if not hasattr(app, '_shazam_single_search_queue_lock'):
+            app._shazam_single_search_queue_lock = threading.Lock()
+        with app._shazam_single_search_queue_lock:
+            app._shazam_single_search_queue.append({'artist': artist, 'title': title})
+        if not _shazam_any_job_running():
+            _start_next_single_search()
+    return jsonify({'ok': True, 'liked': True, 'key': key, 'queued': queued})
+
+
 @app.route('/api/sets/delete', methods=['POST'])
 def sets_delete():
     from lib.sets import delete_set
@@ -4287,6 +4432,10 @@ def _run_search_soundeo_single(artist: str, title: str):
             status.setdefault('starred', {})
             # Trust search result: we use same HTTP get_favorite_state as star/unstar, so when user unstars on Soundeo and searches again we must show unstarred
             status['starred'][key] = status['starred'][key.lower()] = bool(starred)
+            # Skim-flow: a ❤ liked track whose link just landed graduates to a
+            # real Soundeo star (clears like marker + maybe flag, queues star).
+            if _convert_like_to_star_if_pending(status, key, artist, title, out[0], bool(starred)):
+                pass  # markers mutated in `status`; persisted by the save below
             save_status_cache(status)
             _search_favorite_log.info(
                 "search_single key=%s status.starred updated to %s (UI should show filled star if True)",
@@ -4313,6 +4462,10 @@ def _run_search_soundeo_single(artist: str, title: str):
                 'error': err, 'message': err if not_logged_in else f'Not found: {artist} - {title}', 'mode': 'search_single',
                 'current_key': key,
             }
+        # Like→star conversion queued during this search (if any) starts ONLY
+        # now — after this worker's final save — so the star's starred=True
+        # write can't be clobbered by our stale status snapshot.
+        _start_next_single_star()
         # Safety net: if the inline cover fetch failed (or any older track still
         # lacks a cover file), fetch immediately — the client's post-job status
         # reload sees cover_backfill.running and live-fills the list.

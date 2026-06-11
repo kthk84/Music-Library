@@ -5683,7 +5683,8 @@ function _setsTrackState(artist, title) {
             if ((`${t.artist} - ${t.title}`).toLowerCase() === kl) { shazammed = true; break; }
         }
     }
-    return { key, url, starred, have, shazammed };
+    const liked = !!_setsLookup(shazamMaybe, key);
+    return { key, url, starred, have, shazammed, liked };
 }
 
 // Light state refresh while the Sets tab is open: actions (search/star/download)
@@ -5702,6 +5703,7 @@ function setsStatePollStart() {
             const data = await res.json();
             if (data.urls) Object.assign(shazamTrackUrls, data.urls);
             if (data.starred) Object.assign(shazamStarred, data.starred);
+            if (data.maybe && typeof data.maybe === 'object') { shazamMaybe = Object.assign({}, data.maybe); }
             if (data.cover_hashes) shazamMergeCoverHashes(data.cover_hashes);
             shazamLastData = shazamLastData || {};
             if (data.have_locally) shazamLastData.have_locally = data.have_locally;
@@ -5767,9 +5769,15 @@ function setsRender() {
                 const starSvg = st.starred
                     ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>'
                     : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/></svg>';
+                // Unmatched rows: the star slot is a ❤ "like" — pre-star while
+                // skimming. Liking adds the track to the Sync list, queues a
+                // Soundeo search, and auto-converts to a real ★ when found.
+                const heartSvg = st.liked
+                    ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>'
+                    : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>';
                 const starBtn = st.url
                     ? '<button type="button" class="shazam-row-action-btn" data-action="' + (st.starred ? 'unstar' : 'star') + '" data-key="' + safeAttr(st.key) + '" ' + (st.starred ? 'data-url' : 'data-track-url') + '="' + safeAttr(st.url) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="' + (st.starred ? 'Remove from Soundeo favorites' : 'Add to Soundeo favorites') + '">' + starSvg + '</button>'
-                    : '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Search first">' + starSvg + '</button>';
+                    : '<button type="button" class="shazam-row-action-btn sets-like-btn' + (st.liked ? ' sets-liked' : '') + '" onclick="setsLikeTrack(this)" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" data-liked="' + (st.liked ? '1' : '0') + '" title="' + (st.liked ? 'Liked — searching Soundeo; auto-stars when found. Click to unlike.' : 'Like: add to Sync list, search Soundeo, auto-star when found') + '">' + heartSvg + '</button>';
 
                 // ⬇ download — via the existing one-by-one download queue; ✓ when already local.
                 const dlSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
@@ -5823,7 +5831,7 @@ function _setsStateFingerprint() {
     for (const s of setsCache) {
         for (const t of (s.tracks || [])) {
             const st = _setsTrackState(t.artist, t.title);
-            parts.push((st.url ? '1' : '0') + (st.starred ? '1' : '0') + (st.have ? '1' : '0'));
+            parts.push((st.url ? '1' : '0') + (st.starred ? '1' : '0') + (st.have ? '1' : '0') + (st.liked ? '1' : '0'));
         }
     }
     return parts.join('');
@@ -6015,6 +6023,30 @@ function setsPlayerStop() {
     if (host) host.innerHTML = '';   // removing the iframe stops the audio
     if (bar) bar.style.display = 'none';
     _setsActivePlayer = null;
+}
+
+async function setsLikeTrack(btn) {
+    const artist = btn.dataset.artist || '';
+    const title = btn.dataset.title || '';
+    const nowLiked = btn.dataset.liked !== '1';
+    const key = `${artist} - ${title}`;
+    // Optimistic UI; the 5s poll reconciles with the server (and later flips
+    // the row to ★ once the search lands and the like converts to a star).
+    if (nowLiked) shazamMaybe[key] = true; else delete shazamMaybe[key];
+    setsRender();
+    try {
+        const res = await fetch('/api/sets/like', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ artist, title, liked: nowLiked })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Like failed');
+    } catch (e) {
+        if (nowLiked) delete shazamMaybe[key]; else shazamMaybe[key] = true;
+        setsRender();
+        alert('Like failed: ' + (e.message || e));
+    }
 }
 
 /** Pause (not close) the set player — called when a per-track preview or local

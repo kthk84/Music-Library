@@ -2858,3 +2858,8 @@ button[onclick*="revertLookup"] {
     white-space: nowrap;
 }
 .sets-time-jump:hover { background: var(--bg-tertiary); border-color: var(--accent); }
+
+/* Sets ❤ like button (pre-star for unmatched tracks) */
+.sets-like-btn { color: var(--text-tertiary); }
+.sets-like-btn:hover { color: #e0245e; }
+.sets-like-btn.sets-liked { color: #e0245e; }
