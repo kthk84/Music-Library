@@ -72,3 +72,6 @@ soundeo_star.log
 search_favorite.log
 soundeo_download_last_json.json
 
+
+# Tracklist sets (user data)
+sets.json
