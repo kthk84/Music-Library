@@ -180,6 +180,12 @@ def _tracks_from_1001_dom(html: str) -> List[Dict]:
     # to the next MusicRecording (or a bounded slice for the last one).
     rec_starts = [m.start() for m in re.finditer(
         r'itemtype=["\']https?://schema\.org/MusicRecording["\']', html)]
+    # Cue times live in hidden per-row inputs (tlp<id>_cue_seconds) that precede
+    # each row's MusicRecording itemscope. Associate by POSITION (nearest cue
+    # before the block, but after the previous block) — counts don't line up
+    # (mashup "w/" rows have cue inputs without their own MusicRecording).
+    cue_positions = [(m.start(), int(m.group(1))) for m in re.finditer(
+        r'id="tlp\d+_cue_seconds"[^>]*value="(\d+)"', html)]
     for idx, start in enumerate(rec_starts):
         end = rec_starts[idx + 1] if idx + 1 < len(rec_starts) else min(len(html), start + 6000)
         block = html[start:end]
@@ -189,15 +195,23 @@ def _tracks_from_1001_dom(html: str) -> List[Dict]:
         content = _clean(name_m.group(1))
         if not content:
             continue
+        prev_start = rec_starts[idx - 1] if idx > 0 else 0
+        cue_sec = None
+        for pos, sec in cue_positions:
+            if prev_start <= pos < start:
+                cue_sec = sec  # last one wins = nearest preceding
+            elif pos >= start:
+                break
+        start_time = f"{cue_sec // 3600:02d}:{(cue_sec % 3600) // 60:02d}:{cue_sec % 60:02d}" if cue_sec is not None else ""
         by_m = re.search(r'<meta[^>]+itemprop=["\']byArtist["\'][^>]+content="([^"]*)"', block)
         by_artist = _clean(by_m.group(1)) if by_m else ""
         if by_artist and content.lower().startswith(by_artist.lower() + " - "):
-            out.append(_mk_track(content[:len(by_artist)], content[len(by_artist) + 3:]))
+            out.append(_mk_track(content[:len(by_artist)], content[len(by_artist) + 3:], start_time))
         elif " - " in content:
             artist, title = content.split(" - ", 1)
-            out.append(_mk_track(artist, title))
+            out.append(_mk_track(artist, title, start_time))
         else:
-            out.append(_mk_track(by_artist, content))
+            out.append(_mk_track(by_artist, content, start_time))
     if out:
         return out
     # Fallback: visible trackValue spans (strip markup, join fragments).

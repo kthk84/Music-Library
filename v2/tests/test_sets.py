@@ -134,6 +134,23 @@ def test_1001_dom_parses_real_musicrecording_metas(sets_file):
     assert tracks[1] == {"artist": "ID", "title": "ID", "start_time": ""}
 
 
+def test_1001_dom_associates_cue_seconds_by_position(sets_file):
+    """Cue inputs precede each row's MusicRecording; association is positional
+    (counts don't match — mashup rows carry cues without recordings)."""
+    html = (
+        '<input id="tlp1_cue_seconds" type="hidden" value="0">'
+        '<div itemscope itemtype="http://schema.org/MusicRecording">'
+        '<meta itemprop="name" content="A - One"></div>'
+        '<input id="tlp2_cue_seconds" type="hidden" value="3725">'   # 01:02:05
+        '<input id="tlp3_cue_seconds" type="hidden" value="3726">'   # nearest wins
+        '<div itemscope itemtype="http://schema.org/MusicRecording">'
+        '<meta itemprop="name" content="B - Two"></div>'
+    )
+    tracks = sets_mod._tracks_from_1001_dom(html)
+    assert tracks[0]["start_time"] == "00:00:00"
+    assert tracks[1]["start_time"] == "01:02:06"
+
+
 # ----------------------------------------------------------------- generic ---
 
 def test_scrape_generic_line_regex(monkeypatch, sets_file):
