@@ -1619,6 +1619,12 @@ function shazamClearActionPendingForKey(k) {
     Object.keys(shazamActionPending).forEach(function (pk) {
         if ((pk || '').toLowerCase() === kl) delete shazamActionPending[pk];
     });
+    // Sets rows render the same pending state — refresh them too so their
+    // spinners clear the moment the action resolves (not on the next poll).
+    try {
+        var setsPanel = document.getElementById('tab-panel-sets');
+        if (setsPanel && setsPanel.classList.contains('active') && typeof setsRender === 'function') setsRender();
+    } catch (e) { /* ignore */ }
 }
 
 /** Omit "N failed" when N is 0 so the bar does not read "0 failed". */
@@ -5701,7 +5707,9 @@ function _setsTrackState(artist, title) {
         }
     }
     const liked = !!_setsLookup(shazamMaybe, key);
-    return { key, url, starred, have, shazammed, liked };
+    const pending = !!(shazamActionPending[key] || shazamActionPending[kl]);
+    const downloadPending = !!(shazamPendingDownload[key] || shazamPendingDownload[kl]);
+    return { key, url, starred, have, shazammed, liked, pending, downloadPending };
 }
 
 // Light state refresh while the Sets tab is open: actions (search/star/download)
@@ -5792,13 +5800,17 @@ function setsRender() {
                 const heartSvg = st.liked
                     ? '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>'
                     : '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/></svg>';
-                const starBtn = st.url
+                const starBtn = st.pending
+                    ? '<button type="button" class="shazam-row-action-btn" disabled aria-busy="true" title="Working…"><span class="shazam-btn-spinner" role="status" aria-label="Working"></span></button>'
+                    : st.url
                     ? '<button type="button" class="shazam-row-action-btn" data-action="' + (st.starred ? 'unstar' : 'star') + '" data-key="' + safeAttr(st.key) + '" ' + (st.starred ? 'data-url' : 'data-track-url') + '="' + safeAttr(st.url) + '" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" title="' + (st.starred ? 'Remove from Soundeo favorites' : 'Add to Soundeo favorites') + '">' + starSvg + '</button>'
                     : '<button type="button" class="shazam-row-action-btn sets-like-btn' + (st.liked ? ' sets-liked' : '') + '" onclick="setsLikeTrack(this)" data-artist="' + safeAttr(t.artist) + '" data-title="' + safeAttr(t.title) + '" data-liked="' + (st.liked ? '1' : '0') + '" title="' + (st.liked ? 'Liked — searching Soundeo; auto-stars when found. Click to unlike.' : 'Like: add to Sync list, search Soundeo, auto-star when found') + '">' + heartSvg + '</button>';
 
                 // ⬇ download — via the existing one-by-one download queue; ✓ when already local.
                 const dlSvg = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>';
-                const dlBtn = st.have
+                const dlBtn = st.downloadPending
+                    ? '<button type="button" class="shazam-row-action-btn" disabled aria-busy="true" title="Downloading…"><span class="shazam-btn-spinner" role="status" aria-label="Downloading"></span></button>'
+                    : st.have
                     ? '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Already in your local library">✓</button>'
                     : (st.url
                         ? '<button type="button" class="shazam-row-action-btn" data-action="download" data-key="' + safeAttr(st.key) + '" title="Download AIFF from Soundeo">' + dlSvg + '</button>'
@@ -5848,7 +5860,7 @@ function _setsStateFingerprint() {
     for (const s of setsCache) {
         for (const t of (s.tracks || [])) {
             const st = _setsTrackState(t.artist, t.title);
-            parts.push((st.url ? '1' : '0') + (st.starred ? '1' : '0') + (st.have ? '1' : '0') + (st.liked ? '1' : '0'));
+            parts.push((st.url ? '1' : '0') + (st.starred ? '1' : '0') + (st.have ? '1' : '0') + (st.liked ? '1' : '0') + (st.pending ? '1' : '0') + (st.downloadPending ? '1' : '0'));
         }
     }
     return parts.join('');
@@ -6043,6 +6055,9 @@ function setsPlayerStop() {
 }
 
 async function setsLikeTrack(btn) {
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="shazam-btn-spinner" role="status" aria-label="Saving"></span>';
     const artist = btn.dataset.artist || '';
     const title = btn.dataset.title || '';
     const nowLiked = btn.dataset.liked !== '1';
@@ -6290,6 +6305,9 @@ document.addEventListener('DOMContentLoaded', function () {
             shazamDownloadTrack(btn.dataset.key);
         } else if (action === 'maybe') {
             shazamToggleMaybe(btn);
+        }
+        if (btn.closest('.sets-track-table') && typeof setsRender === 'function') {
+            setsRender();
         }
     });
 });
