@@ -28,9 +28,12 @@ def _get_audio_metadata(filepath: str) -> Dict:
 
 
 # Common track suffixes to strip for matching (expand so Shazam "Title" matches file "Title (Extended Version)" etc.)
+# The (?![a-zA-Z]) word-boundary guard stops bare keywords (Mix, Edit, Dub, Remix, …) from matching
+# INSIDE a larger word — without it, "(Mixed)" became "ed)" and "Remixed" became "ed", corrupting the
+# normalized title so a downloaded track failed to match its Shazam entry (showed available, not have).
 TRACK_SUFFIXES = re.compile(
     r'\s*[(\[]?(?:Extended Mix|Extended Version|Extended|Original Mix|Original Version|Radio Edit|Album Version|'
-    r'Instrumental|Remix|Edit|Mix|Dub Mix|Dub|Vocal|Acoustic|Version|\(feat\.[^)]*\))[\s)\]]*',
+    r'Instrumental|Remix|Edit|Mix|Dub Mix|Dub|Vocal|Acoustic|Version|\(feat\.[^)]*\))(?![a-zA-Z])[\s)\]]*',
     re.IGNORECASE
 )
 

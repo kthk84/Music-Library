@@ -18,6 +18,26 @@ def test_normalize():
     assert normalize("Original Mix") == ""
 
 
+def test_normalize_suffix_word_boundary():
+    """Suffix keywords must match as whole words, not inside larger words.
+
+    Regression: bare 'Mix'/'Edit'/'Remix' used to match inside '(Mixed)'/'Remixed',
+    corrupting the title (e.g. 'The Beginning (Mixed)' -> 'the beginninged)') so a
+    downloaded track failed to match its Shazam entry (stayed 'available', shown purple).
+    """
+    # The corruption must not happen: the real title token must survive intact.
+    assert "beginninged" not in normalize("The Beginning (Mixed)")
+    assert normalize("The Beginning (Mixed)").startswith("the beginning")
+    assert normalize("Something Remixed") == "something remixed"
+    assert normalize("Edited Highlights") == "edited highlights"
+    # Genuine suffixes are still stripped (no regression).
+    assert normalize("Kodex (Extended Mix)") == "kodex"
+    assert normalize("Higher (Extended Mix)") == "higher"
+    assert normalize("Track (Original Mix)") == "track"
+    assert normalize("Track (feat. Someone)") == "track"
+    assert normalize("Track (Remix)") == "track"
+
+
 def test_parse_artist_title_from_filename():
     """Parse Artist - Title from filenames."""
     assert parse_artist_title_from_filename("Nova Nova - Prisoner Song.mp3") == (
