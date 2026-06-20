@@ -1392,6 +1392,12 @@ let shazamNotFound = {};
 let shazamActionPending = {};
 /** In-flight download request per track key (separate from star/search so download can queue while starring). */
 let shazamPendingDownload = {};
+/** Timestamp (ms) of the most recent download click. The poll's "server idle -> clear stuck pending"
+ *  sweep must not wipe a spinner the user just triggered: there is a ~500ms window between the click
+ *  and the worker flipping download_progress.running, during which an idle poll would otherwise clear
+ *  the pending flag and make the spinner vanish instantly (looked like "no spinner shows"). */
+let shazamLastDownloadClickAt = 0;
+const SHAZAM_DOWNLOAD_PENDING_GRACE_MS = 4000;
 /** Server download worker: which track key is actively downloading (from status download_progress). */
 let shazamDownloadProgressSnapshot = { running: false, current_key: null };
 
@@ -5508,10 +5514,16 @@ function shazamPollProgress() {
         // This avoids a confusing state where rows spin forever even though no job/queue exists.
         const dp = p.download_progress;
         const serverIdle = !p.running && !queuesNonEmpty && !(dp && dp.running);
-        if (serverIdle && (Object.keys(shazamActionPending || {}).length > 0 || Object.keys(shazamPendingDownload || {}).length > 0)) {
-            shazamBarLog('POLL', 'server idle -> clear stuck pending', { actionPending: Object.keys(shazamActionPending || {}).length, dlPending: Object.keys(shazamPendingDownload || {}).length });
+        // Grace window: a download just clicked hasn't had time to flip the worker to running yet.
+        // Clearing it now would wipe the spinner the instant it appears. Keep download-pending during
+        // the grace; only clear it once the server has been idle past the grace (genuinely stuck).
+        const dlWithinGrace = (Date.now() - shazamLastDownloadClickAt) < SHAZAM_DOWNLOAD_PENDING_GRACE_MS;
+        const hasActionPending = Object.keys(shazamActionPending || {}).length > 0;
+        const clearDownloadPending = Object.keys(shazamPendingDownload || {}).length > 0 && !dlWithinGrace;
+        if (serverIdle && (hasActionPending || clearDownloadPending)) {
+            shazamBarLog('POLL', 'server idle -> clear stuck pending', { actionPending: Object.keys(shazamActionPending || {}).length, dlPending: Object.keys(shazamPendingDownload || {}).length, clearDownloadPending });
             shazamActionPending = {};
-            shazamPendingDownload = {};
+            if (clearDownloadPending) shazamPendingDownload = {};
             if (shazamLastData) shazamScheduleRenderTrackList(shazamLastData, true);
             shazamBarUpdateActions();
         }
@@ -6470,6 +6482,7 @@ async function shazamMarkListened(key, value) {
 async function shazamDownloadTrack(key) {
     if (shazamPendingDownload[key]) return;
     shazamPendingDownload[key] = true;
+    shazamLastDownloadClickAt = Date.now();
     shazamBarUpdateActions();
     if (shazamLastData) shazamRenderTrackList(shazamLastData);
     shazamBarUpdateActions();

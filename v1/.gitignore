@@ -55,6 +55,7 @@ shazam_status_cache*.json
 shazam_mutation_log.json
 app_state.json
 shazam_skip_list.json
+.soundbridge-instance.lock
 
 # State / data caches (large, regeneratable)
 cover_cache/

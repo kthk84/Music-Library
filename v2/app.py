@@ -7140,11 +7140,72 @@ def version_switch():
 # --- /Version toggle --------------------------------------------------------
 
 
+_SINGLE_INSTANCE_LOCK_FH = None  # module-level: holds the lock for the whole process lifetime
+
+
+def _acquire_single_instance_lock():
+    """Refuse to start if another SoundBridge already runs against the same shared data dir.
+
+    Two instances at once (e.g. the supervised :5002 plus a stray `run_v2.sh` on :5003)
+    both write shazam_status_cache.json / cover_cache with stale snapshots, which silently
+    reverts per-download "have" updates, blanks covers, and slows everything down. An
+    advisory flock on a lockfile in the data dir makes the second process exit cleanly.
+
+    flock is released automatically when the holder exits, so the supervisor's sequential
+    v1<->v2 switch (old process dies, 2s gap, new process starts) keeps working. A stale
+    lock *file* never blocks — flock only conflicts with a still-live holder.
+    """
+    global _SINGLE_INSTANCE_LOCK_FH
+    import sys
+    try:
+        import fcntl
+    except ImportError:
+        return  # non-POSIX; the supervisor is the only launch path on macOS anyway
+    try:
+        from app_paths import get_project_root_for_data
+        data_dir = get_project_root_for_data(__file__)
+        lock_path = os.path.join(data_dir, '.soundbridge-instance.lock')
+        fh = open(lock_path, 'a+')
+    except Exception:
+        logging.exception("single-instance lock: could not open lock file; continuing without lock")
+        return
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        try:
+            fh.seek(0)
+            holder = fh.read().strip() or "unknown"
+        except Exception:
+            holder = "unknown"
+        fh.close()
+        sys.stderr.write(
+            "\n" + "=" * 66 + "\n"
+            "  SoundBridge is ALREADY RUNNING — refusing to start a 2nd copy.\n"
+            "  Two instances share the same state files and corrupt each other\n"
+            "  (covers blank, downloads revert to 'available', everything slows).\n"
+            f"  Existing holder: {holder}\n"
+            f"  Lock file: {lock_path}\n"
+            "  Use the running app, or stop it first (Ctrl+C in its Terminal).\n"
+            + "=" * 66 + "\n\n")
+        sys.stderr.flush()
+        sys.exit(1)
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fh.write("pid={} port={}\n".format(os.getpid(), os.environ.get('SOUNDBRIDGE_PORT', '?')))
+        fh.flush()
+    except Exception:
+        logging.debug("single-instance lock: could not write holder info", exc_info=True)
+    _SINGLE_INSTANCE_LOCK_FH = fh  # keep the handle alive so the lock is held
+
+
 if __name__ == '__main__':
     from shazam_cache import STATUS_CACHE_PATH
     import logging
     # v2: port comes from env var (default 5003 so it doesn't clash with v1 on 5002).
     _port = int(os.environ.get('SOUNDBRIDGE_PORT', '5003'))
+    # Enforce one instance per data dir BEFORE binding the port or touching state.
+    _acquire_single_instance_lock()
     logging.info("SoundBridge v2 starting on port %d", _port)
     logging.info("SoundBridge status cache (single source of truth): %s", STATUS_CACHE_PATH)
     app.run(debug=True, port=_port, host='127.0.0.1', threaded=True, use_reloader=False)
