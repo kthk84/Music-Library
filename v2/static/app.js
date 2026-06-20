@@ -3797,6 +3797,15 @@ function shazamRenderTrackList(data) {
         }
     }
     shazamPlayingBtn = foundPlaying;
+    // Re-apply the "playing" indicator (pause icon) to the matched row button. Without
+    // this, a re-render finds the button but leaves it showing the ▶ icon — so during the
+    // ~500ms status poll while a Soundeo search/compare runs, a still-playing track LOOKS
+    // stopped, and clicking it to "resume" actually toggles playback off. Playback itself
+    // never stopped (detached <audio>, served by threaded Flask); only the indicator was lost.
+    if (foundPlaying && shazamAudioEl && !shazamAudioEl.paused) {
+        foundPlaying.innerHTML = PAUSE_ICON_ROW;
+        foundPlaying.classList.add('playing');
+    }
     shazamBarUpdateActions();
     shazamNudgeHoverAfterTrackTableReplace();
     shazamRestoreSyncProgress(progressCaptured);
