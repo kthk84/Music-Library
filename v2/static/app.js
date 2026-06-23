@@ -2526,6 +2526,18 @@ let shazamFilterSearch = '';
 let shazamScanRange = 'all';
 let shazamCurrentlyPlaying = null;
 let shazamAudioEl = null;
+/** Per-playback-key "loading" state (preparing the AIFF proxy / fetching a Soundeo preview URL).
+ *  Drives a spinner on the play button that SURVIVES the ~500ms list re-renders a parallel
+ *  search/compare/download triggers. Without it, clicking play felt unresponsive — the only
+ *  feedback was textContent='…', which the next re-render wiped, so nothing visible happened. */
+let shazamPlayLoading = {};
+function shazamSetPlayBtnLoading(btn) {
+    if (!btn) return;
+    btn.innerHTML = '<span class="shazam-btn-spinner" title="Loading…"></span>';
+    btn.classList.add('shazam-play-loading');
+    btn.disabled = true;
+}
+function shazamClearPlayLoading() { shazamPlayLoading = {}; }
 /** Row play button for the currently playing track (for bar sync). */
 let shazamPlayingBtn = null;
 let shazamBarTimeUpdate = null;
@@ -3786,13 +3798,19 @@ function shazamRenderTrackList(data) {
     if (selectionBar) selectionBar.style.display = 'none';
     shazamUpdateSelectionCount();
     var foundPlaying = null;
-    if (shazamCurrentlyPlaying && shazamAudioEl) {
+    var hasPlayLoading = Object.keys(shazamPlayLoading || {}).length > 0;
+    if ((shazamCurrentlyPlaying && shazamAudioEl) || hasPlayLoading) {
         const allPlayBtns = el.querySelectorAll('.shazam-play-btn');
         for (const b of allPlayBtns) {
             const pk = shazamPlayBtnPlaybackKey(b);
-            if (pk && pk === shazamCurrentlyPlaying) {
+            if (!pk) continue;
+            if (shazamPlayLoading[pk]) {
+                // Restore the loading spinner so it survives this re-render (e.g. a parallel
+                // search/compare/download poll) — otherwise the play button reverts to ▶
+                // mid-load and the click looks like it did nothing.
+                shazamSetPlayBtnLoading(b);
+            } else if (pk === shazamCurrentlyPlaying) {
                 foundPlaying = b;
-                break;
             }
         }
     }
@@ -3854,18 +3872,24 @@ function shazamTogglePlay(btn) {
         }
         if (shazamCurrentlyPlaying === playKey) {
             shazamCancelNextBuffer();
+            shazamClearPlayLoading();
             shazamCurrentlyPlaying = null;
             shazamPlayerBarHide();
             return;
         }
         shazamCancelNextBuffer();
         releaseShazamProxy();
+        // Immediate, render-surviving feedback: spinner on the clicked button until playback starts.
+        shazamPlayLoading = {};
+        shazamPlayLoading[playKey] = true;
+        shazamSetPlayBtnLoading(btn);
 
         let playErrorAlertShown = false;
         const showPlayError = (msg) => { if (!playErrorAlertShown) { playErrorAlertShown = true; alert(msg); } };
         const resetBtn = () => {
+            shazamClearPlayLoading();
             var rowBtn = shazamPlayingBtn || btn;
-            if (rowBtn) { rowBtn.innerHTML = PLAY_ICON_ROW; rowBtn.classList.remove('playing'); }
+            if (rowBtn) { rowBtn.innerHTML = PLAY_ICON_ROW; rowBtn.classList.remove('playing', 'shazam-play-loading'); rowBtn.disabled = false; }
             shazamCurrentlyPlaying = null;
             shazamPlayingBtn = null;
             shazamPlayerBarHide();
@@ -3876,10 +3900,9 @@ function shazamTogglePlay(btn) {
         if (isAiffOrWav) {
             (async function () {
                 var activeBtn = btn;
-                activeBtn.textContent = '…';
-                activeBtn.disabled = true;
+                // Spinner already shown by shazamSetPlayBtnLoading(btn) on click; it survives re-renders.
                 const body = (dirB64 && file != null) ? { dir_b64: dirB64, file: file } : (pathB64 ? { path_b64: pathB64 } : null);
-                if (!body) { activeBtn.disabled = false; activeBtn.innerHTML = PLAY_ICON_ROW; return; }
+                if (!body) { shazamClearPlayLoading(); activeBtn.disabled = false; activeBtn.innerHTML = PLAY_ICON_ROW; activeBtn.classList.remove('shazam-play-loading'); return; }
                 try {
                     const _playCtrl = new AbortController();
                     const _playTimer = setTimeout(function () { _playCtrl.abort(); }, 90000);
@@ -3928,8 +3951,10 @@ function shazamTogglePlay(btn) {
                     shazamAudioEl.src = mp3Url;
                     shazamAudioEl.load();
                     await shazamAudioEl.play();
+                    shazamClearPlayLoading();
                     activeBtn.innerHTML = PAUSE_ICON_ROW;
                     activeBtn.classList.add('playing');
+                    activeBtn.classList.remove('shazam-play-loading');
                     activeBtn.disabled = false;
                     shazamCurrentlyPlaying = playKey;
                     shazamPlayingBtn = activeBtn;
@@ -3939,12 +3964,15 @@ function shazamTogglePlay(btn) {
                     showPlayError('Playback failed: ' + (e.message || String(e)));
                     activeBtn.disabled = false;
                     activeBtn.innerHTML = PLAY_ICON_ROW;
+                    activeBtn.classList.remove('shazam-play-loading');
+                } finally {
+                    shazamClearPlayLoading();
                 }
             })();
             return;
         }
 
-        btn.textContent = '…';
+        // Spinner already shown by shazamSetPlayBtnLoading(btn) on click; survives re-renders.
         shazamAudioEl.onerror = () => {
             resetBtn();
             fetch(streamUrl).then(function (res) {
@@ -3969,8 +3997,11 @@ function shazamTogglePlay(btn) {
         };
         shazamAudioEl.src = streamUrl;
         shazamAudioEl.play().then(() => {
+            shazamClearPlayLoading();
             btn.innerHTML = PAUSE_ICON_ROW;
             btn.classList.add('playing');
+            btn.classList.remove('shazam-play-loading');
+            btn.disabled = false;
             shazamCurrentlyPlaying = playKey;
             shazamPlayingBtn = btn;
             shazamPlayerBarShow(btn.dataset.trackLabel || '—');
@@ -4002,20 +4033,24 @@ async function shazamToggleSoundeoPlay(btn) {
     }
     if (shazamCurrentlyPlaying === trackUrl) {
         shazamCancelNextBuffer();
+        shazamClearPlayLoading();
         btn.innerHTML = PLAY_ICON_ROW;
-        btn.classList.remove('playing');
+        btn.classList.remove('playing', 'shazam-play-loading');
+        btn.disabled = false;
         shazamCurrentlyPlaying = null;
         shazamPlayerBarHide();
         return;
     }
     shazamCancelNextBuffer();
-
-    btn.textContent = '…';
-    btn.disabled = true;
+    // Immediate, render-surviving spinner while we fetch the Soundeo preview URL.
+    shazamPlayLoading = {};
+    shazamPlayLoading[trackUrl] = true;
+    shazamSetPlayBtnLoading(btn);
     var activeBtn = btn;
     const resetBtn = (errMsg) => {
+        shazamClearPlayLoading();
         activeBtn.innerHTML = PLAY_ICON_ROW;
-        activeBtn.classList.remove('playing');
+        activeBtn.classList.remove('playing', 'shazam-play-loading');
         activeBtn.disabled = false;
         if (errMsg) {
             // Surface the reason on hover so the user has *something* to read instead
@@ -4115,6 +4150,7 @@ async function shazamToggleSoundeoPlay(btn) {
         shazamAudioEl.src = streamUrl;
         shazamAudioEl.load();
         await shazamAudioEl.play();
+        shazamClearPlayLoading();
         if (activeBtn && !activeBtn.isConnected) {
             var _stk = activeBtn.dataset.trackKey || '';
             var _sfb = _stk ? shazamFindPlayBtnByTrackKey(_stk) : null;
@@ -4122,6 +4158,7 @@ async function shazamToggleSoundeoPlay(btn) {
         }
         activeBtn.innerHTML = PAUSE_ICON_ROW;
         activeBtn.classList.add('playing');
+        activeBtn.classList.remove('shazam-play-loading');
         activeBtn.disabled = false;
         // Clear any leftover error tooltip from a previous failed attempt on this row.
         const baseLabel = activeBtn.dataset.trackLabel || '';
