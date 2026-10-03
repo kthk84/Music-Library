@@ -21,6 +21,40 @@ LOCAL_SCAN_CACHE_PATH = os.path.join(_PROJECT_ROOT, "local_scan_cache.json")
 # Serialize status cache reads/writes across threads to avoid lost updates
 # (download worker vs search/star/compare background jobs).
 _STATUS_CACHE_LOCK = threading.Lock()
+# Serializes save_status_cache's read-merge-write so two concurrent saves can't
+# interleave (the later one would drop what the earlier one just wrote).
+_STATUS_SAVE_LOCK = threading.RLock()
+
+
+def mark_starred(status: Dict, key: str, value: bool, ts: Optional[float] = None) -> None:
+    """Set starred for key (+ lowercase) and stamp when. save_status_cache keeps the
+    newest stamped value per key, so a job saving an older snapshot of status can no
+    longer flip a fresh star/unstar back (seen live: a ❤ search save undid a ★)."""
+    if not key:
+        return
+    import time as _time
+    ts = _time.time() if ts is None else ts
+    starred = status.setdefault('starred', {})
+    stamps = status.setdefault('starred_ts', {})
+    for k in {key, key.lower()}:
+        starred[k] = bool(value)
+        stamps[k] = ts
+
+
+def _merge_newer_starred(out: Dict, existing: Dict) -> None:
+    """Per key, keep whichever starred value (out vs file on disk) was stamped last."""
+    ex_ts = existing.get('starred_ts') or {}
+    if not ex_ts:
+        return
+    ex_starred = existing.get('starred') or {}
+    starred = dict(out.get('starred') or {})
+    stamps = dict(out.get('starred_ts') or {})
+    for k, t in ex_ts.items():
+        if k in ex_starred and t > stamps.get(k, 0):
+            starred[k] = ex_starred[k]
+            stamps[k] = t
+    out['starred'] = starred
+    out['starred_ts'] = stamps
 
 
 def _load_json(path: str, default: Any) -> Any:
@@ -372,6 +406,12 @@ def load_status_cache() -> Optional[Dict]:
 
 
 def save_status_cache(status: Dict) -> None:
+    """Persist status (see _save_status_cache_locked). Serialized across threads."""
+    with _STATUS_SAVE_LOCK:
+        _save_status_cache_locked(status)
+
+
+def _save_status_cache_locked(status: Dict) -> None:
     """Persist compare result. Uses atomic write to prevent corrupt reads on refresh.
     Paper trail: never persist not_found for a track that has a URL (so status stays correct).
     When search_outcomes exists, urls/not_found are derived from it so batch search data is always consistent.
@@ -414,6 +454,8 @@ def save_status_cache(status: Dict) -> None:
             # keeping the persisted copy complete prevents thrash and helps any
             # other reader. This is the single write-chokepoint guard that the
             # ~40 individual save sites no longer each have to remember.
+            _merge_newer_starred(out, existing_for_merge)
+
             existing_cov = existing_for_merge.get("cover_hashes")
             if isinstance(existing_cov, dict) and existing_cov:
                 merged_cov = dict(existing_cov)

@@ -5767,7 +5767,8 @@ function _setsTrackState(artist, title) {
     const liked = !!_setsLookup(shazamMaybe, key);
     const pending = !!(shazamActionPending[key] || shazamActionPending[kl]);
     const downloadPending = !!(shazamPendingDownload[key] || shazamPendingDownload[kl]);
-    return { key, url, starred, have, shazammed, liked, pending, downloadPending };
+    const soundeoTitle = url ? (_setsLookup(shazamSoundeoTitles, key) || null) : null;
+    return { key, url, soundeoTitle, starred, have, shazammed, liked, pending, downloadPending };
 }
 
 // Light state refresh while the Sets tab is open: actions (search/star/download)
@@ -5786,6 +5787,7 @@ function setsStatePollStart() {
             const data = await res.json();
             if (data.urls) Object.assign(shazamTrackUrls, data.urls);
             if (data.starred) Object.assign(shazamStarred, data.starred);
+            if (data.soundeo_titles) Object.assign(shazamSoundeoTitles, data.soundeo_titles);
             if (data.maybe && typeof data.maybe === 'object') { shazamMaybe = Object.assign({}, data.maybe); }
             if (data.cover_hashes) shazamMergeCoverHashes(data.cover_hashes);
             shazamLastData = shazamLastData || {};
@@ -5893,7 +5895,11 @@ function setsRender() {
                     : '<td class="shazam-when">' + escapeHtml(t.start_time || '') + '</td>';
                 const startSec = t.start_time ? _setsParseTimeToSec(t.start_time) : -1;
                 html += '<tr data-track-key="' + safeAttr(st.key) + '" data-start-sec="' + startSec + '"><td>' + (i + 1) + '</td>' + timeCell;
-                html += '<td>' + badge + escapeHtml(t.artist || '—') + '</td><td>' + escapeHtml(t.title || '—') + '</td>';
+                // Found on Soundeo → link to the track page (same as Sync rows).
+                const soundeoLink = st.url
+                    ? '<div class="soundeo-source-title"><a href="' + escapeHtml(st.url) + '" target="_blank" rel="noopener" title="Open on Soundeo' + (st.soundeoTitle ? ': ' + escapeHtml(st.soundeoTitle) : '') + '">' + escapeHtml(st.soundeoTitle || 'Open on Soundeo') + '</a></div>'
+                    : '';
+                html += '<td>' + badge + escapeHtml(t.artist || '—') + '</td><td>' + escapeHtml(t.title || '—') + soundeoLink + '</td>';
                 html += playCell;
                 html += '<td class="shazam-actions-col">' + starBtn + ' ' + dlBtn + ' ' + searchBtn + '</td></tr>';
             });
@@ -5928,7 +5934,7 @@ function _setsStateFingerprint() {
     for (const s of setsCache) {
         for (const t of (s.tracks || [])) {
             const st = _setsTrackState(t.artist, t.title);
-            parts.push((st.url ? '1' : '0') + (st.starred ? '1' : '0') + (st.have ? '1' : '0') + (st.liked ? '1' : '0') + (st.pending ? '1' : '0') + (st.downloadPending ? '1' : '0'));
+            parts.push((st.url || '-') + '|' + (st.soundeoTitle || '') + '|' + (st.starred ? '1' : '0') + (st.have ? '1' : '0') + (st.liked ? '1' : '0') + (st.pending ? '1' : '0') + (st.downloadPending ? '1' : '0'));
         }
     }
     return parts.join('');

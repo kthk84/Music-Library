@@ -45,3 +45,40 @@ def test_save_does_not_resurrect_deleted_have_locally(tmp_path, monkeypatch):
     saved = json.loads(status_path.read_text())
     assert [h["title"] for h in saved["have_locally"]] == ["B"]
     assert [t["title"] for t in saved["to_download"]] == ["Qualified"]
+
+
+def _status_file(tmp_path, monkeypatch):
+    import shazam_cache as sc
+    path = tmp_path / "status.json"
+    monkeypatch.setattr(sc, "STATUS_CACHE_PATH", str(path))
+    return sc, path
+
+
+def test_stale_snapshot_save_keeps_newer_star(tmp_path, monkeypatch):
+    """Live bug: a ❤ search saved its older snapshot 2s after a ★ and flipped it back."""
+    import copy, json
+    sc, path = _status_file(tmp_path, monkeypatch)
+    key = "Charlotte de Witte - A Prayer for the Dancefloor"
+    base = {"have_locally": [], "to_download": [], "starred": {key: False, key.lower(): False}}
+    sc.save_status_cache(base)
+    stale = copy.deepcopy(base)              # search worker's snapshot, taken earlier
+    fresh = copy.deepcopy(base)
+    sc.mark_starred(fresh, key, True)        # the star lands
+    sc.save_status_cache(fresh)
+    sc.save_status_cache(stale)              # stale save arrives after
+    saved = json.loads(path.read_text())
+    assert saved["starred"][key] is True
+    assert saved["starred"][key.lower()] is True
+
+
+def test_newer_unstar_still_wins(tmp_path, monkeypatch):
+    import copy, json
+    sc, path = _status_file(tmp_path, monkeypatch)
+    key = "A - B"
+    s1 = {"have_locally": [], "to_download": []}
+    sc.mark_starred(s1, key, True, ts=100.0)
+    sc.save_status_cache(s1)
+    s2 = copy.deepcopy(s1)
+    sc.mark_starred(s2, key, False, ts=200.0)
+    sc.save_status_cache(s2)
+    assert json.loads(path.read_text())["starred"][key] is False

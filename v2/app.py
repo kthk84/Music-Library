@@ -23,6 +23,7 @@ from app_paths import get_project_root_for_data, get_resource_root
 # importable from `app` for backward compatibility with anything that imports
 # them directly — but new code should `from lib import ...` directly.
 from lib.keys import _strip_all_parens, _deep_norm_key, _track_key_norm
+from shazam_cache import mark_starred
 from lib.covers import (
     _get_cover_cache_dir,
     _cache_cover_art,
@@ -3950,8 +3951,7 @@ def _merge_crawled_favorites_into_status(status: Dict, favorites: List[Dict], fu
 
     def _store(k: str, url: Optional[str], soundeo_title: Optional[str]):
         """Set starred/url/soundeo_title under key and its lowercase; resolve track_id when url is set."""
-        status['starred'][k] = True
-        status['starred'][k.lower()] = True
+        mark_starred(status, k, True)
         if url:
             _set_url_and_track_id(status, k, url, cookies_path)
         if soundeo_title:
@@ -4007,8 +4007,7 @@ def _merge_crawled_favorites_into_status(status: Dict, favorites: List[Dict], fu
             or deep in crawled_deep_norms or deep_no_dots in crawled_deep_norms
         )
         if not in_crawl:
-            status.setdefault('starred', {})[app_key] = False
-            status['starred'][app_key.lower()] = False
+            mark_starred(status, app_key, False)
 
 
 def _run_soundeo_automation(tracks: list):
@@ -4059,8 +4058,7 @@ def _run_soundeo_automation(tracks: list):
         new_scores = results.get('soundeo_match_scores') or {}
         for k, url in new_urls.items():
             _set_url_and_track_id(status, k, url, cookies_path)
-            status.setdefault('starred', {})[k] = True
-            status['starred'][k.lower()] = True
+            mark_starred(status, k, True)
         for k, title in new_titles.items():
             status.setdefault('soundeo_titles', {})[k] = title
             status['soundeo_titles'][k.lower()] = title
@@ -4178,8 +4176,7 @@ def _run_sync_favorites_from_soundeo():
         for v in verified:
             if v.get('still_favorited') is False:
                 key = v['key']
-                status.setdefault('starred', {})[key] = False
-                status['starred'][key.lower()] = False
+                mark_starred(status, key, False)
                 newly_unstarred.append(key)
 
         # Detect mutations (compare old vs new starred state)
@@ -4259,7 +4256,7 @@ def _run_sync_single_track_browser(artist: str, title: str):
             if match_sc is not None:
                 status['soundeo_match_scores'][key] = round(match_sc, 3)
                 status['soundeo_match_scores'][key.lower()] = round(match_sc, 3)
-            status['starred'][key] = status['starred'][key.lower()] = True
+            mark_starred(status, key, True)
             app._shazam_sync_status = status
             save_status_cache(status)
             app._shazam_sync_progress = {
@@ -4330,7 +4327,7 @@ def _apply_single_search_result(artist: str, title: str, found: bool, url: str =
                     status['soundeo_match_scores'][key] = status['soundeo_match_scores'][key.lower()] = sc
                 except (TypeError, ValueError):
                     pass
-            status['starred'][key] = status['starred'][key.lower()] = bool(starred)
+            mark_starred(status, key, bool(starred))
             if cover_hash:
                 _set_cover_hash_variants(status, key, cover_hash)
             status['not_found'].pop(key, None)
@@ -4602,7 +4599,7 @@ def _run_search_soundeo_single(artist: str, title: str):
         if out:
             status.setdefault('starred', {})
             # Trust search result: we use same HTTP get_favorite_state as star/unstar, so when user unstars on Soundeo and searches again we must show unstarred
-            status['starred'][key] = status['starred'][key.lower()] = bool(starred)
+            mark_starred(status, key, bool(starred))
             # Skim-flow: a ❤ liked track whose link just landed graduates to a
             # real Soundeo star (clears like marker + maybe flag, queues star).
             if _convert_like_to_star_if_pending(status, key, artist, title, out[0], bool(starred)):
@@ -4731,8 +4728,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
                     prog['soundeo_match_scores'][current_key.lower()] = round(soundeo_match_score, 3)
                 starred_val = kwargs.get('starred')
                 if starred_val is not None:
-                    status.setdefault('starred', {})[current_key] = bool(starred_val)
-                    status['starred'][current_key.lower()] = bool(starred_val)
+                    mark_starred(status, current_key, bool(starred_val))
                     prog['starred'][current_key] = bool(starred_val)
                     prog['starred'][current_key.lower()] = bool(starred_val)
                     _search_favorite_log.info(
@@ -5129,8 +5125,7 @@ def shazam_sync_dismiss_track():
     status['dismissed'][key] = True
     if key and key.lower() != key:
         status['dismissed'][key.lower()] = True
-    status.setdefault('starred', {})
-    status['starred'][key] = False
+    mark_starred(status, key, False)
     app._shazam_sync_status = status
     save_status_cache(status)
 
@@ -5178,9 +5173,7 @@ def _unstar_one_track_impl(key: str, track_url: str):
     soundeo_ok = bool(soundeo_result and soundeo_result.get('ok'))
     if soundeo_result and soundeo_result.get('ok') and track_url and cookies_path:
         _verify_soundeo_favorite_state(track_url, cookies_path, expected_favored=False, key=key)
-    status.setdefault('starred', {})
-    status['starred'][key] = False
-    status['starred'][key.lower()] = False
+    mark_starred(status, key, False)
     app._shazam_sync_status = status
     save_status_cache(status)
     return soundeo_ok
@@ -5538,8 +5531,7 @@ def shazam_sync_undismiss_track():
     if key:
         dismissed.pop(key.lower(), None)
     status['dismissed'] = dismissed
-    status.setdefault('starred', {})
-    status['starred'][key] = True
+    mark_starred(status, key, True)
     app._shazam_sync_status = status
     save_status_cache(status)
 
@@ -5635,9 +5627,7 @@ def _star_one_track_impl(key: str, track_url: str, artist: str, title: str) -> T
         if verify_url:
             _verify_soundeo_favorite_state(verify_url, cookies_path, expected_favored=True, key=key)
 
-    status.setdefault('starred', {})
-    status['starred'][key] = True
-    status['starred'][key.lower()] = True
+    mark_starred(status, key, True)
     app._shazam_sync_status = status
     save_status_cache(status)
     return soundeo_ok, (new_url or track_url)
@@ -6064,12 +6054,8 @@ def shazam_sync_remove_from_soundeo():
     # Update local status: mark track as not starred and persist
     from shazam_cache import load_status_cache, save_status_cache
     status = dict(load_status_cache() or getattr(app, '_shazam_sync_status', None) or {})
-    starred = dict(status.get('starred') or {})
     if track_key:
-        starred[track_key] = False
-        if isinstance(track_key, str):
-            starred[track_key.lower()] = False
-        status['starred'] = starred
+        mark_starred(status, track_key, False)
         app._shazam_sync_status = status
         save_status_cache(status)
     return jsonify({'ok': True, 'message': 'Removed from Soundeo favorites', 'track_key': track_key or None})

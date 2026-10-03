@@ -57,7 +57,7 @@ STATUS_REQUIRED_KEYS: Set[str] = {
 # Fields that are valid but not always present.
 STATUS_OPTIONAL_KEYS: Set[str] = {
     "local_count", "to_download_count", "skipped_tracks", "folder_stats",
-    "starred", "soundeo_titles", "soundeo_match_scores", "track_ids",
+    "starred", "starred_ts", "soundeo_titles", "soundeo_match_scores", "track_ids",
     "dismissed", "dismissed_manual_check", "cover_hashes", "download_filepaths",
     "download_progress", "scan_progress", "download_queue", "download_last_run",
     "compare_running", "message", "error",
@@ -75,6 +75,7 @@ _EXPECTED_TYPES: Dict[str, type] = {
     "folder_stats": list,
     "urls": dict,
     "starred": dict,
+    "starred_ts": dict,
     "soundeo_titles": dict,
     "soundeo_match_scores": dict,
     "track_ids": dict,
