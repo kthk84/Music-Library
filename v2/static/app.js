@@ -5776,28 +5776,46 @@ function _setsTrackState(artist, title) {
 // the Sets rows' buttons (link found → ▶/★/⬇ unlock, star fills, ⬇ becomes ✓)
 // in sync without the user leaving the tab. Stopped when the tab is left.
 let _setsStatePollInterval = null;
+let _setsStateRefreshInFlight = false;
+/** One /status fetch → merge into the live maps → re-render the Sets rows when
+ * anything they show changed. Used by the 5s poll, on tab open and in quick
+ * bursts after a ★/❤ click so the result shows as soon as it lands. */
+async function setsStateRefresh() {
+    const panel = document.getElementById('tab-panel-sets');
+    if (!panel || !panel.classList.contains('active')) return;
+    if (_setsStateRefreshInFlight) return;
+    _setsStateRefreshInFlight = true;
+    try {
+        const res = await fetch('/api/shazam-sync/status');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.urls) Object.assign(shazamTrackUrls, data.urls);
+        if (data.starred) Object.assign(shazamStarred, data.starred);
+        if (data.soundeo_titles) Object.assign(shazamSoundeoTitles, data.soundeo_titles);
+        if (data.maybe && typeof data.maybe === 'object') { shazamMaybe = Object.assign({}, data.maybe); }
+        if (data.cover_hashes) shazamMergeCoverHashes(data.cover_hashes);
+        shazamLastData = shazamLastData || {};
+        if (data.have_locally) shazamLastData.have_locally = data.have_locally;
+        if (data.to_download) shazamLastData.to_download = data.to_download;
+        // Re-render only when the state relevant to the visible rows actually
+        // changed — an unconditional rebuild every 5s would wipe the playing
+        // ▶/⏸ state and hover, and cause needless churn.
+        if (_setsStateFingerprint() !== _setsLastFingerprint) setsRender();
+    } catch (e) { /* transient */ } finally {
+        _setsStateRefreshInFlight = false;
+    }
+}
+/** After a ★/❤ click: re-check at short intervals for ~15s (search + star take a few seconds). */
+function setsStateRefreshBurst() {
+    [1500, 3000, 5000, 8000, 12000, 16000].forEach(ms => setTimeout(setsStateRefresh, ms));
+}
 function setsStatePollStart() {
     if (_setsStatePollInterval) return;
-    _setsStatePollInterval = setInterval(async () => {
+    setsStateRefresh();
+    _setsStatePollInterval = setInterval(() => {
         const panel = document.getElementById('tab-panel-sets');
         if (!panel || !panel.classList.contains('active')) { setsStatePollStop(); return; }
-        try {
-            const res = await fetch('/api/shazam-sync/status');
-            if (!res.ok) return;
-            const data = await res.json();
-            if (data.urls) Object.assign(shazamTrackUrls, data.urls);
-            if (data.starred) Object.assign(shazamStarred, data.starred);
-            if (data.soundeo_titles) Object.assign(shazamSoundeoTitles, data.soundeo_titles);
-            if (data.maybe && typeof data.maybe === 'object') { shazamMaybe = Object.assign({}, data.maybe); }
-            if (data.cover_hashes) shazamMergeCoverHashes(data.cover_hashes);
-            shazamLastData = shazamLastData || {};
-            if (data.have_locally) shazamLastData.have_locally = data.have_locally;
-            if (data.to_download) shazamLastData.to_download = data.to_download;
-            // Re-render only when the state relevant to the visible rows actually
-            // changed — an unconditional rebuild every 5s would wipe the playing
-            // ▶/⏸ state and hover, and cause needless churn.
-            if (_setsStateFingerprint() !== _setsLastFingerprint) setsRender();
-        } catch (e) { /* transient */ }
+        setsStateRefresh();
     }, 5000);
 }
 function setsStatePollStop() {
@@ -6215,6 +6233,7 @@ async function setsLikeTrack(btn) {
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) throw new Error(data.error || 'Like failed');
+        setsStateRefreshBurst();
     } catch (e) {
         if (nowLiked) delete shazamMaybe[key]; else shazamMaybe[key] = true;
         setsRender();
@@ -6449,6 +6468,7 @@ document.addEventListener('DOMContentLoaded', function () {
         }
         if (btn.closest('.sets-track-table') && typeof setsRender === 'function') {
             setsRender();
+            setsStateRefreshBurst();
         }
     });
 });

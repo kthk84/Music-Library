@@ -1829,6 +1829,23 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
     # Tracks downloaded through the app have exact filepath stored — check those first.
     dl_paths = status.get('download_filepaths') or {}
 
+    # This runs on every /status poll (every 5s per open tab) and fuzzy-matching
+    # ~1.7k tracks took ~3.5s, which made stars/links appear late after a refresh.
+    # Skip it when nothing it depends on changed since the last run found nothing.
+    from shazam_cache import LOCAL_SCAN_CACHE_PATH
+    try:
+        scan_mtime = os.path.getmtime(LOCAL_SCAN_CACHE_PATH)
+    except OSError:
+        scan_mtime = 0
+    sig = (
+        scan_mtime,
+        hash(tuple(_track_key_norm(t) for t in to_dl)),
+        hash(tuple(sorted((str(k), str(v)) for k, v in dl_paths.items()))),
+        len(status.get('have_locally') or []),
+    )
+    if getattr(app, '_reconcile_noop_sig', None) == sig:
+        return status
+
     local_cache = load_local_scan_cache()
     local_tracks = (local_cache.get('tracks') or []) if local_cache else []
     tw_idx = ex_map = lc = None
@@ -1885,6 +1902,7 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
             remaining_to_dl.append(t)
 
     if not changed:
+        app._reconcile_noop_sig = sig
         return status
 
     out = dict(status)
