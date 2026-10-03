@@ -5754,10 +5754,10 @@ function _setsTrackState(artist, title) {
     const kl = key.toLowerCase();
     const url = _setsLookup(shazamTrackUrls, key) || null;
     const starred = !!_setsLookup(shazamStarred, key);
-    let have = false, shazammed = false;
+    let have = false, shazammed = false, haveFilepath = '';
     const d = shazamLastData || {};
     for (const t of (d.have_locally || [])) {
-        if ((`${t.artist} - ${t.title}`).toLowerCase() === kl) { have = true; shazammed = true; break; }
+        if ((`${t.artist} - ${t.title}`).toLowerCase() === kl) { have = true; shazammed = true; haveFilepath = t.filepath || ''; break; }
     }
     if (!shazammed) {
         for (const t of [...(d.to_download || []), ...(d.skipped_tracks || [])]) {
@@ -5768,9 +5768,10 @@ function _setsTrackState(artist, title) {
     const pending = !!(shazamActionPending[key] || shazamActionPending[kl]);
     // Set tracks outside the Shazam list: "have" comes from the local-folder match.
     if (!have && (setsLocalMatches[key] || setsLocalMatches[kl])) have = true;
+    if (have && !haveFilepath) haveFilepath = setsLocalMatches[key] || setsLocalMatches[kl] || '';
     const downloadPending = !!(shazamPendingDownload[key] || shazamPendingDownload[kl]);
     const soundeoTitle = url ? (_setsLookup(shazamSoundeoTitles, key) || null) : null;
-    return { key, url, soundeoTitle, starred, have, shazammed, liked, pending, downloadPending };
+    return { key, url, soundeoTitle, starred, have, haveFilepath, shazammed, liked, pending, downloadPending };
 }
 
 // Light state refresh while the Sets tab is open: actions (search/star/download)
@@ -5910,7 +5911,8 @@ function setsRender() {
                 const dlBtn = st.downloadPending
                     ? '<button type="button" class="shazam-row-action-btn" disabled aria-busy="true" title="Downloading…"><span class="shazam-btn-spinner" role="status" aria-label="Downloading"></span></button>'
                     : st.have
-                    ? '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Already in your local library">✓</button>'
+                    // Have it → solid black (same button as Sync rows); click: download again / show locally.
+                    ? '<button type="button" class="shazam-row-action-btn shazam-download-action shazam-download-have" data-action="download" data-key="' + safeAttr(st.key) + '"' + (st.haveFilepath ? ' data-path-b64="' + safeAttr(shazamPathB64FromFilepath(st.haveFilepath)) + '"' : '') + ' title="Have locally — click: Download again or Show locally">' + shazamSvgDownloadHaveWhite(17) + '</button>'
                     : (st.url
                         ? '<button type="button" class="shazam-row-action-btn" data-action="download" data-key="' + safeAttr(st.key) + '" title="Download AIFF from Soundeo">' + dlSvg + '</button>'
                         : '<button type="button" class="shazam-row-action-btn' + inactive + '" disabled title="Search first">' + dlSvg + '</button>');
