@@ -1847,15 +1847,29 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
     )
     if getattr(app, '_reconcile_noop_sig', None) == sig:
         return status
+    # Per-track memo of "no local file" (valid while the local scan is unchanged):
+    # during a Search-all every result changes the signature above, and redoing
+    # ~1.7k fuzzy matches per /status poll cost ~3s each time.
+    nomatch_memo = getattr(app, '_reconcile_nomatch', None)
+    if not nomatch_memo or nomatch_memo.get('scan') != scan_mtime:
+        nomatch_memo = {'scan': scan_mtime, 'keys': set()}
+        app._reconcile_nomatch = nomatch_memo
+    nomatch = nomatch_memo['keys']
 
-    local_cache = load_local_scan_cache()
-    local_tracks = (local_cache.get('tracks') or []) if local_cache else []
-    tw_idx = ex_map = lc = None
-    if local_tracks:
-        try:
-            _, tw_idx, ex_map, lc = compute_to_download([], local_tracks)
-        except Exception:
-            logging.debug("silent except at app.py:1721", exc_info=True)
+    # Local-file index: built once per local scan, not on every poll.
+    idx = getattr(app, '_local_index_cache', None)
+    if not idx or idx[0] != scan_mtime:
+        local_cache = load_local_scan_cache()
+        local_tracks = (local_cache.get('tracks') or []) if local_cache else []
+        tw_idx = ex_map = lc = None
+        if local_tracks:
+            try:
+                _, tw_idx, ex_map, lc = compute_to_download([], local_tracks)
+            except Exception:
+                logging.debug("silent except at app.py:1721", exc_info=True)
+        idx = (scan_mtime, local_tracks, tw_idx, ex_map, lc)
+        app._local_index_cache = idx
+    _, local_tracks, tw_idx, ex_map, lc = idx
 
     have = list(status.get('have_locally') or [])
     have_keys = {_track_key_norm(h) for h in have}
@@ -1884,6 +1898,10 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
 
         # Slow path: fuzzy-match against local scan cache (for files not downloaded via app).
         match = None
+        memo_key = (_track_key_norm(t), soundeo_titles.get(track_key) or soundeo_titles.get(track_key.lower()) or '')
+        if memo_key in nomatch:
+            remaining_to_dl.append(t)
+            continue
         if local_tracks and tw_idx is not None:
             try:
                 match, _ = _find_matching_local_track(t, local_tracks, title_word_index=tw_idx, exact_match_map=ex_map, local_canon=lc)
@@ -1916,6 +1934,7 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
             changed = True
             logging.info('_reconcile (fuzzy): moved %s to have_locally (file: %s)', _track_key_norm(t), match['filepath'])
         else:
+            nomatch.add(memo_key)
             remaining_to_dl.append(t)
 
     if not changed:
@@ -2131,6 +2150,20 @@ def _cover_backfill_status() -> Dict:
     }
 
 
+def _status_memo_key() -> tuple:
+    """mtimes of every file the derived /status payload is built from."""
+    from shazam_cache import STATUS_CACHE_PATH, SKIP_LIST_PATH, SHAZAM_CACHE_PATH, LOCAL_SCAN_CACHE_PATH
+    from lib.covers import _get_cover_cache_dir
+
+    def _m(path: str) -> int:
+        try:
+            return os.stat(path).st_mtime_ns
+        except OSError:
+            return 0
+    return tuple(_m(p) for p in (STATUS_CACHE_PATH, SKIP_LIST_PATH, SHAZAM_CACHE_PATH,
+                                 LOCAL_SCAN_CACHE_PATH, _get_cover_cache_dir()))
+
+
 def _auto_rescan_changed_folders() -> None:
     """Pick up files added outside the app (e.g. downloaded on soundeo.com into
     ~/Downloads) without a manual rescan: when a scanned folder changed after the
@@ -2168,9 +2201,20 @@ def shazam_sync_status():
         _auto_rescan_changed_folders()
     except Exception:
         logging.exception("auto-rescan check failed")
-    out = _get_best_available_status()
+    # The derived status (lowercase/deep key aliases, disk cover overlay) only
+    # changes when one of its source files does; rebuilding it cost ~0.25s per
+    # poll, every 5s per open tab, competing with search workers for the GIL.
+    # Reuse it while those files are unchanged (max 20s, so the have_locally
+    # file-exists sanitize still runs regularly).
+    memo_key = _status_memo_key()
+    memo = getattr(app, '_status_memo', None)
+    if memo and memo[0] == memo_key and time.time() - memo[1] < 20:
+        out = dict(memo[2])
+    else:
+        out = _get_best_available_status()
+        _overlay_disk_cover_hashes(out)
+        app._status_memo = (_status_memo_key(), time.time(), dict(out))
     out['compare_running'] = compare_running
-    _overlay_disk_cover_hashes(out)
     out['cover_backfill'] = _cover_backfill_status()
     # Self-heal #3: auto-trigger Soundeo backfill if a small number of url-keys
     # lack covers (newly-Shazammed tracks since the last bulk run that didn't
@@ -4513,6 +4557,20 @@ def _run_search_single_http_drainer():
                     'message': f"Search failed: {key}",
                 }
                 continue
+            if key in (out.get('busy_keys') or []):
+                # Soundeo answered "busy" even after backing off: don't record a
+                # false not-found; retry at the back of the queue (twice at most).
+                tries = int(item.get('busy_tries') or 0) + 1
+                if tries <= 2 and lock:
+                    with lock:
+                        q = getattr(app, '_shazam_single_search_queue', None) or []
+                        q.append(dict(item, busy_tries=tries))
+                        app._shazam_single_search_queue = q
+                app._shazam_sync_progress = {
+                    'running': True, 'mode': 'search_single', 'key': key, 'current_key': key,
+                    'done': 0, 'failed': 0, 'message': f"Soundeo busy, retrying later: {key}",
+                }
+                continue
             urls = out.get('urls') or {}
             url = urls.get(key) or urls.get(key.lower()) or ''
             titles = out.get('soundeo_titles') or {}
@@ -4794,6 +4852,23 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
     not_found = status.get('not_found') or {}
     skip_keys = set(urls.keys())
 
+    # 'Search all' after a restart (or a second run the same day) must not redo the
+    # tracks that just came back not-found: skip not-found outcomes < 24h old.
+    # 'unfound' mode is the explicit retry and still searches them.
+    recent_nf = set()
+    if search_mode is None:
+        from datetime import datetime, timedelta
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        for o in status.get('search_outcomes') or []:
+            if o.get('a') != 'n':
+                continue
+            try:
+                when = datetime.strptime((o.get('t') or '')[:19], '%Y-%m-%dT%H:%M:%S')
+            except ValueError:
+                continue
+            if when >= cutoff:
+                recent_nf.add((o.get('k') or '').lower())
+
     tracks = []
     seen = set()
     for t in (status.get('to_download') or []) + (status.get('have_locally') or []):
@@ -4803,6 +4878,8 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
             continue
         seen.add(k_lower)
         if k in skip_keys or k_lower in skip_keys:
+            continue
+        if k_lower in recent_nf:
             continue
         in_not_found = k in not_found or k_lower in not_found
         if search_mode == 'unfound' and not in_not_found:
@@ -4821,17 +4898,32 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
         app._shazam_sync_progress = {'running': False, 'message': msg, 'done': 0, 'total': 0}
         return
 
+    last_save = {'t': 0.0}
+
+    def _save_throttled(force: bool = False) -> None:
+        # One 4MB status rewrite per track made a batch crawl (and starved the
+        # /status polls). Outcomes stay in memory and flush every few seconds.
+        if force or time.time() - last_save['t'] >= 3.0:
+            save_status_cache(status)
+            last_save['t'] = time.time()
+
+    def _recent(d: Dict, n: int = 300) -> Dict:
+        # The page merges these maps on every 0.5s poll; sending every result so
+        # far grew to ~200KB per poll. Recent entries are enough (full maps in
+        # the final payload and in /status).
+        return dict(list(d.items())[-n:]) if len(d) > n else dict(d)
+
     def on_progress(current: int, total: int, msg: str, url: Optional[str], current_key: Optional[str] = None, **kwargs):
         existing = getattr(app, '_shazam_sync_progress', None) or {}
         prog = {
             'running': True, 'current': current, 'total': total, 'message': msg,
             'last_url': url, 'mode': 'search_global', 'search_mode': search_mode,
-            'urls': dict(existing.get('urls', {})),
-            'not_found': dict(existing.get('not_found', {})),
-            'soundeo_titles': dict(existing.get('soundeo_titles', {})),
-            'soundeo_match_scores': dict(existing.get('soundeo_match_scores', {})),
-            'starred': dict(existing.get('starred', {})),
-            'cover_hashes': dict(existing.get('cover_hashes', {})),
+            'urls': _recent(existing.get('urls', {})),
+            'not_found': _recent(existing.get('not_found', {})),
+            'soundeo_titles': _recent(existing.get('soundeo_titles', {})),
+            'soundeo_match_scores': _recent(existing.get('soundeo_match_scores', {})),
+            'starred': _recent(existing.get('starred', {})),
+            'cover_hashes': _recent(existing.get('cover_hashes', {})),
         }
         if current_key is not None:
             prog['current_key'] = current_key
@@ -4883,7 +4975,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
                     except Exception as _ce:
                         logging.debug('search_global cover cache failed for %s: %s', current_key, _ce)
                 try:
-                    save_status_cache(status)
+                    _save_throttled()
                 except Exception as _se:
                     logging.warning('save_status_cache failed after found result for %s: %s', current_key, _se)
                 prog['urls'][current_key] = url
@@ -4891,7 +4983,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
             elif 'Not found' in msg or 'not found' in msg.lower():
                 log_search_outcome(current_key, found=False, status_to_update=status)
                 try:
-                    save_status_cache(status)
+                    _save_throttled()
                 except Exception as _se:
                     logging.warning('save_status_cache failed after not-found result for %s: %s', current_key, _se)
                 prog['not_found'][current_key] = True
@@ -4916,12 +5008,14 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
             'urls': {}, 'not_found': {}, 'soundeo_titles': {}, 'soundeo_match_scores': {}, 'starred': {},
         }
         if use_http:
-            result = run_search_tracks_http(tracks, cookies_path, on_progress=on_progress, skip_keys=skip_keys)
+            result = run_search_tracks_http(tracks, cookies_path, on_progress=on_progress, skip_keys=skip_keys,
+                                            workers=_SEARCH_HTTP_MAX_PARALLEL)
         else:
             result = run_search_tracks(
                 tracks, cookies_path, headed=headed,
                 on_progress=on_progress, skip_keys=skip_keys,
             )
+        _save_throttled(force=True)  # flush outcomes buffered since the last timed save
         if result.get('error'):
             app._shazam_sync_progress = {'running': False, 'error': result['error'], 'mode': 'search_global'}
             return
@@ -7326,5 +7420,17 @@ if __name__ == '__main__':
     _acquire_single_instance_lock()
     logging.info("SoundBridge v2 starting on port %d", _port)
     logging.info("SoundBridge status cache (single source of truth): %s", STATUS_CACHE_PATH)
-    app.run(debug=True, port=_port, host='127.0.0.1', threaded=True, use_reloader=False)
+    # Build the derived /status payload (local-file index, match memo, key
+    # aliases) in the background so the first page load after a start doesn't
+    # wait ~3s for it.
+    def _warm_status():
+        try:
+            with app.test_request_context():
+                shazam_sync_status()
+        except Exception:
+            logging.exception("status warm-up failed")
+    threading.Thread(target=_warm_status, daemon=True).start()
+    # Debug mode slowed every request and exposed the Werkzeug debugger (code
+    # execution from the browser) on localhost. Opt in with SOUNDBRIDGE_DEBUG=1.
+    app.run(debug=os.environ.get('SOUNDBRIDGE_DEBUG') == '1', port=_port, host='127.0.0.1', threaded=True, use_reloader=False)
 

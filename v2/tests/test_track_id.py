@@ -92,3 +92,21 @@ def test_named_remix_conflict():
     assert not c("X (Marsh Remix)", "X (Marsh Extended Remix)")
     assert not c("NY Lipps (feat. Nancy Whang) [Kawazaki Dub]", "NY Lipps (feat. Nancy Whang) (Kawazaki Dub)")
     assert not c("Destination", "Destination (Original Mix)")
+
+
+def test_stale_snapshot_keeps_other_search_outcomes(tmp_path, monkeypatch):
+    """A batch search saving its old snapshot must not drop a ❤ search's link."""
+    import copy, json
+    sc, path = _status_file(tmp_path, monkeypatch)
+    base = {"have_locally": [], "to_download": [], "urls": {}, "search_outcomes": []}
+    sc.save_status_cache(base)
+    batch = copy.deepcopy(base)                       # batch worker's snapshot
+    single = sc.load_status_cache()
+    sc.log_search_outcome("Heart - Track", found=True, url="https://soundeo.com/track/heart-track-1.html",
+                          status_to_update=single)
+    sc.save_status_cache(single)                      # ❤ search lands
+    sc.log_search_outcome("Batch - Track", found=False, status_to_update=batch)
+    sc.save_status_cache(batch)                       # stale batch save
+    saved = json.loads(path.read_text())
+    assert saved["urls"].get("Heart - Track") == "https://soundeo.com/track/heart-track-1.html"
+    assert {o["k"] for o in saved["search_outcomes"]} == {"Heart - Track", "Batch - Track"}

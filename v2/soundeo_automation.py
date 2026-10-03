@@ -1651,17 +1651,29 @@ def run_search_tracks(
     return results
 
 
+# Process-wide pause after Soundeo answered "busy" (empty results): parallel
+# workers and the single/heart searches all wait it out together.
+_SEARCH_BACKOFF = {"until": 0.0}
+_SEARCH_BACKOFF_LOCK = threading.Lock()
+
+
 def run_search_tracks_http(
     tracks: List[Dict[str, str]],
     cookies_path: str,
     on_progress: Optional[Callable[[int, int, str, Optional[str]], None]] = None,
     skip_keys: Optional[set] = None,
+    workers: int = 1,
 ) -> Dict:
     """
     Search Soundeo for each track via HTTP (no browser). Same contract as run_search_tracks:
     returns {done, failed, urls, soundeo_titles, error?, stopped}. Does not favorite.
     Use when browser/Selenium path fails or to avoid opening Chrome.
+    workers > 1 searches that many tracks at once (each worker keeps the 0.8s pause
+    between its own requests); on_progress calls and result merges are serialized.
     """
+    import threading as _threading
+    from concurrent.futures import ThreadPoolExecutor
+
     global _sync_stop_requested
     clear_sync_stop_request()
     skip_keys = skip_keys or set()
@@ -1670,31 +1682,62 @@ def run_search_tracks_http(
     if not os.path.exists(os.path.abspath(cookies_path)):
         return {"error": "No saved session. Save Soundeo session first in Settings."}
 
-    for i, t in enumerate(tracks):
+    total = len(tracks)
+    lock = _threading.Lock()
+    counter = {"n": 0}
+    results["busy_keys"] = []
+    # Soundeo answers an over-eager client with an EMPTY result list (a real
+    # no-match returns its default chart instead). Treating empty as "not found"
+    # marked ~1 in 4 findable tracks as missing during parallel runs. Empty =
+    # busy: every worker backs off together, then the query is retried.
+    backoff = _SEARCH_BACKOFF  # shared by every search in the process
+
+    def _search_with_retry(q: str):
+        for attempt in range(4):
+            wait = backoff["until"] - time.time()
+            if wait > 0:
+                time.sleep(wait)
+            try:
+                found = soundeo_api_search(q, cookies_path)
+            except Exception:
+                found = []
+            if found:
+                return found
+            if attempt < 3:
+                with _SEARCH_BACKOFF_LOCK:
+                    backoff["until"] = max(backoff["until"], time.time() + 2.0 * (2 ** attempt))
+        return None  # still empty: Soundeo busy (or unreachable), not "no match"
+
+    def _report(msg, url, key, **kwargs):
+        if on_progress:
+            on_progress(counter["n"], total, msg, url, key, **kwargs)
+
+    def _search_one(t: Dict[str, str]) -> None:
         if _sync_stop_requested:
-            results["stopped"] = True
-            if on_progress:
-                on_progress(i, len(tracks), "Stopped by user", None, None)
-            break
+            with lock:
+                results["stopped"] = True
+            return
         artist = t.get("artist", "")
         title = t.get("title", "")
         key = f"{artist} - {title}"
         key_lower = key.lower()
         if key in skip_keys or key_lower in skip_keys:
-            if on_progress:
-                on_progress(i + 1, len(tracks), f"Skipped (already found): {artist} - {title}", None, key)
-            continue
+            with lock:
+                counter["n"] += 1
+                _report(f"Skipped (already found): {artist} - {title}", None, key)
+            return
 
-        if on_progress:
-            on_progress(i + 1, len(tracks), f"Searching: {artist} - {title}", None, key)
+        with lock:
+            _report(f"Searching: {artist} - {title}", None, key)
         best_url = None
         best_title = None
         best_score = -1
         best_cover_url = None
+        busy = False
         for q in _search_queries(artist, title):
-            try:
-                search_results = soundeo_api_search(q, cookies_path)
-            except Exception:
+            search_results = _search_with_retry(q)
+            if search_results is None:
+                busy = True
                 continue
             for r in search_results[:15]:
                 score = _best_match_score({}, r["title"], artist, title) + _extended_preference_bonus(r["title"])
@@ -1705,39 +1748,55 @@ def run_search_tracks_http(
                     best_cover_url = r.get("cover_url")
 
         if best_url and best_score >= _MATCH_THRESHOLD:
-            results["done"] += 1
-            results["urls"][key] = best_url
-            results["soundeo_titles"][key] = best_title or key
-            results["soundeo_match_scores"][key] = round(best_score, 3)
-            if best_cover_url:
-                results["cover_urls"][key] = best_cover_url
             starred_val = None
             try:
                 starred_val = soundeo_api_get_favorite_state(best_url, cookies_path)
             except Exception:
                 logging.debug("silent except at soundeo_automation.py:1718", exc_info=True)
-            if starred_val is not None:
-                results["starred"][key] = bool(starred_val)
-                results["starred"][key.lower()] = bool(starred_val)
-            if on_progress:
+            with lock:
+                counter["n"] += 1
+                results["done"] += 1
+                results["urls"][key] = best_url
+                results["soundeo_titles"][key] = best_title or key
+                results["soundeo_match_scores"][key] = round(best_score, 3)
+                if best_cover_url:
+                    results["cover_urls"][key] = best_cover_url
+                if starred_val is not None:
+                    results["starred"][key] = bool(starred_val)
+                    results["starred"][key.lower()] = bool(starred_val)
                 kwargs = {
                     "soundeo_title": best_title or key,
                     "soundeo_match_score": round(best_score, 3),
                 }
                 if starred_val is not None:
                     kwargs["starred"] = bool(starred_val)
-                on_progress(
-                    i + 1, len(tracks), f"Found: {artist} - {title}", best_url, key,
-                    **kwargs,
-                )
+                _report(f"Found: {artist} - {title}", best_url, key, **kwargs)
+        elif busy:
+            # No reliable answer: leave the track unsearched so a later run retries it.
+            with lock:
+                counter["n"] += 1
+                results["busy_keys"].append(key)
+                _report(f"Soundeo busy, retry later: {artist} - {title}", None, key)
         else:
-            results["failed"] += 1
-            results["errors"].append(f"Not found: {artist} - {title}")
-            if on_progress:
-                on_progress(i + 1, len(tracks), f"Not found: {artist} - {title}", None, key)
+            with lock:
+                counter["n"] += 1
+                results["failed"] += 1
+                results["errors"].append(f"Not found: {artist} - {title}")
+                _report(f"Not found: {artist} - {title}", None, key)
 
         time.sleep(0.8)
 
+    if workers <= 1:
+        for t in tracks:
+            if _sync_stop_requested:
+                results["stopped"] = True
+                break
+            _search_one(t)
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_search_one, tracks))
+    if results["stopped"] and on_progress:
+        on_progress(counter["n"], total, "Stopped by user", None, None)
     return results
 
 

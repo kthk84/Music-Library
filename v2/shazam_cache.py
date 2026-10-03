@@ -456,6 +456,17 @@ def _save_status_cache_locked(status: Dict) -> None:
             # ~40 individual save sites no longer each have to remember.
             _merge_newer_starred(out, existing_for_merge)
 
+            # search_outcomes is append-only: a long job saving its older snapshot
+            # must not drop outcomes other actions (❤/🔍 single searches) logged
+            # meanwhile, or their urls vanish on the replay below.
+            disk_log = existing_for_merge.get("search_outcomes") or []
+            if disk_log and out.get("search_outcomes") is not None:
+                mine = out.get("search_outcomes") or []
+                seen = {(o.get("t"), o.get("k"), o.get("a")) for o in mine if isinstance(o, dict)}
+                extra = [o for o in disk_log if isinstance(o, dict) and (o.get("t"), o.get("k"), o.get("a")) not in seen]
+                if extra:
+                    out["search_outcomes"] = sorted(mine + extra, key=lambda o: o.get("t") or "")
+
             existing_cov = existing_for_merge.get("cover_hashes")
             if isinstance(existing_cov, dict) and existing_cov:
                 merged_cov = dict(existing_cov)
