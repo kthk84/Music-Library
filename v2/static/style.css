@@ -2520,11 +2520,9 @@ button[onclick*="revertLookup"] {
     cursor: default;
     pointer-events: none;
 }
-/* Star and download buttons: black (solid and outline) when active for prominence */
+/* Star: black when active for prominence. Download: light while you don't have the
+   track; solid black (.shazam-download-have below) once you do (Keith, 2026-10-03). */
 .shazam-star-action:not(.shazam-row-action-inactive) {
-    color: #1a1a1a;
-}
-.shazam-download-action:not(.shazam-row-action-inactive) {
     color: #1a1a1a;
 }
 .shazam-download-action.shazam-download-have:not(:disabled) {

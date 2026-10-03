@@ -1828,6 +1828,7 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
 
     # Tracks downloaded through the app have exact filepath stored — check those first.
     dl_paths = status.get('download_filepaths') or {}
+    soundeo_titles = status.get('soundeo_titles') or {}
 
     # This runs on every /status poll (every 5s per open tab) and fuzzy-matching
     # ~1.7k tracks took ~3.5s, which made stars/links appear late after a refresh.
@@ -1842,6 +1843,7 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
         hash(tuple(_track_key_norm(t) for t in to_dl)),
         hash(tuple(sorted((str(k), str(v)) for k, v in dl_paths.items()))),
         len(status.get('have_locally') or []),
+        len(soundeo_titles),
     )
     if getattr(app, '_reconcile_noop_sig', None) == sig:
         return status
@@ -1887,6 +1889,21 @@ def _reconcile_to_download_with_local_cache(status: Dict) -> Dict:
                 match, _ = _find_matching_local_track(t, local_tracks, title_word_index=tw_idx, exact_match_map=ex_map, local_canon=lc)
             except Exception:
                 logging.debug("silent except at app.py:1752", exc_info=True)
+        # The file downloaded from the linked Soundeo page is named after the Soundeo
+        # title, which can differ from the Shazam title (e.g. Shazam "Regal Remix",
+        # Soundeo match "Shall Ocin Remix"). That file is the track the user picked.
+        if not (match and match.get('filepath')) and local_tracks and tw_idx is not None:
+            so_title = soundeo_titles.get(track_key) or soundeo_titles.get(track_key.lower()) or ''
+            if ' - ' in so_title:
+                so_artist, so_name = so_title.split(' - ', 1)
+                try:
+                    m2, sc2 = _find_matching_local_track({'artist': so_artist, 'title': so_name}, local_tracks,
+                                                         title_word_index=tw_idx, exact_match_map=ex_map,
+                                                         local_canon=lc, strict_remix=True)
+                    if m2 and (sc2 or 0) >= 0.95:
+                        match = m2
+                except Exception:
+                    logging.debug("soundeo-title reconcile failed", exc_info=True)
         if match and match.get('filepath') and os.path.exists(match['filepath']):
             item = {'artist': t['artist'], 'title': t['title']}
             if t.get('shazamed_at') is not None:
@@ -2114,10 +2131,43 @@ def _cover_backfill_status() -> Dict:
     }
 
 
+def _auto_rescan_changed_folders() -> None:
+    """Pick up files added outside the app (e.g. downloaded on soundeo.com into
+    ~/Downloads) without a manual rescan: when a scanned folder changed after the
+    last local scan, rescan just that folder. Checked at most every 30s from the
+    /status poll; one folder per check; never while another job runs."""
+    now = time.time()
+    if now - getattr(app, '_auto_rescan_checked_at', 0) < 30:
+        return
+    app._auto_rescan_checked_at = now
+    if _shazam_any_job_running():
+        return
+    from config_shazam import get_destination_folders
+    from shazam_cache import LOCAL_SCAN_CACHE_PATH
+    try:
+        scanned_at = os.path.getmtime(LOCAL_SCAN_CACHE_PATH)
+    except OSError:
+        return
+    for folder in get_destination_folders():
+        try:
+            changed_at = os.path.getmtime(folder)
+        except OSError:
+            continue
+        if changed_at > scanned_at:
+            logging.info("auto-rescan: %s changed since the last scan", folder)
+            with app.test_request_context(json={'folder_path': folder}):
+                shazam_sync_rescan_folder()
+            return
+
+
 @app.route('/api/shazam-sync/status', methods=['GET'])
 def shazam_sync_status():
     """Return last comparison status. Never return empty when Shazam/local data exists."""
     compare_running = getattr(app, '_shazam_compare_running', False)
+    try:
+        _auto_rescan_changed_folders()
+    except Exception:
+        logging.exception("auto-rescan check failed")
     out = _get_best_available_status()
     out['compare_running'] = compare_running
     _overlay_disk_cover_hashes(out)
@@ -2289,7 +2339,9 @@ def sets_local_matches():
             return os.path.getmtime(p)
         except OSError:
             return 0
-    sig = (_mtime(LOCAL_SCAN_CACHE_PATH), _mtime(SETS_PATH))
+    from shazam_cache import load_status_cache
+    so_titles = (getattr(app, '_shazam_sync_status', None) or load_status_cache() or {}).get('soundeo_titles') or {}
+    sig = (_mtime(LOCAL_SCAN_CACHE_PATH), _mtime(SETS_PATH), len(so_titles))
     cached = getattr(app, '_sets_local_matches_cache', None)
     if not cached or cached[0] != sig:
         matches = {}
@@ -2308,6 +2360,16 @@ def sets_local_matches():
                         m, _ = _find_matching_local_track({'artist': artist, 'title': title}, local_tracks,
                                                           title_word_index=tw_idx, exact_match_map=ex_map, local_canon=lc,
                                                           strict_remix=True)
+                        # Same rule as the Sync reconcile: the file from the linked
+                        # Soundeo page counts, even when it's another version.
+                        so_title = so_titles.get(key) or so_titles.get(key.lower()) or ''
+                        if not (m and m.get('filepath')) and ' - ' in so_title:
+                            so_artist, so_name = so_title.split(' - ', 1)
+                            m2, sc2 = _find_matching_local_track({'artist': so_artist, 'title': so_name}, local_tracks,
+                                                                 title_word_index=tw_idx, exact_match_map=ex_map,
+                                                                 local_canon=lc, strict_remix=True)
+                            if m2 and (sc2 or 0) >= 0.95:
+                                m = m2
                         if m and m.get('filepath'):
                             matches[key] = m['filepath']
             except Exception:
