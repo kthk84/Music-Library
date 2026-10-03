@@ -225,6 +225,7 @@ def like_env(monkeypatch, tmp_path):
     monkeypatch.setattr(sc, "load_shazam_cache", lambda: list(state["shazam"]))
     monkeypatch.setattr(sc, "save_shazam_cache", lambda t: state.__setitem__("shazam", list(t)))
     monkeypatch.setattr(app_module, "_shazam_any_job_running", lambda: True)  # don't spawn threads
+    monkeypatch.setattr(app_module, "_batch_lane_busy", lambda: True)  # searches gate on the search lane
     monkeypatch.setattr(app_module, "_enqueue_single_star",
                         lambda key, artist, title, url, start=True: state["stars"].append((key, url)))
     app_module.app._shazam_sync_status = None

@@ -5523,9 +5523,32 @@ async function shazamSyncFavoritesFromSoundeo() {
     } catch (e) { alert('Error: ' + e.message); }
 }
 
+/** Star lane runs next to search: while a search owns the top-level progress,
+ * finished stars/unstars arrive in p.star_progress.completed. Apply each once. */
+const _shazamStarLaneSeen = {};
+function shazamApplyStarLaneCompletions(sp) {
+    if (!sp || !Array.isArray(sp.completed)) return;
+    let changed = false;
+    sp.completed.forEach(function (c) {
+        const id = c.key + '|' + c.mode + '|' + c.t;
+        if (!c.key || _shazamStarLaneSeen[id]) return;
+        _shazamStarLaneSeen[id] = true;
+        shazamClearActionPendingForKey(c.key);
+        if (c.mode === 'star_single' && (c.starred === true || c.done === 1)) {
+            shazamSetStarredLive(c.key, true);
+            if (c.url) shazamSetUrlLive(c.key, c.url);
+        } else if (c.mode === 'unstar_single' && c.done === 1) {
+            shazamSetStarredLive(c.key, false);
+        }
+        changed = true;
+    });
+    if (changed && shazamLastData) shazamScheduleRenderTrackList(shazamLastData, true);
+}
+
 function shazamPollProgress() {
     fetch('/api/shazam-sync/progress').then(r => r.json()).then(p => {
         shazamCurrentProgress = p;
+        shazamApplyStarLaneCompletions(p.star_progress);
         // Apply incremental per-track updates ASAP so the list updates during the batch (not only at the end).
         // Search global reports urls/not_found/titles/scores/starred in progress payload; merge before any re-render.
         if (p && p.urls) Object.assign(shazamTrackUrls, p.urls);

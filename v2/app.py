@@ -2459,10 +2459,8 @@ def _enqueue_single_star(key: str, artist: str, title: str, track_url: str, star
     item = {'key': key, 'artist': artist, 'title': title, 'track_url': track_url or ''}
     with app._shazam_single_star_queue_lock:
         app._shazam_single_star_queue.append(item)
-        if not start or getattr(app, '_shazam_compare_running', False):
-            return
-        next_item = app._shazam_single_star_queue.pop(0)
-    threading.Thread(target=_run_star_queue_worker, args=(next_item,), daemon=True).start()
+    if start:
+        _kick_star_lane()
 
 
 def _convert_like_to_star_if_pending(status: Dict, key: str, artist: str, title: str, url: str, already_starred: bool) -> bool:
@@ -2589,7 +2587,7 @@ def sets_like():
             app._shazam_single_search_queue_lock = threading.Lock()
         with app._shazam_single_search_queue_lock:
             app._shazam_single_search_queue.append({'artist': artist, 'title': title})
-        if not _shazam_any_job_running():
+        if not _batch_lane_busy():
             _start_next_single_search()
     return jsonify({'ok': True, 'liked': True, 'key': key, 'queued': queued})
 
@@ -3530,10 +3528,20 @@ def shazam_sync_rescan_folder():
 def shazam_sync_progress():
     """Return current automation progress. Includes single_search_queue and star_queue when used."""
     progress = getattr(app, '_shazam_sync_progress', None)
-    if not progress:
+    star_prog = getattr(app, '_shazam_star_progress', None)
+    batch_running = bool((progress or {}).get('running'))
+    # Star lane: top level when no batch runs and it's active or just finished
+    # (the page's star handling reads the top level, as before); nested under
+    # 'star_progress' always, which the page applies while a search runs.
+    star_recent = bool(star_prog) and (star_prog.get('running') or time.time() - (star_prog.get('updated_at') or 0) < 30)
+    if star_prog and not batch_running and star_recent:
+        out = dict(star_prog)
+    elif not progress:
         out = {'running': False, 'current': 0, 'total': 0}
     else:
         out = dict(progress)
+    if star_prog:
+        out['star_progress'] = dict(star_prog)
     lock = getattr(app, '_shazam_single_search_queue_lock', None)
     queue = getattr(app, '_shazam_single_search_queue', None)
     if queue is not None and lock is not None:
@@ -3568,14 +3576,29 @@ def shazam_sync_progress():
 
 
 def _shazam_any_job_running() -> bool:
-    """True if Soundeo automation, compare/rescan, or download queue is running (so only one batch job at a time)."""
-    if getattr(app, '_shazam_download_progress', {}).get('running'):
+    """True if ANY lane (search/sync batch, star, download) or a compare/rescan runs.
+    Gate for compare/rescan, which rebuild the lists and must run alone."""
+    if (getattr(app, '_shazam_download_progress', None) or {}).get('running'):
         return True
-    if getattr(app, '_shazam_sync_progress', {}).get('running'):
+    if (getattr(app, '_shazam_sync_progress', None) or {}).get('running'):
         return True
     if getattr(app, '_shazam_compare_running', False):
         return True
+    if _star_lane_busy():
+        return True
     return False
+
+
+def _batch_lane_busy() -> bool:
+    """Search / sync batch lane (reports via _shazam_sync_progress) or a compare.
+    Gate for searches: they no longer wait for stars or downloads."""
+    if (getattr(app, '_shazam_sync_progress', None) or {}).get('running'):
+        return True
+    return bool(getattr(app, '_shazam_compare_running', False))
+
+
+def _download_lane_busy() -> bool:
+    return bool((getattr(app, '_shazam_download_progress', None) or {}).get('running'))
 
 
 def _apply_download_to_status_and_cache(key: str, filepath: str) -> None:
@@ -3938,20 +3961,25 @@ def _shazam_download_full_queue() -> list:
 
 
 def _shazam_download_start_next() -> bool:
-    """If download not running and no other job, pop one from pending and start worker. Returns True if started."""
-    if _shazam_any_job_running():
+    """Download lane: if no download runs (and no compare), pop one from pending and
+    start the worker. Runs next to search and stars. Returns True if started."""
+    if getattr(app, '_shazam_compare_running', False):
         return False
     lock = getattr(app, '_shazam_download_queue_lock', None)
     if not lock:
         return False
     with lock:
+        if _download_lane_busy():
+            return False
         pending = getattr(app, '_shazam_download_pending_queue', None) or []
         if not pending:
             return False
         key = pending.pop(0)
         app._shazam_download_pending_queue = pending
         remaining = len(pending)
-    prev = getattr(app, '_shazam_download_progress', None) or {}
+        prev = dict(getattr(app, '_shazam_download_progress', None) or {})
+        # Claim the lane inside the lock so two quick clicks can't start two workers.
+        app._shazam_download_progress = dict(prev, running=True)
     # Full batch size: this item + remaining in queue
     batch_total = 1 + remaining
     # When continuing after a previous run (e.g. second of two), preserve done/failed and keep total = full batch
@@ -5061,7 +5089,7 @@ def _run_search_soundeo_global(search_mode: Optional[str] = None):
 @app.route('/api/shazam-sync/sync-favorites-from-soundeo', methods=['POST'])
 def shazam_sync_favorites_from_soundeo():
     """Crawl https://soundeo.com/account/favorites and sync starred state into app (source of truth). Runs in background. Body: { time_range: 'all'|'1_month'|'2_months'|'3_months' } to limit pages scanned (uses selected time range)."""
-    if _shazam_any_job_running():
+    if _batch_lane_busy():
         return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     time_range = 'all'
     if request.get_data():
@@ -5100,7 +5128,7 @@ def shazam_search_soundeo_single():
     with app._shazam_single_search_queue_lock:
         app._shazam_single_search_queue.append(item)
         queue = list(app._shazam_single_search_queue)
-    running = _shazam_any_job_running()
+    running = _batch_lane_busy()
     if running:
         return jsonify({
             'status': 'queued',
@@ -5144,7 +5172,7 @@ def shazam_search_soundeo_single():
 @app.route('/api/shazam-sync/search-soundeo-global', methods=['POST'])
 def shazam_search_soundeo_global():
     """Search all (global). Body: { search_mode: 'unfound'|'new' } — unfound = orange-dot only, new = grey-dot only; omit = both. Runs in background. Poll /api/shazam-sync/progress."""
-    if _shazam_any_job_running():
+    if _batch_lane_busy():
         return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     search_mode = None
     if request.get_data():
@@ -5183,7 +5211,7 @@ def _filter_tracks_by_time_range(tracks: list, time_range: Optional[str]) -> lis
 @app.route('/api/shazam-sync/run-soundeo', methods=['POST'])
 def shazam_sync_run_soundeo():
     """Start background Soundeo automation. Uses selected tracks from body, else to_download filtered by time_range."""
-    if _shazam_any_job_running():
+    if _batch_lane_busy():
         return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     tracks = None
     time_range = 'all'
@@ -5399,70 +5427,100 @@ def _unstar_one_track_impl(key: str, track_url: str):
     return soundeo_ok
 
 
-def _start_next_single_unstar() -> None:
-    """If unstar queue has items, pop one and run in background."""
-    from soundeo_automation import clear_sync_stop_request, is_sync_stop_requested
+# --- Star lane ---------------------------------------------------------------
+# Stars and unstars run in their own lane next to search and downloads, so a ★
+# no longer waits for a 15-minute Search all. Its progress lives in
+# _shazam_star_progress (not the search's _shazam_sync_progress); /progress shows
+# it at top level when no batch runs (page behaviour unchanged) and under
+# 'star_progress' while one does, with a 'completed' list the page applies.
+_STAR_LANE_LOCK = threading.Lock()
 
-    unstar_lock = getattr(app, '_shazam_single_unstar_queue_lock', None)
-    if unstar_lock is None:
-        return
-    if is_sync_stop_requested():
-        with unstar_lock:
-            app._shazam_single_unstar_queue = []
-        clear_sync_stop_request()
-        prog = getattr(app, '_shazam_sync_progress', None) or {}
-        key = prog.get('key') or prog.get('current_key')
-        app._shazam_sync_progress = {
-            'running': False,
-            'stopped': True,
-            'mode': 'unstar_single',
-            'message': 'Stopped. Remaining unstar queue cleared.',
-            'key': key,
-            'done': prog.get('done', 0),
-            'failed': prog.get('failed', 0),
+
+def _star_lane_busy() -> bool:
+    return bool((getattr(app, '_shazam_star_progress', None) or {}).get('running'))
+
+
+def _star_lane_stop_requested() -> bool:
+    """Honour Stop in the star lane only when no batch runs: the stop flag is
+    shared, and clearing it here would keep a running Search all going."""
+    from soundeo_automation import clear_sync_stop_request, is_sync_stop_requested
+    if not is_sync_stop_requested() or _batch_lane_busy():
+        return False
+    for qn, ln in (('_shazam_single_star_queue', '_shazam_single_star_queue_lock'),
+                   ('_shazam_single_unstar_queue', '_shazam_single_unstar_queue_lock')):
+        lock = getattr(app, ln, None)
+        if lock:
+            with lock:
+                setattr(app, qn, [])
+    clear_sync_stop_request()
+    prog = dict(getattr(app, '_shazam_star_progress', None) or {})
+    prog.update({'running': False, 'stopped': True, 'message': 'Stopped. Remaining star/unstar queue cleared.'})
+    app._shazam_star_progress = prog
+    return True
+
+
+def _star_lane_finish(key: str, mode: str, **fields) -> None:
+    """Mark the lane idle and record the finished item (the page applies every
+    entry of 'completed', so a quick next item can't hide this one's result)."""
+    prev = getattr(app, '_shazam_star_progress', None) or {}
+    completed = list(prev.get('completed') or [])[-19:]
+    completed.append(dict({'key': key, 'mode': mode, 't': time.time()}, **fields))
+    verb = 'Starred' if mode == 'star_single' else 'Unstarred'
+    app._shazam_star_progress = dict(fields, running=False, mode=mode, key=key, current_key=key,
+                                     message=f'{verb}: {key}', completed=completed, updated_at=time.time())
+
+
+def _kick_star_lane() -> bool:
+    """Start the next queued star (then unstar) unless the lane is busy or a
+    compare/rescan runs. Claiming the lane is atomic. Returns True if started."""
+    if getattr(app, '_shazam_compare_running', False):
+        return False
+    with _STAR_LANE_LOCK:
+        if _star_lane_busy():
+            return False
+        item = mode = target = None
+        for qn, ln, m, fn in (('_shazam_single_star_queue', '_shazam_single_star_queue_lock', 'star_single', _run_star_queue_worker),
+                              ('_shazam_single_unstar_queue', '_shazam_single_unstar_queue_lock', 'unstar_single', _run_unstar_queue_worker)):
+            lock = getattr(app, ln, None)
+            if not lock:
+                continue
+            with lock:
+                q = getattr(app, qn, None) or []
+                if q:
+                    item = q.pop(0)
+                    setattr(app, qn, q)
+                    mode, target = m, fn
+                    break
+        if item is None:
+            return False
+        key = (item.get('key') or '').strip() or f"{item.get('artist', '')} - {item.get('title', '')}"
+        prev = getattr(app, '_shazam_star_progress', None) or {}
+        verb = 'Starring' if mode == 'star_single' else 'Unstarring'
+        app._shazam_star_progress = {
+            'running': True, 'mode': mode, 'key': key, 'current_key': key,
+            'message': f'{verb}: {key}', 'completed': list(prev.get('completed') or []),
+            'updated_at': time.time(),
         }
+    threading.Thread(target=target, args=(item,), daemon=True).start()
+    return True
+
+
+def _start_next_single_unstar() -> None:
+    """Start the next queued unstar (or star) in the star lane."""
+    if _star_lane_stop_requested():
         return
-    with unstar_lock:
-        queue = getattr(app, '_shazam_single_unstar_queue', None) or []
-        if not queue:
-            prog = getattr(app, '_shazam_sync_progress', None) or {}
-            key = prog.get('key') or prog.get('current_key')
-            app._shazam_sync_progress = dict(prog, running=False, mode='unstar_single', key=key)
-            return
-        item = queue.pop(0)
-        app._shazam_single_unstar_queue = queue
-    # Expose completed key with running=False so frontend can clear pending before next worker overwrites
-    prog = getattr(app, '_shazam_sync_progress', None) or {}
-    completed_key = prog.get('key') or prog.get('current_key')
-    if completed_key:
-        app._shazam_sync_progress = dict(prog, running=False, mode='unstar_single', key=completed_key)
-    thread = threading.Thread(target=_run_unstar_queue_worker, args=(item,), daemon=True)
-    thread.start()
+    _kick_star_lane()
 
 
 def _run_unstar_queue_worker(item: Dict) -> None:
-    """Background: unstar one track, then start next in queue."""
+    """Background: unstar one track, then start the next item in the star lane."""
     key = (item.get('key') or '').strip() or f"{item.get('artist', '')} - {item.get('title', '')}"
     track_url = (item.get('track_url') or '').strip()
-    artist = (item.get('artist') or '').strip()
-    title = (item.get('title') or '').strip()
     try:
-        app._shazam_sync_progress = {
-            'running': True, 'mode': 'unstar_single', 'current_key': key,
-            'message': f'Unstarring: {artist} - {title}', 'key': key,
-        }
         soundeo_ok = _unstar_one_track_impl(key, track_url)
-        app._shazam_sync_progress = {
-            'running': True, 'mode': 'unstar_single', 'current_key': key,
-            'message': f'Unstarring: {artist} - {title}', 'key': key,
-            'done': 1 if soundeo_ok else 0, 'failed': 0 if soundeo_ok else 1,
-        }
+        _star_lane_finish(key, 'unstar_single', done=1 if soundeo_ok else 0, failed=0 if soundeo_ok else 1)
     except Exception as e:
-        app._shazam_sync_progress = {
-            'running': True, 'mode': 'unstar_single', 'current_key': key,
-            'message': f'Unstarring: {artist} - {title}', 'key': key,
-            'done': 0, 'failed': 1, 'error': str(e),
-        }
+        _star_lane_finish(key, 'unstar_single', done=0, failed=1, error=str(e))
     _start_next_single_unstar()
 
 
@@ -5498,37 +5556,13 @@ def shazam_sync_unstar_track():
         app._shazam_single_unstar_queue.append(item)
         queue = list(app._shazam_single_unstar_queue)
 
-    running = _shazam_any_job_running()
-    if running:
-        return jsonify({
-            'ok': True,
-            'status': 'queued',
-            'message': f'Queued unstar: {artist} - {title}',
-            'unstar_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue],
-        })
-
+    started = _kick_star_lane()
     with app._shazam_single_unstar_queue_lock:
-        if not app._shazam_single_unstar_queue:
-            return jsonify({'ok': True, 'status': 'started', 'unstar_queue': []})
-        next_item = app._shazam_single_unstar_queue.pop(0)
         queue_after = list(app._shazam_single_unstar_queue)
-        if getattr(app, '_shazam_compare_running', False):
-            app._shazam_single_unstar_queue.insert(0, next_item)
-            return jsonify({
-                'status': 'queued',
-                'message': f'Queued unstar (compare in progress)',
-                'unstar_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in app._shazam_single_unstar_queue],
-            })
-        app._shazam_single_unstar_queue = queue_after
-
-    thread = threading.Thread(target=_run_unstar_queue_worker, args=(next_item,), daemon=True)
-    thread.start()
-    return jsonify({
-        'ok': True,
-        'status': 'started',
-        'message': f'Unstarring: {next_item.get("artist")} - {next_item.get("title")}',
-        'unstar_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue_after],
-    })
+    qlist = [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue_after]
+    if not started:
+        return jsonify({'ok': True, 'status': 'queued', 'message': f'Queued unstar: {artist} - {title}', 'unstar_queue': qlist})
+    return jsonify({'ok': True, 'status': 'started', 'message': f'Unstarring: {artist} - {title}', 'unstar_queue': qlist})
 
 
 @app.route('/api/shazam-sync/clear-dismissed', methods=['POST'])
@@ -5894,7 +5928,7 @@ def _run_star_batch_background(tracks: List[Dict]) -> None:
 @app.route('/api/shazam-sync/star-batch', methods=['POST'])
 def shazam_sync_star_batch():
     """Star multiple tracks on Soundeo (tracks must have URL). Runs in background. Poll /api/shazam-sync/progress. Body: { tracks: [{ key?, track_url?, artist, title }, ...] }."""
-    if _shazam_any_job_running():
+    if _batch_lane_busy():
         return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     try:
         data = request.get_json(silent=True) or {}
@@ -5921,75 +5955,24 @@ def shazam_sync_star_batch():
 
 
 def _start_next_single_star() -> None:
-    """If single-star queue has items, pop one and run it in a background thread."""
-    from soundeo_automation import clear_sync_stop_request, is_sync_stop_requested
-
-    star_lock = getattr(app, '_shazam_single_star_queue_lock', None)
-    if star_lock is None:
+    """Start the next queued star (or unstar) in the star lane."""
+    if _star_lane_stop_requested():
         return
-    if is_sync_stop_requested():
-        with star_lock:
-            app._shazam_single_star_queue = []
-        clear_sync_stop_request()
-        prog = getattr(app, '_shazam_sync_progress', None) or {}
-        key = prog.get('key') or prog.get('current_key')
-        app._shazam_sync_progress = {
-            'running': False,
-            'stopped': True,
-            'mode': 'star_single',
-            'message': 'Stopped. Remaining star queue cleared.',
-            'key': key,
-            'done': prog.get('done', 0),
-            'failed': prog.get('failed', 0),
-        }
-        return
-    with star_lock:
-        star_queue = getattr(app, '_shazam_single_star_queue', None) or []
-        if not star_queue:
-            prog = getattr(app, '_shazam_sync_progress', None) or {}
-            key = prog.get('key') or prog.get('current_key')
-            app._shazam_sync_progress = dict(prog, running=False, mode='star_single', key=key)
-            return
-        item = star_queue.pop(0)
-        app._shazam_single_star_queue = star_queue
-    # Expose completed key with running=False so frontend can clear pending before next worker overwrites
-    prog = getattr(app, '_shazam_sync_progress', None) or {}
-    completed_key = prog.get('key') or prog.get('current_key')
-    if completed_key:
-        app._shazam_sync_progress = dict(prog, running=False, mode='star_single', key=completed_key)
-    thread = threading.Thread(target=_run_star_queue_worker, args=(item,), daemon=True)
-    thread.start()
+    _kick_star_lane()
 
 
 def _run_star_queue_worker(item: Dict) -> None:
-    """Background: star one track, update progress, then start next in queue."""
+    """Background: star one track, then start the next item in the star lane."""
     key = (item.get('key') or '').strip() or f"{item.get('artist', '')} - {item.get('title', '')}"
     track_url = (item.get('track_url') or '').strip()
     artist = (item.get('artist') or '').strip()
     title = (item.get('title') or '').strip()
-    star_lock = getattr(app, '_shazam_single_star_queue_lock', None)
     try:
-        app._shazam_sync_progress = {
-            'running': True, 'mode': 'star_single', 'current_key': key,
-            'message': f'Starring: {artist} - {title}',
-            'key': key,
-        }
         soundeo_ok, new_url = _star_one_track_impl(key, track_url, artist, title)
-        if star_lock:
-            with star_lock:
-                q = list(getattr(app, '_shazam_single_star_queue', None) or [])
-            app._shazam_sync_progress = {
-                'running': True, 'mode': 'star_single', 'current_key': key,
-                'message': f'Starring: {artist} - {title}',
-                'key': key, 'done': 1 if soundeo_ok else 0, 'failed': 0 if soundeo_ok else 1,
-                'url': new_url, 'starred': soundeo_ok,
-            }
+        _star_lane_finish(key, 'star_single', done=1 if soundeo_ok else 0, failed=0 if soundeo_ok else 1,
+                          url=new_url, starred=soundeo_ok)
     except Exception as e:
-        app._shazam_sync_progress = {
-            'running': True, 'mode': 'star_single', 'current_key': key,
-            'message': f'Starring: {artist} - {title}', 'key': key,
-            'done': 0, 'failed': 1, 'error': str(e),
-        }
+        _star_lane_finish(key, 'star_single', done=0, failed=1, error=str(e))
     _start_next_single_star()
 
 
@@ -6025,35 +6008,13 @@ def shazam_sync_star_track():
         app._shazam_single_star_queue.append(item)
         queue = list(app._shazam_single_star_queue)
 
-    running = _shazam_any_job_running()
-    if running:
-        return jsonify({
-            'status': 'queued',
-            'message': f'Queued: {artist} - {title}',
-            'star_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue],
-        })
-
+    started = _kick_star_lane()
     with app._shazam_single_star_queue_lock:
-        if not app._shazam_single_star_queue:
-            return jsonify({'ok': True, 'status': 'started', 'star_queue': []})
-        next_item = app._shazam_single_star_queue.pop(0)
         queue_after = list(app._shazam_single_star_queue)
-        if getattr(app, '_shazam_compare_running', False):
-            app._shazam_single_star_queue.insert(0, next_item)
-            return jsonify({
-                'status': 'queued',
-                'message': f'Queued: {next_item.get("artist")} - {next_item.get("title")} (compare in progress)',
-                'star_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in app._shazam_single_star_queue],
-            })
-        app._shazam_single_star_queue = queue_after
-
-    thread = threading.Thread(target=_run_star_queue_worker, args=(next_item,), daemon=True)
-    thread.start()
-    return jsonify({
-        'status': 'started',
-        'message': f'Starring: {next_item.get("artist")} - {next_item.get("title")}',
-        'star_queue': [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue_after],
-    })
+    qlist = [{'artist': q.get('artist', ''), 'title': q.get('title', ''), 'key': q.get('key', '')} for q in queue_after]
+    if not started:
+        return jsonify({'status': 'queued', 'message': f'Queued: {artist} - {title}', 'star_queue': qlist})
+    return jsonify({'status': 'started', 'message': f'Starring: {artist} - {title}', 'star_queue': qlist})
 
 
 @app.route('/api/shazam-sync/remove-from-star-queue', methods=['POST'])
@@ -6158,7 +6119,7 @@ def shazam_remove_from_unstar_queue():
 @app.route('/api/shazam-sync/sync-single-track', methods=['POST'])
 def shazam_sync_single_track():
     """Find and star a single track on Soundeo (browser, same as Run Soundeo). Runs in background. Poll /api/shazam-sync/progress. Body: { key, artist, title }"""
-    if _shazam_any_job_running():
+    if _batch_lane_busy():
         return jsonify({'error': 'Another operation is already running. It has been queued.'}), 400
     try:
         data = request.get_json(silent=True) or {}
