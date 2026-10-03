@@ -82,3 +82,13 @@ def test_newer_unstar_still_wins(tmp_path, monkeypatch):
     sc.mark_starred(s2, key, False, ts=200.0)
     sc.save_status_cache(s2)
     assert json.loads(path.read_text())["starred"][key] is False
+
+
+def test_named_remix_conflict():
+    from local_scanner import _named_remix_conflict as c
+    assert c("Loneliness 2010 (Roy Rosenfeld Remix)", "Loneliness (Original Mix)")
+    assert c("This Is Cocaine (Regal Remix)", "This Is Cocaine (Shall Ocin Remix)")
+    assert not c("X (Original Mix)", "X (Extended Mix)")
+    assert not c("X (Marsh Remix)", "X (Marsh Extended Remix)")
+    assert not c("NY Lipps (feat. Nancy Whang) [Kawazaki Dub]", "NY Lipps (feat. Nancy Whang) (Kawazaki Dub)")
+    assert not c("Destination", "Destination (Original Mix)")

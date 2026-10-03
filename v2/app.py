@@ -2274,6 +2274,52 @@ def sets_list():
     return resp
 
 
+@app.route('/api/sets/local-matches', methods=['GET'])
+def sets_local_matches():
+    """{"matches": {"Artist - Title": filepath}} for set tracks found in the scanned
+    local folders. Sets rows only knew "have" via the Shazam list, so a set track
+    downloaded straight from soundeo.com never showed ✓. Cached until the local
+    scan or the sets file changes."""
+    from lib.sets import load_sets, SETS_PATH
+    from shazam_cache import load_local_scan_cache, LOCAL_SCAN_CACHE_PATH
+    from local_scanner import _find_matching_local_track, compute_to_download
+
+    def _mtime(p):
+        try:
+            return os.path.getmtime(p)
+        except OSError:
+            return 0
+    sig = (_mtime(LOCAL_SCAN_CACHE_PATH), _mtime(SETS_PATH))
+    cached = getattr(app, '_sets_local_matches_cache', None)
+    if not cached or cached[0] != sig:
+        matches = {}
+        local_tracks = (load_local_scan_cache() or {}).get('tracks') or []
+        if local_tracks:
+            try:
+                _, tw_idx, ex_map, lc = compute_to_download([], local_tracks)
+                seen = set()
+                for st in load_sets():
+                    for t in st.get('tracks') or []:
+                        artist, title = (t.get('artist') or '').strip(), (t.get('title') or '').strip()
+                        key = f"{artist} - {title}"
+                        if not artist or not title or key in seen:
+                            continue
+                        seen.add(key)
+                        m, _ = _find_matching_local_track({'artist': artist, 'title': title}, local_tracks,
+                                                          title_word_index=tw_idx, exact_match_map=ex_map, local_canon=lc,
+                                                          strict_remix=True)
+                        if m and m.get('filepath'):
+                            matches[key] = m['filepath']
+            except Exception:
+                logging.exception("sets local-matches failed")
+        cached = (sig, matches)
+        app._sets_local_matches_cache = cached
+    live = {k: fp for k, fp in cached[1].items() if os.path.exists(fp)}
+    resp = jsonify({'matches': live})
+    resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
 @app.route('/api/sets/add', methods=['POST'])
 def sets_add():
     """Scrape a tracklist URL into a persisted set. Re-adding the same URL

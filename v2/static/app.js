@@ -5766,6 +5766,8 @@ function _setsTrackState(artist, title) {
     }
     const liked = !!_setsLookup(shazamMaybe, key);
     const pending = !!(shazamActionPending[key] || shazamActionPending[kl]);
+    // Set tracks outside the Shazam list: "have" comes from the local-folder match.
+    if (!have && (setsLocalMatches[key] || setsLocalMatches[kl])) have = true;
     const downloadPending = !!(shazamPendingDownload[key] || shazamPendingDownload[kl]);
     const soundeoTitle = url ? (_setsLookup(shazamSoundeoTitles, key) || null) : null;
     return { key, url, soundeoTitle, starred, have, shazammed, liked, pending, downloadPending };
@@ -5777,6 +5779,18 @@ function _setsTrackState(artist, title) {
 // in sync without the user leaving the tab. Stopped when the tab is left.
 let _setsStatePollInterval = null;
 let _setsStateRefreshInFlight = false;
+let setsLocalMatches = {};
+/** Set tracks found in the scanned local folders (any file, also ones downloaded on soundeo.com). */
+async function setsLoadLocalMatches() {
+    try {
+        const res = await fetch('/api/sets/local-matches');
+        if (!res.ok) return;
+        const data = await res.json();
+        const m = data.matches || {};
+        setsLocalMatches = {};
+        Object.keys(m).forEach(k => { setsLocalMatches[k] = m[k]; setsLocalMatches[k.toLowerCase()] = m[k]; });
+    } catch (e) { /* transient */ }
+}
 /** One /status fetch → merge into the live maps → re-render the Sets rows when
  * anything they show changed. Used by the 5s poll, on tab open and in quick
  * bursts after a ★/❤ click so the result shows as soon as it lands. */
@@ -5797,6 +5811,7 @@ async function setsStateRefresh() {
         shazamLastData = shazamLastData || {};
         if (data.have_locally) shazamLastData.have_locally = data.have_locally;
         if (data.to_download) shazamLastData.to_download = data.to_download;
+        await setsLoadLocalMatches();
         // Re-render only when the state relevant to the visible rows actually
         // changed — an unconditional rebuild every 5s would wipe the playing
         // ▶/⏸ state and hover, and cause needless churn.

@@ -172,6 +172,43 @@ def _different_remix_or_version(shazam_title: str, local_title: str, sim_thresho
     return sim < sim_threshold
 
 
+_GENERIC_VERSION_WORDS = {
+    'original', 'extended', 'club', 'radio', 'mix', 'edit', 'version', 'remix', 'dub',
+    'vocal', 'instrumental', 'rework', 'vip', 'remaster', 'remastered', 'the', 'feat', 'ft',
+}
+
+
+def _named_remix_conflict(shazam_title: str, local_title: str) -> bool:
+    """True when one title names a remixer ("(Roy Rosenfeld Remix)") and the other
+    is the original or a different remixer. Unlike _different_remix_or_version this
+    ignores generic wording, so "(Original Mix)" vs "(Extended Mix)" still match."""
+    import re
+
+    def _groups(title: str) -> List[str]:
+        # Every (...) and [...] group except "feat." credits and catalog IDs.
+        out = []
+        for g in re.findall(r"[\(\[]([^\(\)\[\]]*)[\)\]]", title or ''):
+            g = g.strip().lower()
+            if not g or re.match(r"^(feat|featuring|ft)\b", g) or _is_catalog_id(g):
+                continue
+            out.append(g)
+        return out
+
+    def _remixer(groups: List[str]) -> str:
+        words = [w for g in groups for w in re.findall(r"[a-z0-9]+", g) if w not in _GENERIC_VERSION_WORDS]
+        return ' '.join(words)
+
+    ga, gb = _groups(shazam_title), _groups(local_title)
+    a, b = _remixer(ga), _remixer(gb)
+    if not a and not b:
+        return False
+    if a and b:
+        return not (a == b or a in b or b in a)
+    # Only one side names someone: a conflict when that side is a remix/edit by them.
+    named = ' '.join(ga if a else gb)
+    return any(w in named for w in ('remix', 'edit', 'rework', 'dub', 'bootleg'))
+
+
 def parse_artist_title_from_filename(filename: str) -> Tuple[str, str]:
     """Parse 'Artist - Title' from filename. Returns (artist, title). Handles clean filenames."""
     name = os.path.splitext(filename)[0]
@@ -332,8 +369,11 @@ def _find_matching_local_track(
     title_word_index: Optional[Dict[str, List[int]]] = None,
     exact_match_map: Optional[Dict[Tuple[str, str], Dict]] = None,
     local_canon: Optional[List[Tuple[str, str]]] = None,
+    strict_remix: bool = False,
 ) -> Tuple[Optional[Dict], Optional[float]]:
     """
+    strict_remix: also reject canonical "name vs name" hits whose brackets name a
+    different remixer (Sets matching). Off for the Shazam compare until reviewed.
     Find matching local track for shazam track. Returns (local track dict with filepath, match_score) or (None, None).
     match_score is in [0, 1]; 1.0 = exact, lower = fuzzy. Used for "Manual check" when score < 0.8.
     """
@@ -372,7 +412,8 @@ def _find_matching_local_track(
                 return min(len(s), len(t)) >= _min_artist_contain
             return False
         canon_matches = [lt_dict for (lt, la), lt_dict in zip(local_canon, local_tracks)
-                         if _canon_title_ok(st, lt) and _canon_artist_ok(sa, la)]
+                         if _canon_title_ok(st, lt) and _canon_artist_ok(sa, la)
+                         and not (strict_remix and _named_remix_conflict(track['title'], lt_dict.get('title') or ''))]
         if canon_matches:
             return (_prefer_extended_track(canon_matches), 0.95)
 
