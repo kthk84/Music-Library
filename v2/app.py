@@ -5360,16 +5360,19 @@ def _resolve_track_id(status: Dict, key: str, track_url: str, cookies_path: str)
     """Resolve Soundeo track ID from status cache, URL, or by fetching the track page. Mutates status to store ID when found (single source of truth)."""
     from soundeo_automation import extract_track_id, get_track_id_from_page
     key_lower = key.lower() if isinstance(key, str) else ''
+    # The ID embedded in the URL wins over the cache: a re-search can swap the
+    # URL for a better match while an older ID lingers in track_ids, and then
+    # star/unstar toggled a different track on Soundeo.
+    tid = extract_track_id(track_url) if track_url else None
+    if tid:
+        status.setdefault('track_ids', {})[key] = tid
+        status['track_ids'][key_lower] = tid
+        return tid
     tid = (status.get('track_ids') or {}).get(key) or (status.get('track_ids') or {}).get(key_lower)
     if tid:
         return tid
     if not track_url:
         return None
-    tid = extract_track_id(track_url)
-    if tid:
-        status.setdefault('track_ids', {})[key] = tid
-        status['track_ids'][key_lower] = tid
-        return tid
     tid = get_track_id_from_page(track_url, cookies_path)
     if tid:
         status.setdefault('track_ids', {})[key] = tid
@@ -5396,10 +5399,13 @@ def _set_url_and_track_id(status: Dict, key: str, url: str, cookies_path: Option
     if not cookies_path:
         return
     key_lower = key.lower() if isinstance(key, str) else ''
-    if (status.get('track_ids') or {}).get(key) or (status.get('track_ids') or {}).get(key_lower):
-        return
     from soundeo_automation import extract_track_id, get_track_id_from_page
-    tid = extract_track_id(url) or get_track_id_from_page(url, cookies_path)
+    # A new URL replaces the cached ID; only fetch the page when the URL has no ID.
+    tid = extract_track_id(url)
+    if not tid:
+        if (status.get('track_ids') or {}).get(key) or (status.get('track_ids') or {}).get(key_lower):
+            return
+        tid = get_track_id_from_page(url, cookies_path)
     if tid:
         status.setdefault('track_ids', {})[key] = tid
         status['track_ids'][key_lower] = tid

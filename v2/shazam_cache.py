@@ -390,7 +390,13 @@ def save_status_cache(status: Dict) -> None:
             have_now = list(out.get("have_locally") or [])
             have_keys = {_k(h) for h in have_now if isinstance(h, dict)}
 
-            existing_have = [h for h in (existing_for_merge.get("have_locally") or []) if isinstance(h, dict) and h.get("filepath")]
+            # Only files that still exist: re-adding a deleted file's entry undid
+            # _sanitize_have_locally_filepaths, so every /status poll saved again
+            # (a stale snapshot, which clobbered a just-finished star → ★ never stuck).
+            existing_have = [
+                h for h in (existing_for_merge.get("have_locally") or [])
+                if isinstance(h, dict) and h.get("filepath") and os.path.exists(h["filepath"])
+            ]
             for h in existing_have:
                 kk = _k(h)
                 if kk not in have_keys:
